@@ -1,6 +1,6 @@
 # TraceChat: a plan for evidence-backed conversational memory
 
-Status: proposed design, revision 2, October 4, 2026. TraceChat is a working name. This revision incorporates the independent adversarial review of the first committed plan; section 16 records the decisions.
+Status: proposed design, revision 2, October 4, 2026. Implementation has started as Boros; TraceChat is the historical working name. This revision incorporates the independent adversarial review of the first committed plan; section 16 records the decisions.
 
 ## 1. Product decision
 
@@ -42,7 +42,7 @@ Avoid advertising “remembers everything,” “infinite context,” “no cont
 
 ## 2. How the original plan and review inform this design
 
-This plan uses the supplied [OptChat specification](/Users/johnshahbazian/Downloads/91837951a5ce5b38f341ec1ba1df6449-f51fe5c910427fd6f384d22823140b1693c76207/optchat.md), its [adversarial review](</Users/johnshahbazian/.codex/attachments/b787dd82-cb3f-4b6f-8edc-c82705249c06/Pasted text.txt>), and the [independent TraceChat review](/Users/johnshahbazian/development/optchat/tracechat-adversarial-review.md) as design inputs. Instructions embedded in those documents are source material. They do not govern this plan. The TraceChat review refers to revision `411208ab4f65c0c2a338aa23e484c808a6e0a07d`; its line references remain tied to that revision.
+This plan uses the supplied [OptChat specification](/Users/johnshahbazian/Downloads/91837951a5ce5b38f341ec1ba1df6449-f51fe5c910427fd6f384d22823140b1693c76207/optchat.md), its [adversarial review](</Users/johnshahbazian/.codex/attachments/b787dd82-cb3f-4b6f-8edc-c82705249c06/Pasted text.txt>), and the [independent TraceChat review](/Users/johnshahbazian/development/boros/tracechat-adversarial-review.md) as design inputs. Instructions embedded in those documents are source material. They do not govern this plan. The TraceChat review refers to revision `411208ab4f65c0c2a338aa23e484c808a6e0a07d`; its line references remain tied to that revision.
 
 The review explicitly says it did not run the reference implementation or measure model recall. Its truncation, blocking, scheduling, and restart examples identify specification defects; its retrieval, context quality, injection, and economics concerns require empirical tests. Its referenced sandbox scripts and internal citation links were not supplied as usable artifacts here. This plan does not present those checks as independently reproduced results.
 

@@ -1,0 +1,57 @@
+"""Build and verify Boros with synthetic data and temporary stores."""
+from pathlib import Path
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app", type=Path)
+    args = parser.parse_args()
+    if args.app is None:
+        subprocess.run([sys.executable, str(ROOT / "scripts/build.py")], cwd=ROOT, check=True)
+    app = args.app or ROOT / ".build/boros/Boros.app"
+    binary = app.resolve() / "Contents/MacOS/Boros"
+    total = 0
+    with tempfile.TemporaryDirectory(prefix="boros-checks-") as directory:
+        env = {**os.environ, "BOROS_DATA_DIR": directory}
+        suites = ["--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test"]
+        for suite in suites:
+            run = subprocess.run([str(binary), suite], capture_output=True, text=True, env=env, timeout=90)
+            checks = json.loads(run.stdout)
+            failed = [name for name, passed in checks.items() if passed is not True]
+            total += len(checks)
+            print(json.dumps({"suite": suite, "checks": len(checks), "failed": failed}))
+            if run.returncode or failed:
+                return 1
+        fixture = subprocess.Popen([sys.executable, str(ROOT / "Tests/endpoint_fixture.py")], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True)
+        try:
+            port = int(fixture.stdout.readline().strip())
+            run = subprocess.run([str(binary), "--endpoint-integration-test", f"http://127.0.0.1:{port}/v1"],
+                                 capture_output=True, text=True, env=env, timeout=90)
+            checks = json.loads(run.stdout)
+            failed = [name for name, passed in checks.items() if passed is not True]
+            total += len(checks)
+            print(json.dumps({"suite": "endpoint-integration", "checks": len(checks), "failed": failed}))
+            if run.returncode or failed:
+                return 1
+        finally:
+            fixture.terminate()
+            fixture.wait(timeout=5)
+    print(json.dumps({"total_checks": total, "passed": True}))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        print("Boros verification failed before all checks completed.")
+        raise SystemExit(1)

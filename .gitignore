@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+.migration/
+.swiftpm/
+__pycache__/
+*.pyc
+models/
+*.gguf
+*.safetensors
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
