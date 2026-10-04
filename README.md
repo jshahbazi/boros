@@ -2,7 +2,7 @@
 
 Boros is a native macOS chat application with durable conversational evidence and source retrieval. It starts from the chat GUI built in the user's mcpme experiment and the reviewed TraceChat architecture.
 
-The native foundation is implemented. It targets one local user, text conversations, an explicit project scope, and a local OpenAI-compatible model server. The complete architecture is in [the plan](tracechat-plan.md); implemented capabilities and remaining work are tracked in [implementation status](docs/IMPLEMENTATION.md).
+The native foundation is implemented. It targets one local user, text conversations, an explicit project scope, and a local OpenAI-compatible model server. The complete architecture is in [the plan](tracechat-plan.md); workstream and milestone tables are in [project status](docs/STATUS.md), with detailed boundaries and verification in [implementation status](docs/IMPLEMENTATION.md).
 
 ## Build
 

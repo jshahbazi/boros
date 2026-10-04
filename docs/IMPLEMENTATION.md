@@ -37,7 +37,7 @@ The initial assembler measures serialized message bytes. This is an operational 
 
 ## Model boundary
 
-The selected model is `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, already running in MLX Core. Its model card describes an MLX Serve-specific package; no conversion or download is required for connecting to the running server.
+The selected model is `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, already running in mlx-serve. Its model card describes an MLX Serve-specific package; no conversion or download is required for connecting to the running server.
 
 The user supplied `http://localhost:11234/v1/`. Its `/v1/models` response returned the requested model ID without authentication. The app defaults to that base address and ID; it can store optional server credentials in Keychain. Observed open ports alone are not configuration evidence. The client sends structured role messages and lets the server apply the model's chat template.
 
