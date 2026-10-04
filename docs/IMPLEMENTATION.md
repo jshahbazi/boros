@@ -31,6 +31,8 @@ Human input commits before model dispatch. Assistant output commits on completio
 
 Start with literal and FTS5 lexical search over accepted text. Search results identify original events and expose exact source reads. Semantic indexing and the optional summary tree require subsequent implementation and measured comparisons.
 
+Ordinary Send uses the current request to select up to eight unique alphanumeric terms after removing common English filler words. This bounded local query uses any-term lexical matching within the active project and supplies historical source excerpts through the existing evidence budget. The complete current request remains intact. Manual search retains its all-term matching default. Automatic recall can miss distinctive terms late in a long request or select irrelevant sources for broad queries; it does not establish general long-chat memory quality.
+
 Recent context and historical evidence have separate bounds. Historical excerpts are marked as evidence and remain user-content material. A stored assistant reply has assistant authorship; it does not become human authority. Partial responses retain their capture status.
 
 The initial assembler measures serialized message bytes. This is an operational bound, not the plan's provider-token admission contract. Exact tokenizer admission, full request-envelope accounting, durable invocation snapshots, and evaluation budgets are subsequent work. Provider context errors must remain visible.

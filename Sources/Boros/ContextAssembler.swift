@@ -53,7 +53,8 @@ enum ContextAssembler {
         excludingEventID: String? = nil,
         historicalQuery: String? = nil,
         maximumRecentBytes: Int = 24000,
-        maximumEvidenceBytes: Int = 12000
+        maximumEvidenceBytes: Int = 12000,
+        historicalMatching: LexicalMatchMode = .allTerms
     ) throws -> ContextSnapshot {
         guard budgetBytes > 0, maximumRecentBytes >= 0, maximumRecentBytes <= 180000, maximumEvidenceBytes >= 0 else { throw ContextError.invalidBudget }
         guard try store.listConversations(projectID: projectID).contains(where: { $0.id == conversationID }) else { throw ContextError.scopeMismatch }
@@ -82,7 +83,7 @@ enum ContextAssembler {
         var evidenceText = ""
         if let historicalQuery, !historicalQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, maximumEvidenceBytes > 0 {
             let excluded = Set(selected.map(\.id) + [excludingEventID].compactMap { $0 })
-            let hits = try store.search(query: historicalQuery, projectID: projectID, limit: 16)
+            let hits = try store.search(query: historicalQuery, projectID: projectID, limit: 16, matching: historicalMatching)
             for hit in hits where !excluded.contains(hit.eventID) {
                 let source = """
                     BEGIN HISTORICAL SOURCE

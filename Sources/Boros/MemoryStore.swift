@@ -5,6 +5,7 @@ import CSQLite
 
 enum MemoryRole: String, Codable { case human, assistant }
 enum CaptureStatus: String, Codable { case complete, partial, failed, cancelled }
+enum LexicalMatchMode { case allTerms, anyTerm }
 
 struct StoredConversation: Identifiable, Codable {
     let id: String
@@ -237,14 +238,15 @@ final class MemoryStore: @unchecked Sendable {
     }
 
     /// Queries are converted to quoted lexical terms, never interpolated into
-    /// SQL or accepted as raw FTS syntax. All terms must match a source event.
-    func search(query: String, projectID: String, limit: Int = 8) throws -> [MemoryHit] {
+    /// SQL or accepted as raw FTS syntax. Manual search requires all terms;
+    /// automatic context retrieval may explicitly request any-term matching.
+    func search(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms) throws -> [MemoryHit] {
         try locked {
             try validateSearch(query: query, projectID: projectID, limit: limit)
             let terms = Self.searchTerms(query)
             guard terms.count <= 32 else { throw MemoryError.invalid("lexical search accepts at most 32 terms") }
             guard !terms.isEmpty else { return [] }
-            let expression = terms.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: " AND ")
+            let expression = terms.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: matching == .allTerms ? " AND " : " OR ")
             let sql = "SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=? ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?"
             return try queryEvents(sql, [.text(expression), .text(projectID), .integer(limit)]).map { Self.hit($0, terms: terms) }
         }

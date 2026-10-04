@@ -84,6 +84,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var conversation = Conversation()
     private var pendingPrompt = ""
     private var pendingResponse = ""
+    private var preparedSendObserverForChecks: ((ContextSnapshot) -> Void)?
     private var selectedProfile = ModelProfile.customLocal
     private var sessions: [ModelProfile: ChatSession] = [:]
 
@@ -590,9 +591,13 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         do {
             // Capture the full human message before preparing or dispatching any model request.
             _ = try store.append(conversationID: activeChat.id, role: .human, text: prompt, status: .complete, turnID: turnID, eventID: humanID)
-            let snapshot = try ContextAssembler.prepare(store: store, conversationID: activeChat.id, projectID: projectID,
-                                                       prompt: prompt, system: settings.system, budgetBytes: 65_536, excludingEventID: humanID)
+            let snapshot = try ChatContextPreparation.prepare(store: store, conversationID: activeChat.id, projectID: projectID,
+                                                             prompt: prompt, system: settings.system, excludingEventID: humanID)
             settings.messagesOverride = snapshot.messages.map { ["role": $0.role, "content": $0.content] }
+            if CommandLine.arguments.contains("--ui-self-test"), let observe = preparedSendObserverForChecks {
+                observe(snapshot)
+                return
+            }
             try store.saveDraft(conversationID: activeChat.id, text: "")
             if selectedProfile == .customLocal {
                 preferences.endpointURL = settings.endpointURL
@@ -723,6 +728,78 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         return true
     }
 
+    /// Exercise the same preparation entry point as Send with only synthetic
+    /// events. No model request is made and no message content is printed.
+    private func sendContextChecks(store: MemoryStore) throws -> [String: Bool] {
+        let chat = try store.createConversation(projectID: projectID, title: "Synthetic automatic recall")
+        let otherChat = try store.createConversation(projectID: "synthetic-send-other-project", title: "Synthetic separate scope")
+        let old = try store.append(conversationID: chat.id, role: .human,
+            text: "The heliostat retry delay is seven seconds.", status: .complete,
+            turnID: UUID().uuidString, eventID: UUID().uuidString)
+        let other = try store.append(conversationID: otherChat.id, role: .human,
+            text: "The heliostat retry delay is ninety seconds.", status: .complete,
+            turnID: UUID().uuidString, eventID: UUID().uuidString)
+        for index in 0..<32 {
+            _ = try store.append(conversationID: chat.id, role: .assistant,
+                text: "Synthetic unrelated work log \(index): " + String(repeating: "x", count: 1024), status: .complete,
+                turnID: UUID().uuidString, eventID: UUID().uuidString)
+        }
+        let prompt = "What did we decide about heliostat retry delays?"
+        let previousChat = activeChat
+        let previousDraft = promptView.string
+        defer {
+            preparedSendObserverForChecks = nil
+            activeChat = previousChat
+            replaceDraft(previousDraft)
+        }
+        activeChat = chat
+        replaceDraft(prompt)
+        var submittedSnapshot: ContextSnapshot?
+        preparedSendObserverForChecks = { submittedSnapshot = $0 }
+        sendPrompt()
+        preparedSendObserverForChecks = nil
+        guard let recalled = submittedSnapshot, let current = try store.events(conversationID: chat.id).last,
+              current.role == .human, current.text == prompt else {
+            return ["send_entrypoint_prepares_historical_context": false]
+        }
+        func prepare(_ query: String) throws -> ContextSnapshot {
+            try ChatContextPreparation.prepare(store: store, conversationID: chat.id, projectID: projectID,
+                prompt: query, system: "Synthetic host rule", excludingEventID: current.id)
+        }
+        let recentOnly = try ContextAssembler.prepare(store: store, conversationID: chat.id, projectID: projectID,
+            prompt: prompt, system: "Synthetic host rule", excludingEventID: current.id)
+        var checks: [String: Bool] = [:]
+        checks["send_entrypoint_prepares_historical_context"] = recalled.evidence.contains { $0.eventID == old.id }
+        checks["send_old_source_is_beyond_recent_context"] = recentOnly.omittedRecentCount > 0
+            && !recentOnly.messages.contains { $0.content.contains(old.text) }
+        checks["send_question_retrieves_old_source"] = recalled.evidence.contains { $0.eventID == old.id }
+            && recalled.messages.contains { $0.role == "user" && $0.content.contains("event_id: \(old.id)") && $0.content.contains(old.text) }
+        checks["send_retrieval_preserves_project_scope"] = !recalled.evidence.isEmpty
+            && recalled.evidence.allSatisfy { $0.projectID == projectID && $0.eventID != other.id }
+        checks["send_current_prompt_is_once_and_not_evidence"] = recalled.messages.last?.content == prompt
+            && recalled.messages.filter { $0.content == prompt }.count == 1
+            && !recalled.evidence.contains { $0.eventID == current.id }
+        let fillerQuestion = try prepare("Please could you tell me what it was that we decided about the heliostat retry delays?")
+        checks["send_stopword_heavy_question_recalls_source"] = fillerQuestion.evidence.contains { $0.eventID == old.id }
+        let operatorQuestion = try prepare("heliostat\" OR *")
+        checks["send_search_operators_remain_data"] = operatorQuestion.evidence.map(\.eventID) == [old.id]
+            && operatorQuestion.messages.last?.content == "heliostat\" OR *"
+        checks["manual_search_still_requires_all_terms"] = try store.search(query: "heliostat absentneedle", projectID: projectID).isEmpty
+        let longPrompt = prompt + " " + (0..<80).map { "topic\($0)" }.joined(separator: " ") + " " + String(repeating: "z", count: 4097)
+        let longSnapshot = try prepare(longPrompt)
+        checks["send_long_prompt_retained_with_bounded_retrieval"] = longSnapshot.messages.last?.content == longPrompt
+            && longSnapshot.evidence.contains { $0.eventID == old.id } && longSnapshot.serializedBytes <= 65_536
+        let oversizedTerm = String(repeating: "z", count: 4097) + " heliostat"
+        let oversizedTermSnapshot = try prepare(oversizedTerm)
+        checks["send_oversized_search_term_does_not_block_prompt"] = oversizedTermSnapshot.messages.last?.content == oversizedTerm
+            && oversizedTermSnapshot.evidence.contains { $0.eventID == old.id }
+        let repeatedPrompt = String(repeating: "heliostat ", count: 80)
+        let repeatedSnapshot = try prepare(repeatedPrompt)
+        checks["send_repeated_query_terms_are_bounded"] = repeatedSnapshot.messages.last?.content == repeatedPrompt
+            && repeatedSnapshot.evidence.map(\.eventID) == [old.id]
+        return checks
+    }
+
     // Exercise the actual controls in an undisplayed window. No system input,
     // clipboard changes, model calls, or conversation text leave this process.
     func uiChecks() -> [String: Bool] {
@@ -826,6 +903,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     prompt: "Synthetic follow-up", system: "Synthetic host rule", budgetBytes: 65_536)
                 checks["context_exact_roles_preserved"] = snapshot.messages.contains { $0.role == "user" && $0.content == human.text }
                     && snapshot.messages.last?.content == "Synthetic follow-up"
+                checks.merge(try sendContextChecks(store: store)) { _, new in new }
                 let before = responseView.string
                 modelSelector.selectItem(at: ModelProfile.selectableProfiles.firstIndex(of: .qwen35)!)
                 selectModel()
