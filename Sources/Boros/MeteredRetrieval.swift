@@ -85,6 +85,14 @@ struct MeteredLiteralCoverage: Codable, Equatable {
 enum MeteredRetrieval {
     static let adapterIdentity = "boros.raw_work_v1.memory_operations_v1"
 
+    /// Browser search can return explicitly limited hits without paging them.
+    /// Read-only context/semantic selection has no partial-delivery contract;
+    /// it stops before implicit validation reads or encoder inference.
+    static func requireCompleteReadCoverage(lease: EpisodeLease?, resourceLimited: Bool) throws {
+        guard resourceLimited, let lease else { return }
+        if try lease.checkActive().origin.isLocalRead { throw EpisodeBudgetError.exhausted }
+    }
+
     static func operation<T>(lease: EpisodeLease?, nested: Bool = false, _ body: () throws -> T) throws -> T {
         guard let lease else { return try body() }
         if nested { _ = try lease.checkActive(); return try body() }
@@ -152,6 +160,7 @@ enum MeteredRetrieval {
     /// The caller declares additional matching/preview passes before loading.
     static func load(store: MemoryStore, reference: MemorySourceReference, lease: EpisodeLease,
                      passes: Int = 2) throws -> MemoryEvent {
+        _ = try lease.checkActive(projectID: reference.projectID)
         guard reference.byteCount >= 0, reference.byteCount <= MemoryStore.maximumPayloadBytes, passes >= 2 else { throw MeteredRetrievalError.sourceMismatch }
         let bytes = try checkedProduct(reference.byteCount, passes)
         return try charge(lease: lease, kind: .sourceRead, resources: EpisodeResources(rawSourceBytes: bytes, metadataRows: 1)) {
@@ -163,14 +172,21 @@ enum MeteredRetrieval {
     /// belongs to its composite operation, but repeated bytes remain charged.
     static func read(store: MemoryStore, source: MemorySourceReference, offset: Int, length: Int,
                      lease: EpisodeLease?, nested: Bool = false, examinedPasses: Int = 1) throws -> PayloadPage {
+        _ = try lease?.checkActive(projectID: source.projectID)
         guard offset >= 0, length > 0, length <= MemoryStore.maximumPageBytes,
               source.byteCount >= 0, source.byteCount <= MemoryStore.maximumPayloadBytes,
               offset <= source.byteCount, examinedPasses >= 1 else { throw MemoryError.invalid("invalid metered source page") }
         return try operation(lease: lease, nested: nested) {
+            // The reference's project is caller-supplied. Resolve its actual
+            // scoped identity before reading any payload, even when a forged
+            // reference carries the correct digest of another project's event.
+            guard try sourceMetadata(store: store, lease: lease, maximumRows: 1, {
+                try store.sourceReference(eventID: source.eventID, projectID: source.projectID)
+            }) == source else { throw MeteredRetrievalError.sourceMismatch }
             let bytes = try checkedProduct(length + 1, examinedPasses)
             return try charge(lease: lease, kind: .sourceRead, resources: EpisodeResources(rawSourceBytes: bytes)) {
                 let page = try authoritative(store: store, lease: lease) { try store.read(eventID: source.eventID, offset: offset, length: length) }
-                guard page.eventID == source.eventID, page.digest == source.digest,
+                guard page.eventID == source.eventID, page.offset == offset, page.digest == source.digest,
                       page.totalBytes == source.byteCount, page.status == source.status else { throw MeteredRetrievalError.sourceMismatch }
                 return page
             }
@@ -179,7 +195,8 @@ enum MeteredRetrieval {
 
     static func page(store: MemoryStore, eventID: String, projectID: String, offset: Int, length: Int,
                      lease: EpisodeLease) throws -> PayloadPage {
-        try operation(lease: lease) {
+        _ = try lease.checkActive(projectID: projectID)
+        return try operation(lease: lease) {
             guard let reference = try sourceMetadata(store: store, lease: lease, maximumRows: 1, {
                 try store.sourceReference(eventID: eventID, projectID: projectID)
             }) else { throw MemoryError.missing("scoped source") }
@@ -192,7 +209,8 @@ enum MeteredRetrieval {
                               excludingEventIDs: Set<String> = [], lease: EpisodeLease,
                               continuation: MeteredLexicalContinuation? = nil,
                               nested: Bool = false) throws -> MeteredLexicalReport {
-        try operation(lease: lease, nested: nested) {
+        _ = try lease.checkActive(projectID: projectID)
+        return try operation(lease: lease, nested: nested) {
             guard query.utf8.count <= 4096, (1...100).contains(limit), excludingEventIDs.count <= 10000 else { throw MeteredRetrievalError.invalid }
             let terms = query.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
             guard terms.count <= 32 else { throw MemoryError.invalid("lexical search accepts at most 32 terms") }
@@ -200,13 +218,13 @@ enum MeteredRetrieval {
             let matchingID = matching == .allTerms ? "allTerms" : "anyTerm"
             let frontier: Int, references: [MemorySourceReference], first: Int, windowFull: Bool
             if let continuation {
-                guard continuation.projectID == projectID, continuation.episodeID == lease.episodeID,
+                guard episodeIdentifierEqual(continuation.projectID, projectID), episodeIdentifierEqual(continuation.episodeID, lease.episodeID),
                       continuation.queryDigest == queryDigest, continuation.exclusionsDigest == exclusions,
                       continuation.matching == matchingID, continuation.sourceFrontier >= 0,
                       continuation.candidates.count <= 100, continuation.nextCandidate >= 0,
                       continuation.nextCandidate <= continuation.candidates.count,
                       throughSequence == nil || throughSequence == continuation.sourceFrontier,
-                      continuation.candidates.allSatisfy({ $0.projectID == projectID && $0.sequence > 0 && $0.sequence <= continuation.sourceFrontier && $0.byteCount >= 0 && $0.byteCount <= MemoryStore.maximumPayloadBytes && !excludingEventIDs.contains($0.eventID) }) else { throw MeteredRetrievalError.invalid }
+                      continuation.candidates.allSatisfy({ episodeIdentifierEqual($0.projectID, projectID) && $0.sequence > 0 && $0.sequence <= continuation.sourceFrontier && $0.byteCount >= 0 && $0.byteCount <= MemoryStore.maximumPayloadBytes && !excludingEventIDs.contains($0.eventID) }) else { throw MeteredRetrievalError.invalid }
                 frontier = continuation.sourceFrontier; references = continuation.candidates
                 first = continuation.nextCandidate; windowFull = continuation.candidateWindowFull
             } else {
@@ -248,14 +266,15 @@ enum MeteredRetrieval {
                               throughSequence: Int? = nil, excludingEventIDs: Set<String> = [], lease: EpisodeLease,
                               continuation: MeteredLiteralContinuation? = nil,
                               maximumSources: Int = 1000, nested: Bool = false) throws -> MeteredLiteralReport {
-        try operation(lease: lease, nested: nested) {
+        _ = try lease.checkActive(projectID: projectID)
+        return try operation(lease: lease, nested: nested) {
             guard !query.isEmpty, query.utf8.count <= MemoryStore.maximumPageBytes, (1...100).contains(limit),
                   (1...1000).contains(maximumSources), excludingEventIDs.count <= 10000 else { throw MeteredRetrievalError.invalid }
             let needle = Array(query.utf8), queryDigest = digest(Data(needle)), exclusions = try exclusionDigest(excludingEventIDs)
             let frontier: Int
             var cursor = 0
             if let continuation {
-                guard continuation.projectID == projectID, continuation.episodeID == lease.episodeID,
+                guard episodeIdentifierEqual(continuation.projectID, projectID), episodeIdentifierEqual(continuation.episodeID, lease.episodeID),
                       continuation.queryDigest == queryDigest, continuation.exclusionsDigest == exclusions,
                       continuation.sourceFrontier >= 0, continuation.afterSequence >= 0,
                       continuation.afterSequence <= continuation.sourceFrontier,
@@ -277,7 +296,7 @@ enum MeteredRetrieval {
             }
             var hits: [MemoryHit] = [], inspected = 0, charged = 0, reason: String?
             for source in sources {
-                guard source.projectID == projectID, source.sequence > cursor, source.sequence <= frontier,
+                guard episodeIdentifierEqual(source.projectID, projectID), source.sequence > cursor, source.sequence <= frontier,
                       source.byteCount >= 0, source.byteCount <= MemoryStore.maximumPayloadBytes else { throw MeteredRetrievalError.sourceMismatch }
                 if excludingEventIDs.contains(source.eventID) { cursor = source.sequence; continue }
                 // A page can shorten by three bytes at a UTF-8 boundary. This
@@ -290,7 +309,7 @@ enum MeteredRetrieval {
                 let match: Int? = try charge(lease: lease, kind: .sourceRead, resources: EpisodeResources(rawSourceBytes: bound)) {
                     var hasher = SHA256(), offset = 0, matched = 0, firstMatch: Int?
                     repeat {
-                        _ = try lease.checkActive()
+                        _ = try lease.checkActive(projectID: source.projectID)
                         let page = try authoritative(store: store, lease: lease) { try store.read(eventID: source.eventID, offset: offset, length: MemoryStore.maximumPageBytes) }
                         guard page.digest == source.digest, page.totalBytes == source.byteCount, page.status == source.status,
                               page.offset == offset, page.byteCount > 0 || source.byteCount == 0 else { throw MeteredRetrievalError.sourceMismatch }

@@ -11,6 +11,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = r'''
 import Foundation
+import CryptoKit
 import Darwin
 
 @main
@@ -28,6 +29,13 @@ enum BackupHarness {
                 _ = try owner.reserveEpisodeWork(episodeID: "crash-episode", request: EpisodeWorkRequest(id: "crash-prepared", parentID: nil, kind: .tokenizer, resources: EpisodeResources(httpAttempts: 1), adapterIdentity: "synthetic-backup-kill-adapter", snapshot: body, inputTokensKnown: true), clock: clock)
                 let armed = try owner.reserveEpisodeWork(episodeID: "crash-episode", request: EpisodeWorkRequest(id: "crash-armed", parentID: nil, kind: .calibration, resources: EpisodeResources(inputTokens: 17, outputTokens: 1, modelCalls: 1, httpAttempts: 1), adapterIdentity: "synthetic-backup-kill-adapter", snapshot: body, inputTokensKnown: true), clock: clock)
                 _ = try owner.armEpisodeWork(episodeID: "crash-episode", operationID: armed.id, expectedRevision: armed.revision, clock: clock)
+                let descriptor = Data("synthetic-backup-read-kill-v1".utf8)
+                let descriptorDigest = SHA256.hash(data: descriptor).map { String(format: "%02x", $0) }.joined()
+                let binding = EpisodeLocalReadBinding(initiator: .syntheticEvaluation, purpose: .retrievalProbe, requestID: "crash-read-request", descriptorVersion: "backup-read-kill-v1", descriptorSHA256: descriptorDigest)
+                _ = try owner.beginLocalReadEpisode(episodeID: "crash-read-episode", projectID: "synthetic-crash-backup", binding: binding, limits: .init(), clock: clock)
+                _ = try owner.reserveEpisodeWork(episodeID: "crash-read-episode", request: EpisodeWorkRequest(id: "crash-read-prepared", parentID: nil, kind: .sourceRead, resources: EpisodeResources(memoryOperations: 1, rawSourceBytes: 23), adapterIdentity: "synthetic-backup-read-v1", snapshot: nil, inputTokensKnown: true), clock: clock)
+                let query = try owner.reserveEpisodeWork(episodeID: "crash-read-episode", request: EpisodeWorkRequest(id: "crash-read-armed", parentID: nil, kind: .queryEmbedding, resources: EpisodeResources(modelCalls: 1, encoderInputBytes: 13), adapterIdentity: "synthetic-backup-read-encoder-v1", snapshot: nil, inputTokensKnown: false), clock: clock)
+                _ = try owner.armEpisodeWork(episodeID: query.episodeID, operationID: query.id, expectedRevision: query.revision, clock: clock)
                 var first = true
                 _ = try BackupArchive.create(from: owner, at: destination, cancellation: {
                     if first {
@@ -45,13 +53,19 @@ enum BackupHarness {
                 let episode = try owner.episodeReceipt(id: "crash-episode", clock: clock)
                 let prepared = try owner.episodeWork(episodeID: episode.id, operationID: "crash-prepared")!
                 let armed = try owner.episodeWork(episodeID: episode.id, operationID: "crash-armed")!
+                let readEpisode = try owner.episodeReceipt(id: "crash-read-episode", clock: clock)
+                let readPrepared = try owner.episodeWork(episodeID: readEpisode.id, operationID: "crash-read-prepared")!
+                let readArmed = try owner.episodeWork(episodeID: readEpisode.id, operationID: "crash-read-armed")!
                 let sources = try owner.sourceManifest(projectID: "synthetic-crash-backup", afterSequence: 0, limit: 10)
                 let checks = [
                     "episode_interrupted": episode.state == .interrupted,
                     "accepted_source_survives": sources.count == 1 && sources[0].eventID == "crash-source",
                     "prepared_work_released": prepared.state == .cancelledBeforeDispatch && prepared.charged == .zero && prepared.held == .zero,
                     "armed_usage_stays_unknown": armed.state == .outcomeUnknown && armed.observed == nil && armed.recovered,
-                    "charges_and_output_bound_retained": episode.charged == EpisodeResources(inputTokens: 17, modelCalls: 1, httpAttempts: 1) && episode.held == EpisodeResources(outputTokens: 1)
+                    "charges_and_output_bound_retained": episode.charged == EpisodeResources(inputTokens: 17, modelCalls: 1, httpAttempts: 1) && episode.held == EpisodeResources(outputTokens: 1),
+                    "read_episode_interrupted_without_chat_bindings": readEpisode.state == .interrupted && readEpisode.origin.isLocalRead && readEpisode.conversationID == nil && readEpisode.turnID == nil && readEpisode.humanEventID == nil,
+                    "read_prepared_work_released": readPrepared.state == .cancelledBeforeDispatch && readPrepared.charged == .zero && readPrepared.held == .zero,
+                    "read_armed_encoder_unknown_and_charged": readArmed.state == .outcomeUnknown && readArmed.observed == nil && readArmed.recovered && readEpisode.charged == EpisodeResources(modelCalls: 1, encoderInputBytes: 13) && readEpisode.held == .zero && readEpisode.unknownInputOperations == 1
                 ]
                 print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
                 if checks.values.contains(false) { exit(1) }
@@ -76,7 +90,8 @@ def main():
         harness.write_text(HARNESS)
         binary = scratch / "backup-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "BackupArchive.swift", "BackupCommand.swift", "BackupChecks.swift"
+            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "MeteredRetrieval.swift",
+            "BackupArchive.swift", "BackupCommand.swift", "BackupChecks.swift", "ReadIdentityChecks.swift"
         )]
         # Compile one captured dependency set. Other integration agents may be
         # editing shared Swift sources while this isolated suite is running.

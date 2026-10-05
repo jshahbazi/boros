@@ -96,7 +96,9 @@ def summarize(report: dict) -> dict:
         durations = [row[endpoint + "EndpointMilliseconds"] for row in raw
                      if row[endpoint + "EndpointMilliseconds"] is not None]
         result["raw_source_probe"][endpoint + "EndpointMilliseconds"] = {
-            "p50": percentile(durations, 0.5), "p95": percentile(durations, 0.95), "maximum": max(durations)}
+            "p50": percentile(durations, 0.5) if durations else None,
+            "p95": percentile(durations, 0.95) if durations else None,
+            "maximum": max(durations, default=None)}
     result["raw_source_probe"]["allReturnedReadBytesVerified"] = all(row["exactReadBytesVerified"] for row in raw)
     result["raw_source_probe"]["absenceProbeWithAnyHits"] = sum(
         bool(row["protocols"]["raw_source_probe"]["literalSourceIDs"] or row["protocols"]["raw_source_probe"]["lexicalSourceIDs"])
@@ -104,10 +106,10 @@ def summarize(report: dict) -> dict:
     return result
 
 
-def execute(binary: Path, mode: str, input_path: Path, runtime: Path, scratch: Path) -> dict:
+def execute(binary: Path, mode: str, input_path: Path, runtime: Path, scratch: Path, *, env=None) -> dict:
     output = scratch / (mode + ".json")
     process = subprocess.run([str(binary), mode, str(input_path), str(runtime), str(output)],
-                             capture_output=True, text=True, timeout=900)
+                             capture_output=True, text=True, timeout=900, env=env)
     if process.returncode:
         raise RuntimeError("Swift synthetic evaluation did not complete; no content diagnostics are emitted")
     return json.loads(output.read_text())
@@ -199,7 +201,7 @@ def main() -> None:
                     "fixtureSet": corpus, "implementation": implementation, "hardware": full["hardware"],
                     "profiles": profiles,
                     "limitations": ["historical protocol source pins are not applied in this explicit contract-only mode",
-                                    "episode dependencies compile; the harness still uses unmetered nil-lease retrieval",
+                                    "each retrieval protocol uses an isolated durable read episode; answering token feasibility remains unknown",
                                     "no registered source-coverage, answer quality, latency, cost, or deployment claims"]}
         if args.output is None:
             args.output = ROOT / (".build/evaluation/unregistered-contract-latest.json" if args.contract_only

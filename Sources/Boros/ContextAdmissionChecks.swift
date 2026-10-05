@@ -96,6 +96,50 @@ enum ContextAdmissionChecks {
         checks.merge(try meteredLiteralChecks(store: store)) { _, new in new }
         checks.merge(try meteredLargeCandidateChecks(store: store)) { _, new in new }
         checks.merge(try sqliteFenceChecks(store: store)) { _, new in new }
+        checks.merge(try standaloneScopeChecks(store: store, semantic: semantic)) { _, new in new }
+        checks.merge(try ReadCoverageChecks.run(store: store, semantic: semantic)) { _, new in new }
+        return checks
+    }
+
+    private static func standaloneScopeChecks(store: MemoryStore, semantic: SemanticIndex) throws -> [String: Bool] {
+        let clock = SystemEpisodeClock(), id = UUID().uuidString
+        let binding = EpisodeLocalReadBinding(version: "local-read-v1", initiator: .syntheticEvaluation,
+            purpose: .contextSelection, requestID: id, descriptorVersion: "scope-fixture-v1",
+            descriptorSHA256: MeteredRetrieval.digest(Data("synthetic scope fixture".utf8)))
+        _ = try store.beginLocalReadEpisode(episodeID: id, projectID: "synthetic", binding: binding,
+            limits: EpisodeLimits(), clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: id, clock: clock)
+        let foreign = try store.sourceReference(eventID: "foreign-event", projectID: "other-synthetic")!
+        let manifest = try semantic.search(query: "Foreign", projectID: "other-synthetic", includeLiteral: false)
+        let attempts: [(String, () throws -> Void)] = [
+            ("read_scope_lexical_before_metadata", { _ = try MeteredRetrieval.lexicalSearch(store: store, query: "Foreign", projectID: foreign.projectID, lease: lease) }),
+            ("read_scope_literal_before_metadata", { _ = try MeteredRetrieval.literalSearch(store: store, query: "Foreign", projectID: foreign.projectID, lease: lease) }),
+            ("read_scope_source_load_before_payload", { _ = try MeteredRetrieval.load(store: store, reference: foreign, lease: lease) }),
+            ("read_scope_page_before_payload", { _ = try MeteredRetrieval.page(store: store, eventID: foreign.eventID, projectID: foreign.projectID, offset: 0, length: 32, lease: lease) }),
+            ("read_scope_reference_before_payload", { _ = try MeteredRetrieval.read(store: store, source: foreign, offset: 0, length: 32, lease: lease) }),
+            ("read_scope_context_before_conversation", { _ = try ContextAssembler.prepare(store: store, conversationID: foreign.conversationID, projectID: foreign.projectID, prompt: "Synthetic", system: "Synthetic", episodeLease: lease) }),
+            ("read_scope_chat_helper_before_conversation", { _ = try ChatContextPreparation.prepare(store: store, conversationID: foreign.conversationID, projectID: foreign.projectID, prompt: "Synthetic", system: "Synthetic", excludingEventID: "absent", episodeLease: lease) }),
+            ("read_scope_semantic_before_encoder", { _ = try semantic.search(query: "Foreign", projectID: foreign.projectID, episodeLease: lease) }),
+            ("read_scope_replay_before_manifest", { _ = try semantic.replay(manifestID: manifest.manifestID, projectID: foreign.projectID, episodeLease: lease) })
+        ]
+        var checks: [String: Bool] = [:]
+        for (name, action) in attempts {
+            do { try action(); checks[name] = false }
+            catch { checks[name] = (error as? EpisodeBudgetError)?.failureCode == "episode_scope_mismatch" }
+        }
+        let beforeForgery = try lease.checkActive()
+        checks["read_scope_rejection_inspects_no_resources"] = beforeForgery.charged == .zero && beforeForgery.held == .zero
+        let forged = MemorySourceReference(sequence: foreign.sequence, eventID: foreign.eventID,
+            conversationID: foreign.conversationID, projectID: "synthetic", role: foreign.role, status: foreign.status,
+            createdAt: foreign.createdAt, digest: foreign.digest, byteCount: foreign.byteCount)
+        do {
+            _ = try MeteredRetrieval.read(store: store, source: forged, offset: 0, length: 32, lease: lease)
+            checks["read_scope_forged_project_reference_rejected"] = false
+        } catch { checks["read_scope_forged_project_reference_rejected"] = error is MeteredRetrievalError }
+        let afterForgery = try lease.checkActive()
+        checks["read_scope_forgery_never_charges_payload"] = afterForgery.charged.rawSourceBytes == 0
+            && afterForgery.held.rawSourceBytes == 0 && afterForgery.charged.metadataRows == 1
+        _ = try lease.finish(reason: .completed)
         return checks
     }
 

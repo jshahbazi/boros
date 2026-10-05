@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import CSQLite
+import CryptoKit
 
 /// Synthetic fixtures exercise the durable lifecycle and accounting, without
 /// reading or printing captured user content or request snapshots.
@@ -159,6 +160,11 @@ enum EpisodeChecks {
         // A separately scoped fixture can release all leases for reopen.
         checks.merge(try recoveryChecks()) { _, new in new }
         checks.merge(try migrationChecks()) { _, new in new }
+        checks.merge(try readEpisodeChecks()) { _, new in new }
+        checks.merge(try schemaThreeMigrationChecks()) { _, new in new }
+        checks.merge(try malformedStoredOriginChecks()) { _, new in new }
+        checks.merge(try binaryIdentityChecks()) { _, new in new }
+        checks.merge(try unicodeLegacyMigrationChecks()) { _, new in new }
         checks.merge(try snapshotChecks()) { _, new in new }
         checks["episode_recovery_work_ids_available"] = preparedRecovery.state == .prepared && armedRecovery.state == .dispatchArmed
         checks["episode_parent_cross_scope_rejected"] = rejected { _ = try recoverPrepared.prepare(kind: .sourceRead, resources: EpisodeResources(rawSourceBytes: 1), adapterIdentity: "synthetic-source", parentID: armedRecovery.id) }
@@ -229,6 +235,415 @@ enum EpisodeChecks {
             "episode_schema_two_legacy_stream_recovers_partial": invocation?.finalStatus == .partial && invocation?.terminalReason == .interrupted && invocation?.recovered == true,
             "episode_schema_two_migration_archive_validator_passes": try validate(directory)
         ]
+    }
+    private static func inspect<T>(_ directory: URL, _ body: (OpaquePointer) throws -> T) throws -> T {
+        var database: OpaquePointer?
+        guard sqlite3_open(directory.appendingPathComponent("memory.sqlite3").path, &database) == SQLITE_OK, let handle = database else { throw MemoryError.database("could not inspect synthetic database") }
+        defer { sqlite3_close(handle) }
+        return try body(handle)
+    }
+    private static func scalar(_ database: OpaquePointer, _ sql: String) throws -> String {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw MemoryError.database("could not prepare synthetic inspection") }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw MemoryError.database("synthetic inspection has no result") }
+        guard let text = sqlite3_column_text(statement, 0) else { return "" }
+        return String(cString: text)
+    }
+    private static func readEpisodeChecks() throws -> [String: Bool] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-read-episode-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try MemoryStore(directory: directory), clock = Clock()
+        let binding = EpisodeLocalReadBinding(initiator: .humanBrowser, purpose: .searchInitialPage,
+            requestID: "read-request", descriptorVersion: "browser-search-v1", descriptorSHA256: SHA256.hash(data: Data("synthetic query".utf8)).map { String(format: "%02x", $0) }.joined())
+        let first = try owner.beginLocalReadEpisode(episodeID: "read", projectID: "project-a", binding: binding, limits: .init(), clock: clock.now())
+        let lease = EpisodeLease(ledger: owner, episodeID: "read", clock: clock)
+        clock.ticks += 1_000_000_000
+        let replay = try owner.beginLocalReadEpisode(episodeID: "read", projectID: "project-a", binding: binding, limits: .init(), clock: clock.now())
+        var checks: [String: Bool] = [
+            "read_episode_no_chat_binding": first.conversationID == nil && first.turnID == nil && first.humanEventID == nil && first.origin == .localRead(binding),
+            "read_episode_initiation_replay_retains_original_deadline": first == replay,
+            "read_episode_wrong_project_explicitly_rejected": rejected(.scopeMismatch) { _ = try lease.checkActive(projectID: "project-b") },
+            "read_episode_correct_project_active": try lease.checkActive(projectID: "project-a").state == .active,
+            "read_episode_changed_project_conflicts": rejected(.conflict) { _ = try owner.beginLocalReadEpisode(episodeID: "read", projectID: "project-b", binding: binding, limits: .init(), clock: clock.now()) }
+        ]
+        let changed = EpisodeLocalReadBinding(initiator: .humanBrowser, purpose: .sourcePage, requestID: binding.requestID,
+            descriptorVersion: binding.descriptorVersion, descriptorSHA256: binding.descriptorSHA256)
+        checks["read_episode_changed_descriptor_purpose_conflicts"] = rejected(.conflict) { _ = try owner.beginLocalReadEpisode(episodeID: "read", projectID: "project-a", binding: changed, limits: .init(), clock: clock.now()) }
+        var changedLimits = EpisodeLimits(); changedLimits.resources.memoryOperations -= 1
+        checks["read_episode_changed_limits_conflict"] = rejected(.conflict) { _ = try owner.beginLocalReadEpisode(episodeID: "read", projectID: "project-a", binding: binding, limits: changedLimits, clock: clock.now()) }
+        for kind: EpisodeWorkKind in [.answer, .calibration, .nativeInference, .providerDiscovery, .tokenizer] {
+            let resources = [.answer, .calibration, .nativeInference].contains(kind) ? EpisodeResources(modelCalls: 1) : EpisodeResources(httpAttempts: 1)
+            checks["read_episode_" + kind.rawValue + "_denied"] = rejected(.invalid) { _ = try lease.prepare(kind: kind, resources: resources, adapterIdentity: "synthetic-read-forbidden") }
+        }
+        checks["read_episode_encoder_output_budget_denied"] = rejected(.invalid) {
+            _ = try lease.prepare(kind: .queryEmbedding, resources: EpisodeResources(outputTokens: 1, modelCalls: 1), adapterIdentity: "synthetic-disguised-generation")
+        }
+        checks["read_episode_forbidden_work_leaves_budget_untouched"] = try lease.checkActive().charged == .zero && lease.checkActive().held == .zero
+        for kind: EpisodeWorkKind in [.retrieval, .sourceRead, .queryEmbedding] {
+            let resources = kind == .queryEmbedding ? EpisodeResources(modelCalls: 1, encoderInputBytes: 4) : EpisodeResources(memoryOperations: 1, rawSourceBytes: 8)
+            let work = try lease.prepare(kind: kind, resources: resources, adapterIdentity: "synthetic-read-allowed", inputTokensKnown: kind != .queryEmbedding)
+            _ = try lease.settle(lease.dispatch(work) {}, outcome: .completed)
+            checks["read_episode_" + kind.rawValue + "_allowed"] = try owner.episodeWork(episodeID: "read", operationID: work.id)?.state == .completed
+        }
+        checks["read_episode_opaque_encoder_reports_unknown"] = try lease.checkActive().unknownInputOperations == 1
+        let terminal = try lease.finish(reason: .completed)
+        clock.ticks += 120_000_000_000
+        let terminalReplay = try owner.beginLocalReadEpisode(episodeID: "read", projectID: "project-a", binding: binding, limits: .init(), clock: clock.now())
+        checks["read_episode_terminal_replay_does_not_renew"] = terminalReplay == terminal && terminalReplay.deadlineNanoseconds == first.deadlineNanoseconds
+        checks["read_episode_stable_request_cannot_gain_second_allowance"] = rejected(.conflict) {
+            _ = try owner.beginLocalReadEpisode(episodeID: "second-read", projectID: "project-a", binding: binding, limits: .init(), clock: clock.now())
+        }
+        checks["read_episode_stable_request_cannot_change_project_with_new_episode"] = rejected(.conflict) {
+            _ = try owner.beginLocalReadEpisode(episodeID: "second-scope-read", projectID: "project-b", binding: binding, limits: .init(), clock: clock.now())
+        }
+        checks["read_episode_stable_request_cannot_change_descriptor_with_new_episode"] = rejected(.conflict) {
+            _ = try owner.beginLocalReadEpisode(episodeID: "second-descriptor-read", projectID: "project-a", binding: changed, limits: .init(), clock: clock.now())
+        }
+
+        checks["read_episode_creates_no_source_conversation_or_invocation"] = try inspect(directory) {
+            try scalar($0, "SELECT (SELECT count(*) FROM conversations)+(SELECT count(*) FROM events)+(SELECT count(*) FROM invocations)") == "0"
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let encoded = try encoder.encode(EpisodeOrigin.localRead(binding))
+        checks["read_episode_origin_roundtrip"] = try JSONDecoder().decode(EpisodeOrigin.self, from: encoded) == .localRead(binding)
+        let object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        for mutation in ["unknownKey", "badVersion", "mixedChat", "missingBinding", "uppercaseDigest", "badDescriptorVersion", "badInitiator"] {
+            var altered = object
+            switch mutation {
+            case "unknownKey": altered["extra"] = "unexpected"
+            case "badVersion": altered["version"] = "future"
+            case "mixedChat": altered["conversationID"] = "unexpected-chat"
+            case "missingBinding": altered.removeValue(forKey: "binding")
+            default:
+                var nested = altered["binding"] as! [String: Any]
+                if mutation == "uppercaseDigest" { nested["descriptorSHA256"] = String(repeating: "A", count: 64) }
+                if mutation == "badDescriptorVersion" { nested["descriptorVersion"] = "invalid version" }
+                if mutation == "badInitiator" { nested["initiator"] = "externalClient" }
+                altered["binding"] = nested
+            }
+            let bytes = try JSONSerialization.data(withJSONObject: altered)
+            checks["read_episode_origin_" + mutation + "_rejects"] = rejected { _ = try JSONDecoder().decode(EpisodeOrigin.self, from: bytes) }
+        }
+        checks["read_episode_archive_validator_accepts_null_chat_scope"] = try validate(directory)
+        checks["read_episode_request_replay_uses_bounded_index"] = try inspect(directory) { database in
+            var statement: OpaquePointer?
+            let sql = "EXPLAIN QUERY PLAN SELECT id FROM episodes WHERE json_extract(origin_json,'$.kind')='localRead' AND json_extract(origin_json,'$.binding.initiator')='humanBrowser' AND json_extract(origin_json,'$.binding.requestID')='read-request'"
+            guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw MemoryError.database("could not inspect local-read index plan") }
+            defer { sqlite3_finalize(statement) }
+            var usesIndex = false
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let detail = sqlite3_column_text(statement, 3) { usesIndex = usesIndex || String(cString: detail).contains("episode_local_read_request") }
+            }
+            return usesIndex
+        }
+        let requestRace = RaceCounts()
+        let raceBinding = EpisodeLocalReadBinding(initiator: .humanBrowser, purpose: .searchInitialPage, requestID: "read-race-request",
+            descriptorVersion: binding.descriptorVersion, descriptorSHA256: binding.descriptorSHA256)
+        DispatchQueue.concurrentPerform(iterations: 16) { index in
+            do {
+                _ = try owner.beginLocalReadEpisode(episodeID: "read-race-\(index)", projectID: "project-a", binding: raceBinding, limits: .init(), clock: clock.now())
+                requestRace.record(true)
+            } catch { requestRace.record(false) }
+        }
+        checks["read_episode_duplicate_request_race_admits_one_allowance"] = requestRace.accepted == 1 && requestRace.rejected == 15
+
+        let cancelBinding = EpisodeLocalReadBinding(initiator: binding.initiator, purpose: binding.purpose, requestID: "cancel-request",
+            descriptorVersion: binding.descriptorVersion, descriptorSHA256: binding.descriptorSHA256)
+        let active = try owner.beginLocalReadEpisode(episodeID: "local-cancel", projectID: "project-a", binding: cancelBinding, limits: .init(), clock: clock.now())
+        let locallyCancelled = EpisodeLease(ledger: owner, episodeID: active.id, clock: clock)
+        let fence = try locallyCancelled.progressGuard()
+        locallyCancelled.interruptLocally(reason: .cancelled)
+        checks["read_episode_immediate_local_cancel_fences_work"] = rejected(.inactive) { _ = try locallyCancelled.checkActive() }
+        checks["read_episode_immediate_local_cancel_interrupts_sql"] = fence.interruption()?.failureCode == EpisodeBudgetError.inactive.failureCode
+        _ = try locallyCancelled.finish(reason: .cancelled)
+        checks["read_episode_local_cancel_durably_terminalizes"] = try owner.episodeReceipt(id: active.id, clock: clock.now()).state == .cancelled
+        let chat = try owner.createConversation(projectID: "project-a", title: "Explicit synthetic chat for link denial")
+        _ = try owner.append(conversationID: chat.id, role: .human, text: "Synthetic chat input", status: .complete, turnID: "borrowed-turn", eventID: "borrowed-human")
+        let linkBinding = EpisodeLocalReadBinding(initiator: binding.initiator, purpose: binding.purpose, requestID: "link-request",
+            descriptorVersion: binding.descriptorVersion, descriptorSHA256: binding.descriptorSHA256)
+        _ = try owner.beginLocalReadEpisode(episodeID: "read-link", projectID: "project-a", binding: linkBinding, limits: .init(), clock: clock.now())
+        let readLease = EpisodeLease(ledger: owner, episodeID: "read-link", clock: clock)
+        let readWork = try readLease.prepare(kind: .sourceRead, resources: EpisodeResources(rawSourceBytes: 4), adapterIdentity: "synthetic-read-link", snapshot: Data("{\"messages\":[]}".utf8))
+        checks["read_episode_invocation_link_denied"] = rejected {
+            _ = try owner.beginInvocation(invocationID: "forbidden-read-invocation", conversationID: chat.id,
+                turnID: "borrowed-turn", humanEventID: "borrowed-human", assistantEventID: "forbidden-read-assistant",
+                providerIdentity: "native:synthetic", requestBody: Data("{\"messages\":[]}".utf8), episodeID: "read-link", episodeWorkID: readWork.id)
+        }
+        checks["read_episode_denied_invocation_publishes_no_journal_or_source"] = try owner.invocation(id: "forbidden-read-invocation") == nil
+            && owner.events(conversationID: chat.id).count == 1
+        checks["read_episode_chat_origin_cannot_reuse_read_identity"] = rejected(.conflict) {
+            _ = try owner.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "origin-change", humanEventID: "origin-change-human",
+                episodeID: "read-link", text: "Synthetic refused chat capture", limits: .init(), clock: clock.now())
+        }
+        checks["read_episode_denied_chat_origin_does_not_capture"] = try owner.events(conversationID: chat.id).count == 1
+        _ = try owner.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "chat-origin", humanEventID: "chat-origin-human",
+            episodeID: "chat-origin", text: "Synthetic accepted chat capture", limits: .init(), clock: clock.now())
+        checks["read_episode_read_origin_cannot_reuse_chat_identity"] = rejected(.conflict) {
+            _ = try owner.beginLocalReadEpisode(episodeID: "chat-origin", projectID: "project-a", binding: binding, limits: .init(), clock: clock.now())
+        }
+        return checks
+    }
+    private static func binaryIdentityChecks() throws -> [String: Bool] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-binary-identities-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var owner: MemoryStore? = try MemoryStore(directory: directory)
+        let clock = Clock(), composed = "caf\u{00e9}", decomposed = "cafe\u{0301}"
+        var checks: [String: Bool] = [
+            "episode_unicode_fixture_has_canonical_equivalence_distinct_bytes": composed == decomposed && !episodeIdentifierEqual(composed, decomposed),
+            "episode_unicode_optional_identity_distinct_bytes": !episodeIdentifierEqual(Optional(composed), Optional(decomposed)) && episodeIdentifierEqual(nil, nil)
+        ]
+        let bindingA = EpisodeLocalReadBinding(initiator: .syntheticEvaluation, purpose: .retrievalProbe,
+            requestID: "request-" + composed, descriptorVersion: "unicode-identity-v1", descriptorSHA256: String(repeating: "a", count: 64))
+        let bindingB = EpisodeLocalReadBinding(initiator: bindingA.initiator, purpose: bindingA.purpose,
+            requestID: "request-" + decomposed, descriptorVersion: bindingA.descriptorVersion, descriptorSHA256: bindingA.descriptorSHA256)
+        checks["episode_unicode_binding_and_origin_equality_preserves_bytes"] = bindingA != bindingB && EpisodeOrigin.localRead(bindingA) != .localRead(bindingB)
+            && EpisodeOrigin.chat(conversationID: composed, turnID: "t", humanEventID: "h") != .chat(conversationID: decomposed, turnID: "t", humanEventID: "h")
+        let episodeA = "read-" + composed, episodeB = "read-" + decomposed
+        let receiptA = try owner!.beginLocalReadEpisode(episodeID: episodeA, projectID: composed, binding: bindingA, limits: .init(), clock: clock.now())
+        let receiptB = try owner!.beginLocalReadEpisode(episodeID: episodeB, projectID: decomposed, binding: bindingB, limits: .init(), clock: clock.now())
+        checks["episode_unicode_request_index_preserves_distinct_byte_ids"] = receiptA != receiptB
+            && episodeIdentifierEqual(receiptA.id, episodeA) && episodeIdentifierEqual(receiptB.id, episodeB)
+            && episodeIdentifierEqual(receiptA.projectID, composed) && episodeIdentifierEqual(receiptB.projectID, decomposed)
+        checks["episode_unicode_exact_initiation_replay_idempotent"] = try owner!.beginLocalReadEpisode(episodeID: episodeA, projectID: composed, binding: bindingA, limits: .init(), clock: clock.now()) == receiptA
+        checks["episode_unicode_changed_project_bytes_replay_conflicts"] = rejected(.conflict) {
+            _ = try owner!.beginLocalReadEpisode(episodeID: episodeA, projectID: decomposed, binding: bindingA, limits: .init(), clock: clock.now())
+        }
+        checks["episode_unicode_changed_request_bytes_replay_conflicts"] = rejected(.conflict) {
+            _ = try owner!.beginLocalReadEpisode(episodeID: episodeA, projectID: composed, binding: bindingB, limits: .init(), clock: clock.now())
+        }
+        var unicodeLimitsA = EpisodeLimits(); unicodeLimitsA.version = composed
+        var unicodeLimitsB = EpisodeLimits(); unicodeLimitsB.version = decomposed
+        let limitsBinding = EpisodeLocalReadBinding(initiator: .syntheticEvaluation, purpose: .retrievalProbe,
+            requestID: "limits-request", descriptorVersion: "unicode-identity-v1", descriptorSHA256: String(repeating: "b", count: 64))
+        _ = try owner!.beginLocalReadEpisode(episodeID: "unicode-limits", projectID: composed, binding: limitsBinding, limits: unicodeLimitsA, clock: clock.now())
+        checks["episode_unicode_changed_limit_version_bytes_replay_conflicts"] = unicodeLimitsA != unicodeLimitsB && rejected(.conflict) {
+            _ = try owner!.beginLocalReadEpisode(episodeID: "unicode-limits", projectID: composed, binding: limitsBinding, limits: unicodeLimitsB, clock: clock.now())
+        }
+        let workA = try owner!.reserveEpisodeWork(episodeID: episodeA, request: EpisodeWorkRequest(id: "work-" + composed, parentID: nil,
+            kind: .retrieval, resources: EpisodeResources(memoryOperations: 1, rawSourceBytes: 8), adapterIdentity: composed, snapshot: nil, inputTokensKnown: true), clock: clock.now())
+        let workB = try owner!.reserveEpisodeWork(episodeID: episodeB, request: EpisodeWorkRequest(id: "work-" + decomposed, parentID: nil,
+            kind: .retrieval, resources: EpisodeResources(memoryOperations: 1, rawSourceBytes: 12), adapterIdentity: decomposed, snapshot: nil, inputTokensKnown: true), clock: clock.now())
+        checks["episode_unicode_changed_adapter_bytes_work_replay_conflicts"] = rejected(.conflict) {
+            _ = try owner!.reserveEpisodeWork(episodeID: episodeA, request: EpisodeWorkRequest(id: workA.id, parentID: nil,
+                kind: .retrieval, resources: workA.request.resources, adapterIdentity: decomposed, snapshot: nil, inputTokensKnown: true), clock: clock.now())
+        }
+        checks["episode_unicode_cross_episode_reservation_replay_denied"] = rejected(.conflict) {
+            _ = try owner!.reserveEpisodeWork(episodeID: episodeB, request: workA.request, clock: clock.now())
+        }
+        checks["episode_unicode_cross_episode_settlement_denied"] = rejected {
+            _ = try owner!.settleEpisodeWork(episodeID: episodeB, operationID: workA.id,
+                settlement: EpisodeWorkSettlement(receiptID: "cross-unicode-receipt", outcome: .cancelledBeforeDispatch, observed: nil, evidence: nil), clock: clock.now())
+        }
+        checks["episode_unicode_denied_linkage_preserves_separate_reservations"] = try owner!.episodeReceipt(id: episodeA, clock: clock.now()).held.rawSourceBytes == 8
+            && owner!.episodeReceipt(id: episodeB, clock: clock.now()).held.rawSourceBytes == 12
+        checks["episode_unicode_cross_episode_work_read_denied"] = rejected(.conflict) {
+            _ = try owner!.episodeWork(episodeID: episodeB, operationID: workA.id)
+        }
+        checks["episode_unicode_cross_episode_work_arm_denied"] = rejected {
+            _ = try owner!.armEpisodeWork(episodeID: episodeB, operationID: workA.id, expectedRevision: workA.revision, clock: clock.now())
+        }
+        checks["episode_unicode_cross_episode_parent_denied"] = rejected {
+            _ = try owner!.reserveEpisodeWork(episodeID: episodeB, request: EpisodeWorkRequest(id: "bad-unicode-parent", parentID: workA.id,
+                kind: .sourceRead, resources: .zero, adapterIdentity: "synthetic", snapshot: nil, inputTokensKnown: true), clock: clock.now())
+        }
+        var handoffs = 0
+        checks["episode_unicode_cross_episode_handoff_denied_before_start"] = rejected {
+            _ = try owner!.performEpisodeHandoff(episodeID: episodeB, operationID: workA.id, expectedRevision: workA.revision, clock: clock.now()) { handoffs += 1 }
+        } && handoffs == 0
+        for work in [workA, workB] {
+            _ = try owner!.armEpisodeWork(episodeID: work.episodeID, operationID: work.id, expectedRevision: work.revision, clock: clock.now())
+            _ = try owner!.settleEpisodeWork(episodeID: work.episodeID, operationID: work.id,
+                settlement: EpisodeWorkSettlement(receiptID: "receipt-" + composed, outcome: .completed, observed: nil, evidence: nil), clock: clock.now())
+        }
+        let secondWork = try owner!.reserveEpisodeWork(episodeID: episodeA, request: EpisodeWorkRequest(id: "second-unicode-work", parentID: nil,
+            kind: .retrieval, resources: EpisodeResources(memoryOperations: 1, rawSourceBytes: 3), adapterIdentity: "synthetic", snapshot: nil, inputTokensKnown: true), clock: clock.now())
+        _ = try owner!.armEpisodeWork(episodeID: episodeA, operationID: secondWork.id, expectedRevision: secondWork.revision, clock: clock.now())
+        _ = try owner!.settleEpisodeWork(episodeID: episodeA, operationID: secondWork.id,
+            settlement: EpisodeWorkSettlement(receiptID: "receipt-" + decomposed, outcome: .completed, observed: nil, evidence: nil), clock: clock.now())
+        checks["episode_unicode_receipt_ids_preserve_distinct_byte_identity"] = try episodeIdentifierEqual(owner!.episodeWork(episodeID: episodeA, operationID: workA.id)?.receiptID, "receipt-" + composed)
+            && episodeIdentifierEqual(owner!.episodeWork(episodeID: episodeA, operationID: secondWork.id)?.receiptID, "receipt-" + decomposed)
+        checks["episode_unicode_journal_totals_do_not_merge_equivalent_ids"] = try owner!.episodeReceipt(id: episodeA, clock: clock.now()).charged.rawSourceBytes == 11
+            && owner!.episodeReceipt(id: episodeB, clock: clock.now()).charged.rawSourceBytes == 12
+        checks["episode_unicode_constructed_read_journal_validates"] = try validate(directory)
+        let chat = try owner!.createConversation(projectID: composed, title: "Synthetic binary chat identity")
+        let humanTextA = "Synthetic " + composed, humanTextB = "Synthetic " + decomposed
+        _ = try owner!.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: composed, humanEventID: "human-" + composed,
+            episodeID: "chat-unicode", text: humanTextA, limits: .init(), clock: clock.now())
+        checks["episode_unicode_changed_chat_turn_bytes_replay_conflicts"] = rejected(.conflict) {
+            _ = try owner!.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: decomposed, humanEventID: "human-" + composed,
+                episodeID: "chat-unicode", text: humanTextA, limits: .init(), clock: clock.now())
+        }
+        checks["episode_unicode_changed_accepted_payload_bytes_replay_conflicts"] = rejected(.conflict) {
+            _ = try owner!.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: composed, humanEventID: "human-" + composed,
+                episodeID: "chat-unicode", text: humanTextB, limits: .init(), clock: clock.now())
+        }
+        checks["episode_unicode_unmetered_invocation_cannot_alias_human_turn"] = rejected {
+            _ = try owner!.beginInvocation(invocationID: "unicode-bad-invocation", conversationID: chat.id, turnID: decomposed,
+                humanEventID: "human-" + composed, assistantEventID: "bad-unicode-assistant", providerIdentity: "native:synthetic", requestBody: Data("{}".utf8))
+        }
+        checks["episode_unicode_denied_replays_preserve_single_capture"] = try owner!.events(conversationID: chat.id).count == 1
+        owner = nil; owner = try MemoryStore(directory: directory)
+        checks["episode_unicode_reopen_preserves_separate_accounting"] = try owner!.episodeReceipt(id: episodeA, clock: clock.now()).charged.rawSourceBytes == 11
+            && owner!.episodeReceipt(id: episodeB, clock: clock.now()).charged.rawSourceBytes == 12
+        checks["episode_unicode_recovered_journal_validates"] = try validate(directory)
+        owner = nil
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let alteredOrigin = try encoder.encode(EpisodeOrigin.chat(conversationID: chat.id, turnID: decomposed, humanEventID: "human-" + composed))
+        let alteredDigest = try MemoryStore.episodeOriginDigest(projectID: composed, originJSON: alteredOrigin)
+        try inspect(directory) { database in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, "UPDATE episodes SET origin_json=?,origin_digest=? WHERE id='chat-unicode'", -1, &statement, nil) == SQLITE_OK, let statement else { throw MemoryError.database("could not prepare synthetic Unicode origin corruption") }
+            defer { sqlite3_finalize(statement) }
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            alteredOrigin.withUnsafeBytes { _ = sqlite3_bind_blob(statement, 1, $0.baseAddress, Int32(alteredOrigin.count), transient) }
+            _ = sqlite3_bind_text(statement, 2, alteredDigest, -1, transient)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw MemoryError.database("could not corrupt synthetic Unicode origin") }
+        }
+        checks["episode_unicode_chat_origin_column_alias_archive_rejected"] = rejected { _ = try validate(directory) }
+        owner = try MemoryStore(directory: directory)
+        checks["episode_unicode_chat_origin_column_alias_runtime_rejected"] = rejected { _ = try owner!.episodeReceipt(id: "chat-unicode", clock: clock.now()) }
+        return checks
+    }
+    private static func unicodeLegacyMigrationChecks() throws -> [String: Bool] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-unicode-schema-three-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var owner: MemoryStore? = try MemoryStore(directory: directory)
+        let clock = Clock(), identities = ["caf\u{00e9}", "cafe\u{0301}"]
+        for (index, identity) in identities.enumerated() {
+            let chat = try owner!.createConversation(projectID: identity, title: "Synthetic Unicode legacy migration")
+            _ = try owner!.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: identity, humanEventID: "human-" + identity,
+                episodeID: identity, text: "Synthetic legacy " + identity, limits: .init(), clock: clock.now())
+            let work = try owner!.reserveEpisodeWork(episodeID: identity, request: EpisodeWorkRequest(id: "work-" + identity, parentID: nil,
+                kind: .answer, resources: EpisodeResources(inputTokens: 3 + index, outputTokens: 2 + index, modelCalls: 1),
+                adapterIdentity: "synthetic-unicode-legacy", snapshot: Data("{}".utf8), inputTokensKnown: true), clock: clock.now())
+            _ = try owner!.armEpisodeWork(episodeID: identity, operationID: work.id, expectedRevision: work.revision, clock: clock.now())
+        }
+        owner = nil
+        try downgradeSyntheticChatParentToThree(directory)
+        var checks = ["episode_unicode_schema_three_journal_validates_binary_ids": try validate(directory)]
+        owner = try MemoryStore(directory: directory)
+        let first = try owner!.episodeReceipt(id: identities[0], clock: clock.now()), second = try owner!.episodeReceipt(id: identities[1], clock: clock.now())
+        checks["episode_unicode_schema_three_migration_preserves_exact_chat_origins"] = episodeIdentifierEqual(first.id, identities[0])
+            && episodeIdentifierEqual(first.projectID, identities[0]) && episodeIdentifierEqual(first.turnID, identities[0])
+            && episodeIdentifierEqual(first.humanEventID, "human-" + identities[0]) && episodeIdentifierEqual(second.id, identities[1])
+            && episodeIdentifierEqual(second.projectID, identities[1]) && episodeIdentifierEqual(second.turnID, identities[1])
+            && episodeIdentifierEqual(second.humanEventID, "human-" + identities[1])
+        checks["episode_unicode_schema_three_migration_keeps_accounting_separate"] = first.charged.inputTokens == 3 && first.held.outputTokens == 2
+            && second.charged.inputTokens == 4 && second.held.outputTokens == 3
+        checks["episode_unicode_schema_four_migrated_journal_validates_binary_ids"] = try validate(directory)
+        return checks
+    }
+    private static func malformedStoredOriginChecks() throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        for mutation in ["duplicateOriginVersion", "duplicateBindingVersion", "changedProject"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-origin-corruption-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var owner: MemoryStore? = try MemoryStore(directory: directory)
+            let binding = EpisodeLocalReadBinding(initiator: .syntheticEvaluation, purpose: .retrievalProbe, requestID: "origin-fixture-request",
+                descriptorVersion: "synthetic-origin-v1", descriptorSHA256: String(repeating: "0", count: 64))
+            _ = try owner!.beginLocalReadEpisode(episodeID: "origin-fixture", projectID: "project-a", binding: binding,
+                limits: .init(), clock: Clock().now())
+            owner = nil
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            let originJSON = try encoder.encode(EpisodeOrigin.localRead(binding))
+            var corrupted = String(decoding: originJSON, as: UTF8.self)
+            if mutation == "duplicateOriginVersion" {
+                corrupted = corrupted.replacingOccurrences(of: "\"version\":\"episode-origin-v1\"", with: "\"version\":\"episode-origin-v1\",\"version\":\"episode-origin-v1\"")
+            }
+            if mutation == "duplicateBindingVersion" {
+                corrupted = corrupted.replacingOccurrences(of: "\"version\":\"local-read-v1\"", with: "\"version\":\"local-read-v1\",\"version\":\"local-read-v1\"")
+            }
+            let corruptedBytes = Data(corrupted.utf8)
+            let digest = try MemoryStore.episodeOriginDigest(projectID: "project-a", originJSON: corruptedBytes)
+            try inspect(directory) { database in
+                if mutation == "changedProject" {
+                    guard sqlite3_exec(database, "UPDATE episodes SET project_id='project-b' WHERE id='origin-fixture'", nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("synthetic project corruption failed") }
+                } else {
+                    var statement: OpaquePointer?
+                    guard sqlite3_prepare_v2(database, "UPDATE episodes SET origin_json=?,origin_digest=? WHERE id='origin-fixture'", -1, &statement, nil) == SQLITE_OK, let statement else { throw MemoryError.database("synthetic origin corruption preparation failed") }
+                    defer { sqlite3_finalize(statement) }
+                    let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                    corruptedBytes.withUnsafeBytes { _ = sqlite3_bind_blob(statement, 1, $0.baseAddress, Int32(corruptedBytes.count), transient) }
+                    _ = sqlite3_bind_text(statement, 2, digest, -1, transient)
+                    guard sqlite3_step(statement) == SQLITE_DONE else { throw MemoryError.database("synthetic origin corruption failed") }
+                }
+            }
+            checks["read_episode_stored_origin_" + mutation + "_archive_rejects"] = rejected { _ = try validate(directory) }
+            checks["read_episode_stored_origin_" + mutation + "_owner_rejects"] = rejected { _ = try MemoryStore(directory: directory) }
+        }
+        return checks
+    }
+    /// The schema-3 parent is deliberately frozen, independent of current SQL.
+    static func downgradeSyntheticChatParentToThree(_ directory: URL) throws {
+        try inspect(directory) { database in
+            let sql = """
+                PRAGMA foreign_keys=OFF;
+                BEGIN IMMEDIATE;
+                CREATE TABLE episodes_three (
+                  id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                  project_id TEXT NOT NULL, turn_id TEXT NOT NULL, human_event_id TEXT NOT NULL UNIQUE REFERENCES events(id),
+                  limits_json BLOB NOT NULL CHECK(length(limits_json)>0 AND length(limits_json)<=65536),
+                  limits_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','completed','failed','cancelled','interrupted','deadlineExceeded','budgetExceeded')),
+                  revision INTEGER NOT NULL CHECK(revision>=0), clock_domain TEXT NOT NULL,
+                  created_ticks INTEGER NOT NULL CHECK(created_ticks>0), deadline_ticks INTEGER NOT NULL CHECK(deadline_ticks>created_ticks),
+                  last_ticks INTEGER NOT NULL CHECK(last_ticks>=created_ticks), created_utc REAL NOT NULL,
+                  terminal_reason TEXT NOT NULL DEFAULT '', CHECK((state='active' AND terminal_reason='') OR (state!='active' AND terminal_reason!=''))
+                );
+                INSERT INTO episodes_three SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,terminal_reason FROM episodes;
+                DROP TABLE episodes;
+                ALTER TABLE episodes_three RENAME TO episodes;
+                PRAGMA user_version=3;
+                COMMIT;
+                """
+            guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("could not construct frozen schema-three parent") }
+        }
+    }
+    private static func schemaThreeMigrationChecks() throws -> [String: Bool] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-episode-v3-" + UUID().uuidString)
+        let fresh = FileManager.default.temporaryDirectory.appendingPathComponent("boros-episode-v4-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory); try? FileManager.default.removeItem(at: fresh) }
+        var owner: MemoryStore? = try MemoryStore(directory: directory)
+        let clock = Clock()
+        let chat = try owner!.createConversation(projectID: "migration-project", title: "Synthetic schema-three migration")
+        let accepted = try owner!.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "migration-turn", humanEventID: "migration-human",
+            episodeID: "migration-episode", text: "Synthetic accepted migration input", limits: .init(), clock: clock.now())
+        let body = Data("{\"messages\":[],\"max_tokens\":5}".utf8)
+        let work = try owner!.reserveEpisodeWork(episodeID: accepted.id, request: EpisodeWorkRequest(id: "migration-work", parentID: nil,
+            kind: .answer, resources: EpisodeResources(inputTokens: 9, outputTokens: 5, modelCalls: 1, httpAttempts: 1),
+            adapterIdentity: "synthetic-migration", snapshot: body, inputTokensKnown: true), clock: clock.now())
+        _ = try owner!.beginInvocation(invocationID: "migration-invocation", conversationID: chat.id, turnID: "migration-turn", humanEventID: "migration-human",
+            assistantEventID: "migration-assistant", providerIdentity: "native:synthetic", requestBody: body, episodeID: accepted.id, episodeWorkID: work.id)
+        _ = try owner!.armEpisodeWork(episodeID: accepted.id, operationID: work.id, expectedRevision: work.revision, clock: clock.now())
+        _ = try owner!.appendInvocationChunk(invocationID: "migration-invocation", sequence: 0, text: "Synthetic migration partial")
+        owner = nil
+        try downgradeSyntheticChatParentToThree(directory)
+        var checks: [String: Bool] = ["episode_schema_three_archive_validator_remains_read_only": try validate(directory)]
+        for stage in ["beforeParentReplacement", "afterParentReplacement", "beforeCommit"] {
+            let failed = rejected { _ = try MemoryStore(directory: directory, episodeMigrationCheckpoint: { checkpoint in
+                if checkpoint == stage { throw EpisodeBudgetError.invalid }
+            }) }
+            checks["episode_schema_three_" + stage + "_rollback_complete"] = try failed && inspect(directory) {
+                try scalar($0, "PRAGMA user_version") == "3" && scalar($0, "SELECT count(*) FROM sqlite_master WHERE name='episodes_v4'") == "0"
+                    && scalar($0, "SELECT count(*) FROM episodes WHERE id='migration-episode'") == "1"
+                    && scalar($0, "SELECT count(*) FROM episode_work WHERE id='migration-work'") == "1"
+            }
+        }
+        owner = try MemoryStore(directory: directory)
+        let migrated = try owner!.episodeReceipt(id: accepted.id, clock: clock.now())
+        let migratedWork = try owner!.episodeWork(episodeID: accepted.id, operationID: work.id)
+        checks["episode_schema_three_chat_origin_preserves_binding_deadline"] = migrated.origin == accepted.origin && migrated.deadlineNanoseconds == accepted.deadlineNanoseconds
+        checks["episode_schema_three_migration_preserves_armed_accounting_snapshot"] = migratedWork?.charged.inputTokens == 9 && migratedWork?.held.outputTokens == 5 && migratedWork?.request.snapshot == body && migratedWork?.state == .outcomeUnknown
+        checks["episode_schema_three_migration_recovers_linked_partial"] = try owner!.invocation(id: "migration-invocation")?.finalStatus == .partial
+            && owner!.events(conversationID: chat.id).last?.text == "Synthetic migration partial"
+        let freshOwner = try MemoryStore(directory: fresh)
+        checks["episode_schema_three_migration_fresh_canonical_parent_identical"] = try inspect(directory) { migratedDB in
+            try inspect(fresh) { freshDB in try scalar(migratedDB, "SELECT sql FROM sqlite_master WHERE name='episodes'") == scalar(freshDB, "SELECT sql FROM sqlite_master WHERE name='episodes'") }
+        }
+        checks["episode_schema_three_migration_foreign_keys_intact"] = try inspect(directory) { try scalar($0, "SELECT count(*) FROM pragma_foreign_key_check") == "0" }
+        checks["episode_schema_three_migration_archive_validator_accepts"] = try validate(directory)
+        withExtendedLifetime(freshOwner) {}
+        return checks
     }
     private static func snapshotChecks() throws -> [String: Bool] {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-episode-snapshot-bound-" + UUID().uuidString)

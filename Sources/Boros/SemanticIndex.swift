@@ -359,7 +359,8 @@ final class SemanticIndex: @unchecked Sendable {
     func search(query: String, lexicalQuery: String? = nil, projectID: String, limit: Int = 16,
                 excludingEventIDs: Set<String> = [], includeLiteral: Bool = true, continuation: SemanticSearchContinuation? = nil,
                 episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false) throws -> SemanticSearchReport {
-        try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
+        _ = try episodeLease?.checkActive(projectID: projectID)
+        return try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
             try searchWithinOperation(query: query, lexicalQuery: lexicalQuery, projectID: projectID, limit: limit,
                 excludingEventIDs: excludingEventIDs, includeLiteral: includeLiteral, continuation: continuation, episodeLease: episodeLease)
         }
@@ -377,8 +378,8 @@ final class SemanticIndex: @unchecked Sendable {
         }
         let queryDigest = Self.digest(Data(query.utf8))
         if let continuation {
-            guard continuation.projectID == projectID, continuation.indexFingerprint == indexFingerprint, continuation.queryDigest == queryDigest, continuation.includeLiteral == includeLiteral,
-                  continuation.episodeID == episodeLease?.episodeID,
+            guard episodeIdentifierEqual(continuation.projectID, projectID), continuation.indexFingerprint == indexFingerprint, continuation.queryDigest == queryDigest, continuation.includeLiteral == includeLiteral,
+                  episodeIdentifierEqual(continuation.episodeID, episodeLease?.episodeID),
                   continuation.sourceFrontier >= 0, continuation.publishedChunkFrontier >= 0, continuation.afterSequence >= 0, continuation.afterOffset >= 0 else { throw SemanticError.invalid }
         }
         let frontier = try continuation?.sourceFrontier ?? MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1) { try store.sourceFrontier(projectID: projectID) }
@@ -388,11 +389,13 @@ final class SemanticIndex: @unchecked Sendable {
             if continuation == nil && includeLiteral && query.utf8.count <= 4096 {
                 let report = try MeteredRetrieval.literalSearch(store: store, query: query, projectID: projectID, limit: 100,
                     throughSequence: frontier, excludingEventIDs: excludingEventIDs, lease: episodeLease, nested: true)
+                try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.incompleteReason == "raw_source_budget")
                 literalReport = report; literal = report.hits
             } else { literal = [] }
             if continuation == nil {
                 let report = try MeteredRetrieval.lexicalSearch(store: store, query: lexical, projectID: projectID, limit: 100,
                     matching: .anyTerm, throughSequence: frontier, excludingEventIDs: excludingEventIDs, lease: episodeLease, nested: true)
+                try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
                 lexicalReport = report; lexicalHits = report.hits
             } else { lexicalHits = [] }
         } else {
@@ -571,7 +574,8 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     func replay(manifestID: String, projectID: String, episodeLease: EpisodeLease? = nil) throws -> SemanticSearchReport {
-        try MeteredRetrieval.operation(lease: episodeLease) {
+        _ = try episodeLease?.checkActive(projectID: projectID)
+        return try MeteredRetrieval.operation(lease: episodeLease) {
             try locked {
                 let previousLease = activeSearchLease; activeSearchLease = episodeLease
                 defer { activeSearchLease = previousLease }
@@ -581,7 +585,7 @@ final class SemanticIndex: @unchecked Sendable {
                     }) else { throw SemanticError.unavailable }
                     guard Self.digest(data) == manifestID else { throw SemanticError.sourceMismatch }
                     let manifest = try JSONDecoder().decode(SemanticSearchManifest.self, from: data)
-                    guard manifest.version == 1, manifest.projectID == projectID else { throw SemanticError.sourceMismatch }
+                    guard manifest.version == 1, episodeIdentifierEqual(manifest.projectID, projectID) else { throw SemanticError.sourceMismatch }
                     return SemanticSearchReport(hits: try readResults(manifest), manifestID: manifestID, manifest: manifest)
                 }
             }
@@ -657,6 +661,7 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     private func verify(_ source: MemorySourceReference, lease: EpisodeLease? = nil) throws {
+        _ = try lease?.checkActive(projectID: source.projectID)
         guard source.sequence > 0, source.byteCount >= 0, source.byteCount <= MemoryStore.maximumPayloadBytes,
               try MeteredRetrieval.sourceMetadata(store: store, lease: lease, maximumRows: 1, {
                   try store.sourceManifest(projectID: source.projectID, afterSequence: source.sequence - 1, throughSequence: source.sequence, limit: 1).first
@@ -682,6 +687,7 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     private func coverage(projectID: String, frontier: Int, publishedFrontier: Int) throws -> SemanticCoverage {
+        _ = try activeSearchLease?.checkActive(projectID: projectID)
         let sources = try MeteredRetrieval.authoritative(store: store, lease: activeSearchLease) {
             try store.sourceManifest(projectID: projectID, afterSequence: 0, throughSequence: frontier, limit: configuration.maximumManifestSources)
         }
@@ -738,16 +744,17 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     private func querySource(_ hit: MemoryHit) throws -> MemorySourceReference {
+        _ = try activeSearchLease?.checkActive(projectID: hit.projectID)
         // A scoped indexed lookup obtains sequence without scanning the archive.
         guard let source = try MeteredRetrieval.sourceMetadata(store: store, lease: activeSearchLease, maximumRows: 1, { try store.sourceReference(eventID: hit.eventID, projectID: hit.projectID) }),
-              source.digest == hit.digest, source.byteCount == hit.totalBytes, source.conversationID == hit.conversationID,
+              source.digest == hit.digest, source.byteCount == hit.totalBytes, episodeIdentifierEqual(source.conversationID, hit.conversationID),
               source.role == hit.role, source.status == hit.status, source.createdAt == hit.createdAt else { throw SemanticError.sourceMismatch }
         return source
     }
 
     private func readResults(_ manifest: SemanticSearchManifest) throws -> [MemoryHit] {
         try manifest.results.map { result in
-            guard result.source.projectID == manifest.projectID, result.source.sequence <= manifest.sourceFrontier,
+            guard episodeIdentifierEqual(result.source.projectID, manifest.projectID), result.source.sequence <= manifest.sourceFrontier,
                   result.offset >= 0, result.byteCount > 0, result.byteCount <= MemoryStore.maximumPageBytes,
                   result.source.byteCount >= 0, result.source.byteCount <= MemoryStore.maximumPayloadBytes,
                   result.offset <= result.source.byteCount,

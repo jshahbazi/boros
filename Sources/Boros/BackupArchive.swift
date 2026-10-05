@@ -28,6 +28,10 @@ struct BackupScopeCount: Codable, Equatable {
     let events: Int
     let sourceBytes: Int64
     let invocations: Int
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.projectID, rhs.projectID) && lhs.conversations == rhs.conversations
+            && lhs.events == rhs.events && lhs.sourceBytes == rhs.sourceBytes && lhs.invocations == rhs.invocations
+    }
 }
 
 struct BackupInventory: Codable, Equatable {
@@ -43,8 +47,10 @@ struct BackupInventory: Codable, Equatable {
     let providerIdentities: [String]
     let servedModels: [String]
     let scopes: [BackupScopeCount]
-    // Optional for schema-2 archive compatibility. Schema-3 archives always
-    // record the complete authoritative episode journal inventory.
+    // Schema 1/2 have no episode journal. Schema 3 records the historical
+    // chat-only journal; schema 4 additionally records explicit origin counts.
+    var chatEpisodes: Int? = nil
+    var localReadEpisodes: Int? = nil
     var episodes: Int? = nil
     var unfinishedEpisodes: Int? = nil
     var episodeWork: Int? = nil
@@ -54,6 +60,13 @@ struct BackupInventory: Codable, Equatable {
     var episodeUncertainWork: Int? = nil
     var episodeCharged: EpisodeResources? = nil
     var episodeHeld: EpisodeResources? = nil
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // Canonical bytes preserve SQLite's exact identifier semantics for
+        // scopes, providers and model IDs, including equivalent-looking Unicode.
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        guard let left = try? encoder.encode(lhs), let right = try? encoder.encode(rhs) else { return false }
+        return left == right
+    }
 }
 
 struct BackupManifest: Codable, Equatable {
@@ -118,29 +131,12 @@ enum BackupArchive {
         let candidate = try Database(copied.appendingPathComponent("memory.sqlite3"), writable: false)
         defer { candidate.close() }
         let version = try candidate.integer("PRAGMA user_version")
-        guard (1...3).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
+        guard (1...4).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
         let actualSchema = try schemaObjects(candidate)
         candidate.close()
-        do {
-            let owner = try MemoryStore(directory: reference)
-            withExtendedLifetime(owner) {}
+        guard actualSchema == (try recognizedSchemaObjects(version: version, at: reference)) else {
+            throw BackupError.invalid("source table, column, index or constraint contract is not a recognized Boros schema")
         }
-        let referenceDB = try Database(reference.appendingPathComponent("memory.sqlite3"), writable: false)
-        defer { referenceDB.close() }
-        let episodeTables = Set(["episodes", "episode_resource_totals", "episode_request_snapshots", "episode_work"])
-        let expected = try schemaObjects(referenceDB).filter {
-            (version == 3 || !episodeTables.contains($0.table))
-                && (version >= 2 || !["invocations", "invocation_chunks"].contains($0.table))
-        }.map { object in
-            guard version < 3, object.table == "invocations" else { return object }
-            // Fresh schema 3 uses the same ALTER migration as a schema-2
-            // store. Removing only those exact additions reconstructs the
-            // prior canonical contract without opening the original source.
-            return SchemaObject(type: object.type, name: object.name, table: object.table,
-                sql: object.sql.replacingOccurrences(of: ", episode_id TEXT REFERENCES episodes(id)", with: "")
-                    .replacingOccurrences(of: ", episode_work_id TEXT REFERENCES episode_work(id)", with: ""))
-        }
-        guard actualSchema == expected else { throw BackupError.invalid("source table, column, index or constraint contract is not a recognized Boros schema") }
         // Only the already recognized private copy may undergo legacy upgrade
         // and recovery before complete content/metadata integrity checks.
         do {
@@ -163,6 +159,121 @@ enum BackupArchive {
             result.append(SchemaObject(type: database.text(row, 0), name: database.text(row, 1), table: database.text(row, 2), sql: sql))
         }
         return result
+    }
+
+    /// Frozen historical contracts captured from checkpoint 22c3402. Legacy
+    /// recognition never derives old constraints by subtracting newer DDL.
+    private static func historicalSchemaSQL(version: Int) throws -> String {
+        guard (1...3).contains(version) else { throw BackupError.invalid("unsupported historical schema") }
+        var sql = """
+        CREATE TABLE IF NOT EXISTS conversations (
+          id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS events (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id), project_id TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('human','assistant')),
+          status TEXT NOT NULL CHECK(status IN ('complete','partial','failed','cancelled')),
+          turn_id TEXT NOT NULL, created_at TEXT NOT NULL, digest TEXT NOT NULL,
+          byte_count INTEGER NOT NULL CHECK(byte_count >= 0 AND byte_count <= 4194304),
+          payload BLOB NOT NULL CHECK(length(payload) = byte_count)
+        );
+        CREATE INDEX IF NOT EXISTS event_conversation ON events(conversation_id, sequence);
+        CREATE INDEX IF NOT EXISTS event_project ON events(project_id, sequence);
+        CREATE VIRTUAL TABLE IF NOT EXISTS event_fts USING fts5(text, content='');
+        CREATE TABLE IF NOT EXISTS drafts (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), payload BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, payload BLOB NOT NULL);
+        """
+        if version >= 2 { sql += """
+
+        CREATE TABLE IF NOT EXISTS invocations (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+          project_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+          human_event_id TEXT NOT NULL REFERENCES events(id), assistant_event_id TEXT NOT NULL UNIQUE,
+          provider_identity TEXT NOT NULL, request_body BLOB NOT NULL,
+          request_digest TEXT NOT NULL, admission_json BLOB NOT NULL DEFAULT X'',
+          admission_digest TEXT NOT NULL DEFAULT '', usage_json BLOB NOT NULL DEFAULT X'',
+          usage_digest TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+          chunk_count INTEGER NOT NULL DEFAULT 0 CHECK(chunk_count >= 0 AND chunk_count <= 65536),
+          observed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(observed_bytes >= 0 AND observed_bytes <= 4194304),
+          final_status TEXT NOT NULL DEFAULT '' CHECK(final_status IN ('','complete','partial','failed','cancelled')),
+          terminal_reason TEXT NOT NULL DEFAULT '' CHECK(terminal_reason IN ('','completed','cancelled','upstreamIncomplete','transportFailure','captureFailure','admissionFailure','interrupted')),
+          finalized_at TEXT NOT NULL DEFAULT '', recovered INTEGER NOT NULL DEFAULT 0 CHECK(recovered IN (0,1)),
+          CHECK(length(request_body) > 0 AND length(request_body) <= 4194304),
+          CHECK((final_status = '' AND terminal_reason = '' AND finalized_at = '') OR
+                (final_status != '' AND terminal_reason != '' AND finalized_at != ''))
+        );
+        CREATE TABLE IF NOT EXISTS invocation_chunks (
+          invocation_id TEXT NOT NULL REFERENCES invocations(id),
+          chunk_sequence INTEGER NOT NULL CHECK(chunk_sequence >= 0 AND chunk_sequence < 65536),
+          byte_count INTEGER NOT NULL CHECK(byte_count > 0 AND byte_count <= 4194304),
+          digest TEXT NOT NULL, payload BLOB NOT NULL CHECK(length(payload) = byte_count),
+          PRIMARY KEY(invocation_id, chunk_sequence)
+        ) WITHOUT ROWID;
+        """ }
+        if version == 3 { sql += """
+
+        CREATE TABLE IF NOT EXISTS episodes (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+          project_id TEXT NOT NULL, turn_id TEXT NOT NULL, human_event_id TEXT NOT NULL UNIQUE REFERENCES events(id),
+          limits_json BLOB NOT NULL CHECK(length(limits_json)>0 AND length(limits_json)<=65536),
+          limits_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','completed','failed','cancelled','interrupted','deadlineExceeded','budgetExceeded')),
+          revision INTEGER NOT NULL CHECK(revision>=0), clock_domain TEXT NOT NULL,
+          created_ticks INTEGER NOT NULL CHECK(created_ticks>0), deadline_ticks INTEGER NOT NULL CHECK(deadline_ticks>created_ticks),
+          last_ticks INTEGER NOT NULL CHECK(last_ticks>=created_ticks), created_utc REAL NOT NULL,
+          terminal_reason TEXT NOT NULL DEFAULT '', CHECK((state='active' AND terminal_reason='') OR (state!='active' AND terminal_reason!=''))
+        );
+        CREATE TABLE IF NOT EXISTS episode_resource_totals (
+          episode_id TEXT NOT NULL REFERENCES episodes(id), resource TEXT NOT NULL,
+          charged INTEGER NOT NULL CHECK(charged>=0), held INTEGER NOT NULL CHECK(held>=0), cap INTEGER NOT NULL CHECK(cap>=0),
+          PRIMARY KEY(episode_id,resource)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS episode_request_snapshots (
+          digest TEXT PRIMARY KEY, byte_count INTEGER NOT NULL CHECK(byte_count>0 AND byte_count<=4194304),
+          payload BLOB NOT NULL CHECK(length(payload)=byte_count)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS episode_work (
+          id TEXT PRIMARY KEY, episode_id TEXT NOT NULL REFERENCES episodes(id), parent_id TEXT REFERENCES episode_work(id),
+          kind TEXT NOT NULL, adapter_identity TEXT NOT NULL, request_json BLOB NOT NULL CHECK(length(request_json)>0 AND length(request_json)<=65536),
+          request_digest TEXT NOT NULL, snapshot_digest TEXT REFERENCES episode_request_snapshots(digest),
+          revision INTEGER NOT NULL CHECK(revision>=0), state TEXT NOT NULL CHECK(state IN ('prepared','dispatchArmed','submitted','completed','failedConfirmed','outcomeUnknown','cancelledBeforeDispatch')),
+          charged_json BLOB NOT NULL, held_json BLOB NOT NULL, observed_json BLOB NOT NULL DEFAULT X'',
+          receipt_id TEXT, receipt_json BLOB NOT NULL DEFAULT X'', receipt_digest TEXT NOT NULL DEFAULT '',
+          created_ticks INTEGER NOT NULL CHECK(created_ticks>0), armed_ticks INTEGER NOT NULL DEFAULT 0 CHECK(armed_ticks>=0),
+          ended_ticks INTEGER NOT NULL DEFAULT 0 CHECK(ended_ticks>=0), recovered INTEGER NOT NULL DEFAULT 0 CHECK(recovered IN (0,1)),
+          adapter_violation INTEGER NOT NULL DEFAULT 0 CHECK(adapter_violation IN (0,1)),
+          UNIQUE(episode_id,receipt_id)
+        );
+        CREATE INDEX IF NOT EXISTS episode_work_episode ON episode_work(episode_id,id);
+        ALTER TABLE invocations ADD COLUMN episode_id TEXT REFERENCES episodes(id);
+        ALTER TABLE invocations ADD COLUMN episode_work_id TEXT REFERENCES episode_work(id);
+        """ }
+        return sql + "PRAGMA user_version=\(version);"
+    }
+
+    private static func recognizedSchemaObjects(version: Int, at directory: URL) throws -> [SchemaObject] {
+        if version == 4 {
+            do { let owner = try MemoryStore(directory: directory); withExtendedLifetime(owner) {} }
+        } else {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try writeNewFile(Data(), at: directory.appendingPathComponent("memory.sqlite3"))
+            let reference = try Database(directory.appendingPathComponent("memory.sqlite3"), writable: true)
+            defer { reference.close() }
+            let sql = try historicalSchemaSQL(version: version)
+            guard sqlite3_exec(reference.handle, sql, nil, nil, nil) == SQLITE_OK else { throw BackupError.database }
+        }
+        let reference = try Database(directory.appendingPathComponent("memory.sqlite3"), writable: false)
+        defer { reference.close() }
+        return try schemaObjects(reference)
+    }
+
+    private static func validateSchemaObjects(_ database: Database, version: Int) throws {
+        let reference = FileManager.default.temporaryDirectory.appendingPathComponent("boros-backup-contract-" + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: reference) }
+        guard try schemaObjects(database) == recognizedSchemaObjects(version: version, at: reference) else {
+            throw BackupError.invalid("table, column, index or constraint contract is not a recognized Boros schema")
+        }
     }
 
     static func create(from store: MemoryStore, at destination: URL,
@@ -191,7 +302,7 @@ enum BackupArchive {
             files.append(try fileRecord(staging.appendingPathComponent("settings.json"), name: "settings.json"))
             settingsCapture = "independent-atomic-file-point-capture"
         }
-        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 3, archiveID: UUID().uuidString,
+        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 4, archiveID: UUID().uuidString,
             createdAt: timestamp(), databaseCapture: databaseCapture, settingsCapture: settingsCapture,
             control: control, files: files, inventory: inventory, excluded: excluded)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -210,7 +321,7 @@ enum BackupArchive {
         let manifest: BackupManifest
         do { manifest = try JSONDecoder().decode(BackupManifest.self, from: manifestData) }
         catch { throw BackupError.invalid("missing or malformed archive manifest") }
-        guard manifest.archiveVersion == 1, (2...3).contains(manifest.databaseSchema),
+        guard manifest.archiveVersion == 1, (1...4).contains(manifest.databaseSchema),
               UUID(uuidString: manifest.archiveID) != nil, !manifest.createdAt.isEmpty,
               manifest.databaseCapture == databaseCapture, manifest.excluded == excluded,
               ["absent", "independent-atomic-file-point-capture"].contains(manifest.settingsCapture),
@@ -262,9 +373,9 @@ enum BackupArchive {
         guard try inspectDatabase(staging.appendingPathComponent("memory.sqlite3")) == manifest.inventory else {
             throw BackupError.invalid("copied database inventory mismatch")
         }
-        let preparedHold = manifest.databaseSchema == 3
+        let preparedHold = manifest.databaseSchema >= 3
             ? try preparedEpisodeHold(staging.appendingPathComponent("memory.sqlite3")) : .zero
-        let unfinishedBytes = try unfinishedInvocationBytes(staging.appendingPathComponent("memory.sqlite3"))
+        let unfinishedBytes = manifest.databaseSchema == 1 ? 0 : try unfinishedInvocationBytes(staging.appendingPathComponent("memory.sqlite3"))
         // Startup recovery is completed in private staging, before publication.
         // It terminalizes archived unfinished attempts as interrupted, retaining
         // committed chunks and publishing partial/failed assistant evidence.
@@ -286,7 +397,7 @@ enum BackupArchive {
               restored.chunkBytes == manifest.inventory.chunkBytes,
               restored.providerIdentities == manifest.inventory.providerIdentities,
               restored.servedModels == manifest.inventory.servedModels else { throw BackupError.invalid("restored startup recovery inventory mismatch") }
-        if manifest.databaseSchema == 3 {
+        if manifest.databaseSchema >= 3 {
             guard let archivedHeld = manifest.inventory.episodeHeld,
                   restored.unfinishedEpisodes == 0, restored.episodes == manifest.inventory.episodes,
                   restored.episodeWork == manifest.inventory.episodeWork,
@@ -295,8 +406,15 @@ enum BackupArchive {
                   restored.episodePreparedWork == 0,
                   restored.episodeUncertainWork == manifest.inventory.episodeUncertainWork,
                   restored.episodeCharged == manifest.inventory.episodeCharged,
-                  restored.episodeHeld == (try archivedHeld.subtracting(preparedHold)) else {
+                  restored.episodeHeld == (try archivedHeld.subtracting(preparedHold)),
+                  restored.chatEpisodes == (manifest.databaseSchema == 4 ? manifest.inventory.chatEpisodes : manifest.inventory.episodes),
+                  restored.localReadEpisodes == (manifest.databaseSchema == 4 ? manifest.inventory.localReadEpisodes : 0) else {
                 throw BackupError.invalid("restored episode recovery inventory mismatch")
+            }
+        }
+        if manifest.databaseSchema < 3 {
+            guard restored.episodes == 0, restored.chatEpisodes == 0, restored.localReadEpisodes == 0 else {
+                throw BackupError.invalid("legacy restore introduced episode records")
             }
         }
         // No stale archive manifest is placed alongside the recovered database.
@@ -371,12 +489,14 @@ enum BackupArchive {
         let db = try Database(url, writable: false)
         defer { db.close() }
         let schema = try db.integer("PRAGMA user_version")
-        guard (2...3).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
+        guard (1...4).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
         guard try db.texts("PRAGMA integrity_check") == ["ok"], try db.integer("SELECT count(*) FROM pragma_foreign_key_check") == 0 else {
             throw BackupError.invalid("SQLite integrity or foreign-key check failed")
         }
-        var allowedTables = Set(["conversations", "events", "drafts", "settings", "invocations", "invocation_chunks", "sqlite_sequence", "event_fts", "event_fts_data", "event_fts_idx", "event_fts_docsize", "event_fts_config"])
-        if schema == 3 { allowedTables.formUnion(["episodes", "episode_resource_totals", "episode_request_snapshots", "episode_work"]) }
+        try validateSchemaObjects(db, version: schema)
+        var allowedTables = Set(["conversations", "events", "drafts", "settings", "sqlite_sequence", "event_fts", "event_fts_data", "event_fts_idx", "event_fts_docsize", "event_fts_config"])
+        if schema >= 2 { allowedTables.formUnion(["invocations", "invocation_chunks"]) }
+        if schema >= 3 { allowedTables.formUnion(["episodes", "episode_resource_totals", "episode_request_snapshots", "episode_work"]) }
         guard Set(try db.texts("SELECT name FROM sqlite_schema WHERE type='table'")) == allowedTables,
               try db.integer("SELECT count(*) FROM sqlite_schema WHERE type IN ('view','trigger')") == 0 else {
             throw BackupError.invalid("unsupported database object inventory")
@@ -387,23 +507,25 @@ enum BackupArchive {
             "drafts": ["conversation_id", "payload"], "settings": ["key", "payload"],
             "invocations": ["id", "conversation_id", "project_id", "turn_id", "human_event_id", "assistant_event_id", "provider_identity", "request_body", "request_digest", "admission_json", "admission_digest", "usage_json", "usage_digest", "created_at", "chunk_count", "observed_bytes", "final_status", "terminal_reason", "finalized_at", "recovered"],
             "invocation_chunks": ["invocation_id", "chunk_sequence", "byte_count", "digest", "payload"]]
-        if schema == 3 {
+        if schema >= 3 {
             columns["invocations"]! += ["episode_id", "episode_work_id"]
             columns["episodes"] = ["id", "conversation_id", "project_id", "turn_id", "human_event_id", "limits_json", "limits_digest", "state", "revision", "clock_domain", "created_ticks", "deadline_ticks", "last_ticks", "created_utc", "terminal_reason"]
             columns["episode_resource_totals"] = ["episode_id", "resource", "charged", "held", "cap"]
             columns["episode_request_snapshots"] = ["digest", "byte_count", "payload"]
             columns["episode_work"] = ["id", "episode_id", "parent_id", "kind", "adapter_identity", "request_json", "request_digest", "snapshot_digest", "revision", "state", "charged_json", "held_json", "observed_json", "receipt_id", "receipt_json", "receipt_digest", "created_ticks", "armed_ticks", "ended_ticks", "recovered", "adapter_violation"]
         }
+        if schema == 1 { columns.removeValue(forKey: "invocations"); columns.removeValue(forKey: "invocation_chunks") }
+        if schema == 4 { columns["episodes"]! += ["origin_json", "origin_digest"] }
         for (table, expected) in columns {
             guard try db.texts("SELECT name FROM pragma_table_info('\(table)') ORDER BY cid") == expected else { throw BackupError.invalid("unsupported table contract") }
         }
-        if schema == 3, let handle = db.handle {
+        if schema >= 3, let handle = db.handle {
             do { try MemoryStore.validateEpisodeJournal(database: handle) }
             catch { throw BackupError.invalid("episode journal failed integrity verification") }
         }
         guard try db.integer("SELECT count(*) FROM events e LEFT JOIN conversations c ON e.conversation_id=c.id WHERE c.id IS NULL OR e.project_id!=c.project_id OR e.role NOT IN ('human','assistant') OR e.status NOT IN ('complete','partial','failed','cancelled')") == 0,
               try db.integer("SELECT count(*) FROM drafts d LEFT JOIN conversations c ON d.conversation_id=c.id WHERE c.id IS NULL") == 0,
-              try db.integer("SELECT count(*) FROM invocation_chunks x LEFT JOIN invocations i ON x.invocation_id=i.id WHERE i.id IS NULL") == 0 else {
+              (try (schema == 1 || db.integer("SELECT count(*) FROM invocation_chunks x LEFT JOIN invocations i ON x.invocation_id=i.id WHERE i.id IS NULL") == 0)) else {
             throw BackupError.invalid("invalid event scope or capture state")
         }
         try db.each("SELECT payload,byte_count,digest FROM events") { row in
@@ -416,71 +538,86 @@ enum BackupArchive {
                 guard data.count <= MemoryStore.maximumPayloadBytes, String(data: data, encoding: .utf8) != nil else { throw BackupError.invalid("invalid draft or stored setting") }
             }
         }
-        try db.each("SELECT payload,byte_count,digest FROM invocation_chunks") { row in
-            let data = db.blob(row, 0)
-            guard !data.isEmpty, data.count <= MemoryStore.maximumPayloadBytes, data.count == db.int(row, 1), digest(data) == db.text(row, 2), String(data: data, encoding: .utf8) != nil else { throw BackupError.invalid("invocation chunk failed integrity verification") }
+        if schema >= 2 {
+            try db.each("SELECT payload,byte_count,digest FROM invocation_chunks") { row in
+                let data = db.blob(row, 0)
+                guard !data.isEmpty, data.count <= MemoryStore.maximumPayloadBytes, data.count == db.int(row, 1), digest(data) == db.text(row, 2), String(data: data, encoding: .utf8) != nil else { throw BackupError.invalid("invocation chunk failed integrity verification") }
+            }
         }
-        var providers = Set<String>(), models = Set<String>()
-        try db.each("SELECT id,conversation_id,project_id,turn_id,human_event_id,assistant_event_id,provider_identity,request_body,request_digest,admission_json,admission_digest,usage_json,usage_digest,chunk_count,observed_bytes,final_status,terminal_reason,finalized_at,recovered FROM invocations") { row in
-            let id = db.text(row, 0), conversation = db.text(row, 1), project = db.text(row, 2), turn = db.text(row, 3)
-            let human = db.text(row, 4), assistant = db.text(row, 5), provider = db.text(row, 6)
-            try verifyProvider(provider)
-            providers.insert(provider)
-            let request = db.blob(row, 7)
-            guard !request.isEmpty, request.count <= MemoryStore.maximumPayloadBytes, digest(request) == db.text(row, 8) else { throw BackupError.invalid("invocation request digest mismatch") }
-            let object = try credentialFreeObject(request)
-            if let model = object["model"] as? String { models.insert(model) }
-            for (payloadColumn, digestColumn) in [(Int32(9), Int32(10)), (Int32(11), Int32(12))] {
-                let data = db.blob(row, payloadColumn)
-                guard data.count <= 65536, (data.isEmpty ? "" : digest(data)) == db.text(row, digestColumn) else { throw BackupError.invalid("admission or usage receipt digest mismatch") }
-                if !data.isEmpty { _ = try credentialFreeObject(data) }
-            }
-            guard try db.integer("SELECT count(*) FROM events e JOIN conversations c ON c.id=e.conversation_id WHERE e.id=? AND e.conversation_id=? AND e.project_id=? AND e.turn_id=? AND e.role='human' AND e.status='complete' AND c.project_id=e.project_id", bindings: [human, conversation, project, turn]) == 1 else { throw BackupError.invalid("invocation lacks its matching human source") }
-            var payload = Data(), sequence = 0
-            try db.each("SELECT chunk_sequence,payload FROM invocation_chunks WHERE invocation_id=? ORDER BY chunk_sequence", bindings: [id]) { chunk in
-                let data = db.blob(chunk, 1)
-                guard db.int(chunk, 0) == sequence, sequence < MemoryStore.maximumStreamChunks,
-                      payload.count <= MemoryStore.maximumPayloadBytes - data.count else { throw BackupError.invalid("noncontiguous or oversized invocation stream") }
-                payload.append(data); sequence += 1
-            }
-            guard sequence == db.int(row, 13), payload.count == db.int(row, 14) else { throw BackupError.invalid("invocation chunk manifest mismatch") }
-            let statusText = db.text(row, 15), reasonText = db.text(row, 16), finalized = db.text(row, 17), recovered = db.int(row, 18)
-            guard recovered == 0 || recovered == 1 else { throw BackupError.invalid("invalid recovered state") }
-            if statusText.isEmpty {
-                guard reasonText.isEmpty, finalized.isEmpty, recovered == 0,
-                      try db.integer("SELECT count(*) FROM events WHERE id=?", bindings: [assistant]) == 0 else { throw BackupError.invalid("unfinished invocation has a published result") }
-            } else {
-                guard let status = CaptureStatus(rawValue: statusText), let reason = InvocationTerminalReason(rawValue: reasonText),
-                      !finalized.isEmpty, terminalCompatible(status, reason) else { throw BackupError.invalid("invalid invocation terminal state") }
-                if recovered == 1 && reason != .interrupted {
-                    guard schema == 3, reason == .cancelled,
-                          status == (payload.isEmpty ? .cancelled : .partial),
-                          try db.integer("SELECT count(*) FROM invocations i JOIN episodes ep ON ep.id=i.episode_id WHERE i.id=? AND ep.state='cancelled'", bindings: [id]) == 1 else {
-                        throw BackupError.invalid("invalid recovered cancellation state")
+        var providers = Set<Data>(), models = Set<Data>()
+        if schema >= 2 {
+            try db.each("SELECT id,conversation_id,project_id,turn_id,human_event_id,assistant_event_id,provider_identity,request_body,request_digest,admission_json,admission_digest,usage_json,usage_digest,chunk_count,observed_bytes,final_status,terminal_reason,finalized_at,recovered FROM invocations") { row in
+                let id = db.text(row, 0), conversation = db.text(row, 1), project = db.text(row, 2), turn = db.text(row, 3)
+                let human = db.text(row, 4), assistant = db.text(row, 5), provider = db.text(row, 6)
+                try verifyProvider(provider)
+                providers.insert(Data(provider.utf8))
+                let request = db.blob(row, 7)
+                guard !request.isEmpty, request.count <= MemoryStore.maximumPayloadBytes, digest(request) == db.text(row, 8) else { throw BackupError.invalid("invocation request digest mismatch") }
+                let object = try credentialFreeObject(request)
+                if let model = object["model"] as? String { models.insert(Data(model.utf8)) }
+                for (payloadColumn, digestColumn) in [(Int32(9), Int32(10)), (Int32(11), Int32(12))] {
+                    let data = db.blob(row, payloadColumn)
+                    guard data.count <= 65536, (data.isEmpty ? "" : digest(data)) == db.text(row, digestColumn) else { throw BackupError.invalid("admission or usage receipt digest mismatch") }
+                    if !data.isEmpty { _ = try credentialFreeObject(data) }
+                }
+                guard try db.integer("SELECT count(*) FROM events e JOIN conversations c ON c.id=e.conversation_id WHERE e.id=? AND e.conversation_id=? AND e.project_id=? AND e.turn_id=? AND e.role='human' AND e.status='complete' AND c.project_id=e.project_id", bindings: [human, conversation, project, turn]) == 1 else { throw BackupError.invalid("invocation lacks its matching human source") }
+                var payload = Data(), sequence = 0
+                try db.each("SELECT chunk_sequence,payload FROM invocation_chunks WHERE invocation_id=? ORDER BY chunk_sequence", bindings: [id]) { chunk in
+                    let data = db.blob(chunk, 1)
+                    guard db.int(chunk, 0) == sequence, sequence < MemoryStore.maximumStreamChunks,
+                          payload.count <= MemoryStore.maximumPayloadBytes - data.count else { throw BackupError.invalid("noncontiguous or oversized invocation stream") }
+                    payload.append(data); sequence += 1
+                }
+                guard sequence == db.int(row, 13), payload.count == db.int(row, 14) else { throw BackupError.invalid("invocation chunk manifest mismatch") }
+                let statusText = db.text(row, 15), reasonText = db.text(row, 16), finalized = db.text(row, 17), recovered = db.int(row, 18)
+                guard recovered == 0 || recovered == 1 else { throw BackupError.invalid("invalid recovered state") }
+                if statusText.isEmpty {
+                    guard reasonText.isEmpty, finalized.isEmpty, recovered == 0,
+                          try db.integer("SELECT count(*) FROM events WHERE id=?", bindings: [assistant]) == 0 else { throw BackupError.invalid("unfinished invocation has a published result") }
+                } else {
+                    guard let status = CaptureStatus(rawValue: statusText), let reason = InvocationTerminalReason(rawValue: reasonText),
+                          !finalized.isEmpty, terminalCompatible(status, reason) else { throw BackupError.invalid("invalid invocation terminal state") }
+                    if recovered == 1 && reason != .interrupted {
+                        guard schema >= 3, reason == .cancelled,
+                              status == (payload.isEmpty ? .cancelled : .partial),
+                              try db.integer("SELECT count(*) FROM invocations i JOIN episodes ep ON ep.id=i.episode_id WHERE i.id=? AND ep.state='cancelled'", bindings: [id]) == 1 else {
+                            throw BackupError.invalid("invalid recovered cancellation state")
+                        }
                     }
+                    var matches = false
+                    try db.each("SELECT conversation_id,project_id,turn_id,role,status,payload FROM events WHERE id=?", bindings: [assistant]) { event in
+                        matches = episodeIdentifierEqual(db.text(event, 0), conversation)
+                            && episodeIdentifierEqual(db.text(event, 1), project) && episodeIdentifierEqual(db.text(event, 2), turn)
+                            && db.text(event, 3) == "assistant" && db.text(event, 4) == statusText && db.blob(event, 5) == payload
+                    }
+                    guard matches else { throw BackupError.invalid("terminal invocation disagrees with assistant source") }
                 }
-                var matches = false
-                try db.each("SELECT conversation_id,project_id,turn_id,role,status,payload FROM events WHERE id=?", bindings: [assistant]) { event in
-                    matches = db.text(event, 0) == conversation && db.text(event, 1) == project && db.text(event, 2) == turn && db.text(event, 3) == "assistant" && db.text(event, 4) == statusText && db.blob(event, 5) == payload
-                }
-                guard matches else { throw BackupError.invalid("terminal invocation disagrees with assistant source") }
+            }
+        }
+        if schema == 4 {
+            guard try db.integer("SELECT count(*) FROM invocations i JOIN episodes ep ON ep.id=i.episode_id WHERE ep.conversation_id IS NULL OR ep.turn_id IS NULL OR ep.human_event_id IS NULL") == 0 else {
+                throw BackupError.invalid("local read episode cannot own an invocation")
             }
         }
         var scopes: [BackupScopeCount] = []
-        try db.each("SELECT project_id,count(*) FROM conversations GROUP BY project_id ORDER BY project_id") { row in
+        let scopeQuery = schema == 4
+            ? "SELECT project_id,(SELECT count(*) FROM conversations c WHERE c.project_id=p.project_id) FROM (SELECT project_id FROM conversations UNION SELECT project_id FROM episodes) p ORDER BY project_id"
+            : "SELECT project_id,count(*) FROM conversations GROUP BY project_id ORDER BY project_id"
+        try db.each(scopeQuery) { row in
             let project = db.text(row, 0)
             scopes.append(BackupScopeCount(projectID: project, conversations: db.int(row, 1),
                 events: try db.integer("SELECT count(*) FROM events WHERE project_id=?", bindings: [project]),
                 sourceBytes: Int64(try db.integer("SELECT coalesce(sum(byte_count),0) FROM events WHERE project_id=?", bindings: [project])),
-                invocations: try db.integer("SELECT count(*) FROM invocations WHERE project_id=?", bindings: [project])))
+                invocations: schema == 1 ? 0 : try db.integer("SELECT count(*) FROM invocations WHERE project_id=?", bindings: [project])))
         }
         var inventory = BackupInventory(conversations: try db.integer("SELECT count(*) FROM conversations"),
             events: try db.integer("SELECT count(*) FROM events"), sourceBytes: Int64(try db.integer("SELECT coalesce(sum(byte_count),0) FROM events")),
             drafts: try db.integer("SELECT count(*) FROM drafts"), settings: try db.integer("SELECT count(*) FROM settings"),
-            invocations: try db.integer("SELECT count(*) FROM invocations"), unfinishedInvocations: try db.integer("SELECT count(*) FROM invocations WHERE final_status=''"),
-            chunks: try db.integer("SELECT count(*) FROM invocation_chunks"), chunkBytes: Int64(try db.integer("SELECT coalesce(sum(byte_count),0) FROM invocation_chunks")),
-            providerIdentities: providers.sorted(), servedModels: models.sorted(), scopes: scopes)
-        if schema == 3 {
+            invocations: schema == 1 ? 0 : try db.integer("SELECT count(*) FROM invocations"), unfinishedInvocations: schema == 1 ? 0 : try db.integer("SELECT count(*) FROM invocations WHERE final_status=''"),
+            chunks: schema == 1 ? 0 : try db.integer("SELECT count(*) FROM invocation_chunks"), chunkBytes: schema == 1 ? 0 : Int64(try db.integer("SELECT coalesce(sum(byte_count),0) FROM invocation_chunks")),
+            providerIdentities: providers.sorted { $0.lexicographicallyPrecedes($1) }.map { String(decoding: $0, as: UTF8.self) },
+            servedModels: models.sorted { $0.lexicographicallyPrecedes($1) }.map { String(decoding: $0, as: UTF8.self) }, scopes: scopes)
+        if schema >= 3 {
             inventory.episodes = try db.integer("SELECT count(*) FROM episodes")
             inventory.unfinishedEpisodes = try db.integer("SELECT count(*) FROM episodes WHERE state='active'")
             inventory.episodeWork = try db.integer("SELECT count(*) FROM episode_work")
@@ -495,6 +632,15 @@ enum BackupArchive {
             }
             inventory.episodeCharged = charged
             inventory.episodeHeld = held
+            if schema == 4 {
+                var chat = 0, localRead = 0
+                try db.each("SELECT origin_json FROM episodes") { row in
+                    let origin = try JSONDecoder().decode(EpisodeOrigin.self, from: db.blob(row, 0))
+                    switch origin { case .chat: chat += 1; case .localRead: localRead += 1 }
+                }
+                guard chat + localRead == inventory.episodes else { throw BackupError.invalid("episode origin inventory mismatch") }
+                inventory.chatEpisodes = chat; inventory.localReadEpisodes = localRead
+            }
         }
         return inventory
     }

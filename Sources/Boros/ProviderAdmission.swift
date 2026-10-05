@@ -35,7 +35,7 @@ enum ProviderAdmissionError: Error {
         case .unobservableInput: return .episodeInputUnobservable
         case .adapterViolation: return .episodeAdapterViolation
         case .clockUnavailable: return .episodeClockUnavailable
-        case .invalid, .conflict: return .episodeAccountingFailed
+        case .invalid, .conflict, .scopeMismatch: return .episodeAccountingFailed
         }
     }
 }

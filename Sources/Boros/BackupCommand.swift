@@ -19,6 +19,8 @@ struct BackupCommandReport: Codable {
     let unfinishedArchivedInvocations: Int
     let restoredInterruptedAttempts: Int?
     var episodes: Int? = nil
+    var chatEpisodes: Int? = nil
+    var localReadEpisodes: Int? = nil
     var episodeWork: Int? = nil
     var unfinishedArchivedEpisodes: Int? = nil
     var uncertainArchivedWork: Int? = nil
@@ -107,7 +109,10 @@ enum BackupCommand {
             invocations: manifest.inventory.invocations, chunks: manifest.inventory.chunks,
             unfinishedArchivedInvocations: manifest.inventory.unfinishedInvocations,
             restoredInterruptedAttempts: operation == "--backup-restore" ? manifest.inventory.unfinishedInvocations : nil,
-            episodes: manifest.inventory.episodes, episodeWork: manifest.inventory.episodeWork,
+            episodes: manifest.inventory.episodes,
+            chatEpisodes: manifest.databaseSchema == 4 ? manifest.inventory.chatEpisodes : nil,
+            localReadEpisodes: manifest.databaseSchema == 4 ? manifest.inventory.localReadEpisodes : nil,
+            episodeWork: manifest.inventory.episodeWork,
             unfinishedArchivedEpisodes: manifest.inventory.unfinishedEpisodes,
             uncertainArchivedWork: manifest.inventory.episodeUncertainWork,
             restoredInterruptedEpisodes: operation == "--backup-restore" ? manifest.inventory.unfinishedEpisodes : nil)

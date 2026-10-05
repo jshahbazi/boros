@@ -58,6 +58,11 @@ final class EpisodeLease: @unchecked Sendable {
         }
         return receipt
     }
+    func checkActive(projectID: String) throws -> EpisodeReceipt {
+        let receipt = try checkActive()
+        guard episodeIdentifierEqual(receipt.projectID, projectID) else { throw EpisodeBudgetError.scopeMismatch }
+        return receipt
+    }
     func prepare(kind: EpisodeWorkKind, resources: EpisodeResources, adapterIdentity: String,
         snapshot: Data? = nil, inputTokensKnown: Bool = true, parentID: String? = nil,
         operationID: String = UUID().uuidString) throws -> EpisodeWorkRecord {
@@ -69,13 +74,13 @@ final class EpisodeLease: @unchecked Sendable {
     }
     func arm(_ work: EpisodeWorkRecord) throws -> EpisodeWorkRecord {
         if let reason = progressCancellationReason() { throw reason }
-        guard work.episodeID == episodeID else { throw EpisodeBudgetError.invalid }
+        guard episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.invalid }
         return try ledger.armEpisodeWork(episodeID: episodeID, operationID: work.id,
             expectedRevision: work.revision, clock: clock.now())
     }
     func dispatch(_ work: EpisodeWorkRecord, start: () -> Void) throws -> EpisodeWorkRecord {
         if let reason = progressCancellationReason() { throw reason }
-        guard work.episodeID == episodeID else { throw EpisodeBudgetError.invalid }
+        guard episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.invalid }
         var suppressed: EpisodeBudgetError?
         let handed = try ledger.performEpisodeHandoff(episodeID: episodeID, operationID: work.id,
             expectedRevision: work.revision, clock: clock.now()) {
@@ -88,20 +93,25 @@ final class EpisodeLease: @unchecked Sendable {
     func settle(_ work: EpisodeWorkRecord, outcome: EpisodeWorkOutcome,
         observed: EpisodeResources? = nil, evidence: Data? = nil,
         receiptID: String = UUID().uuidString, adapterViolation: Bool = false) throws -> EpisodeWorkRecord {
-        guard work.episodeID == episodeID else { throw EpisodeBudgetError.invalid }
+        guard episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.invalid }
         return try ledger.settleEpisodeWork(episodeID: episodeID, operationID: work.id,
             settlement: EpisodeWorkSettlement(receiptID: receiptID, outcome: outcome, observed: observed, evidence: evidence, adapterViolation: adapterViolation),
             clock: clock.now())
     }
     func finish(reason: EpisodeState) throws -> EpisodeReceipt {
         guard reason != .active else { throw EpisodeBudgetError.invalid }
-        // Interrupt a query before waiting for the owner mutex it holds.
+        interruptLocally(reason: reason)
+        return try ledger.finishEpisode(episodeID: episodeID, reason: reason, clock: clock.now())
+    }
+    /// This immediate fence performs no database work and may be called from
+    /// the UI before scheduling durable terminalization on an owner queue.
+    func interruptLocally(reason: EpisodeState) {
+        precondition(reason != .active)
         lifecycleLock.lock()
         if localInterruption == nil {
             localInterruption = reason == .deadlineExceeded ? .deadlineExceeded : reason == .budgetExceeded ? .exhausted : .inactive
         }
         lifecycleLock.unlock()
-        return try ledger.finishEpisode(episodeID: episodeID, reason: reason, clock: clock.now())
     }
     private func progressCancellationReason() -> EpisodeBudgetError? {
         lifecycleLock.lock(); defer { lifecycleLock.unlock() }; return localInterruption

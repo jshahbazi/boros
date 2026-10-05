@@ -94,6 +94,15 @@ struct MemorySourceReference: Identifiable, Codable, Equatable {
     let byteCount: Int
 }
 
+extension MemorySourceReference {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.sequence == rhs.sequence && episodeIdentifierEqual(lhs.eventID, rhs.eventID)
+            && episodeIdentifierEqual(lhs.conversationID, rhs.conversationID) && episodeIdentifierEqual(lhs.projectID, rhs.projectID)
+            && lhs.role == rhs.role && lhs.status == rhs.status && episodeIdentifierEqual(lhs.createdAt, rhs.createdAt)
+            && episodeIdentifierEqual(lhs.digest, rhs.digest) && lhs.byteCount == rhs.byteCount
+    }
+}
+
 struct PayloadPage: Codable {
     let eventID: String
     let offset: Int
@@ -137,7 +146,7 @@ final class MemoryStore: @unchecked Sendable {
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private var activeSQLFence: EpisodeSQLFence?
 
-    init(directory: URL) throws {
+    init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil) throws {
         self.directory = directory.standardizedFileURL
         do {
             try Self.prepareDirectory(self.directory)
@@ -157,7 +166,14 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard (0...3).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            guard (0...4).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            // Foreign keys must be disabled outside the replacement transaction.
+            // Children retain REFERENCES episodes while that parent is rebuilt.
+            if version == 3 {
+                guard let database else { throw MemoryError.database("closed owner") }
+                try Self.validateEpisodeJournal(database: database)
+                try execute("PRAGMA foreign_keys=OFF")
+            }
             try transaction {
                 try execute("""
                     CREATE TABLE IF NOT EXISTS conversations (
@@ -209,9 +225,14 @@ final class MemoryStore: @unchecked Sendable {
                       PRIMARY KEY(invocation_id, chunk_sequence)
                     ) WITHOUT ROWID
                     """)
+                if version == 3 { try migrateEpisodeSchemaThree(checkpoint: episodeMigrationCheckpoint) }
                 try createEpisodeSchema()
-                try execute("PRAGMA user_version=3")
+                let violations = try query("PRAGMA foreign_key_check") { string($0, 0) }
+                guard violations.isEmpty else { throw MemoryError.database("episode migration foreign-key failure") }
+                try execute("PRAGMA user_version=4")
+                if version == 3 { try episodeMigrationCheckpoint?("beforeCommit") }
             }
+            try execute("PRAGMA foreign_keys=ON")
             // The exclusive process lock is already held. Publish interrupted
             // attempts before any caller can read history or start a request.
             try recoverInterruptedEpisodes()
@@ -368,8 +389,8 @@ final class MemoryStore: @unchecked Sendable {
     func loadCandidate(reference: MemorySourceReference) throws -> MemoryEvent {
         try locked {
             guard try sourceReference(eventID: reference.eventID, projectID: reference.projectID) == reference else { throw MemoryError.conflict("source candidate metadata changed") }
-            guard let event = try findEvent(reference.eventID), event.projectID == reference.projectID,
-                  event.conversationID == reference.conversationID, event.digest == reference.digest, event.byteCount == reference.byteCount else { throw MemoryError.database("source candidate failed integrity verification") }
+            guard let event = try findEvent(reference.eventID), episodeIdentifierEqual(event.projectID, reference.projectID),
+                  episodeIdentifierEqual(event.conversationID, reference.conversationID), event.digest == reference.digest, event.byteCount == reference.byteCount else { throw MemoryError.database("source candidate failed integrity verification") }
             return event
         }
     }
@@ -414,9 +435,9 @@ final class MemoryStore: @unchecked Sendable {
                 throw MemoryError.conflict("assistant event ID belongs to a durable invocation")
             }
             if let existing = try findEvent(eventID) {
-                guard existing.conversationID == conversationID, existing.projectID == scope.projectID,
-                      existing.role == role, existing.status == status, existing.turnID == turnID,
-                      existing.digest == digest, existing.text == text else {
+                guard episodeIdentifierEqual(existing.conversationID, conversationID), episodeIdentifierEqual(existing.projectID, scope.projectID),
+                      existing.role == role, existing.status == status, episodeIdentifierEqual(existing.turnID, turnID),
+                      existing.digest == digest, episodeIdentifierEqual(existing.text, text) else {
                     throw MemoryError.conflict("event ID was already used for different content or metadata")
                 }
                 return existing
@@ -446,32 +467,35 @@ final class MemoryStore: @unchecked Sendable {
             }
             let scope = try conversation(conversationID)
             if let existing = try findInvocation(invocationID) {
-                guard existing.conversationID == conversationID, existing.projectID == scope.projectID,
-                      existing.turnID == turnID, existing.humanEventID == humanEventID,
-                      existing.assistantEventID == assistantEventID, existing.providerIdentity == providerIdentity,
+                guard episodeIdentifierEqual(existing.conversationID, conversationID), episodeIdentifierEqual(existing.projectID, scope.projectID),
+                      episodeIdentifierEqual(existing.turnID, turnID), episodeIdentifierEqual(existing.humanEventID, humanEventID),
+                      episodeIdentifierEqual(existing.assistantEventID, assistantEventID), episodeIdentifierEqual(existing.providerIdentity, providerIdentity),
                       existing.requestBody == requestBody, existing.admissionJSON == admissionJSON,
-                      existing.episodeID == episodeID, existing.episodeWorkID == episodeWorkID else {
+                      episodeIdentifierEqual(existing.episodeID, episodeID), episodeIdentifierEqual(existing.episodeWorkID, episodeWorkID) else {
                     throw MemoryError.conflict("invocation ID was already used for different request or scope")
+                }
+                if let episodeID = existing.episodeID {
+                    guard let episode = try findEpisode(episodeID), !episode.origin.isLocalRead else { throw EpisodeBudgetError.invalid }
                 }
                 return existing
             }
             guard (episodeID == nil) == (episodeWorkID == nil) else { throw EpisodeBudgetError.invalid }
             if let episodeID, let episodeWorkID {
                 try validateIdentifier(episodeID, name: "episode ID"); try validateIdentifier(episodeWorkID, name: "episode work ID")
-                guard let episode = try findEpisode(episodeID), episode.state == .active,
-                      episode.conversationID == conversationID, episode.projectID == scope.projectID,
-                      episode.turnID == turnID, episode.humanEventID == humanEventID,
-                      let work = try findEpisodeWork(episodeWorkID), work.episodeID == episodeID,
+                guard let episode = try findEpisode(episodeID), episode.state == .active, !episode.origin.isLocalRead,
+                      episodeIdentifierEqual(episode.conversationID, conversationID), episodeIdentifierEqual(episode.projectID, scope.projectID),
+                      episodeIdentifierEqual(episode.turnID, turnID), episodeIdentifierEqual(episode.humanEventID, humanEventID),
+                      let work = try findEpisodeWork(episodeWorkID), episodeIdentifierEqual(work.episodeID, episodeID),
                       work.state == .prepared || work.state == .dispatchArmed,
                       work.request.kind == .answer || work.request.kind == .nativeInference,
                       work.request.snapshot == requestBody else { throw EpisodeBudgetError.inactive }
             }
             guard let human = try findEvent(humanEventID), human.role == .human,
-                  human.status == .complete, human.conversationID == conversationID,
-                  human.projectID == scope.projectID, human.turnID == turnID else {
+                  human.status == .complete, episodeIdentifierEqual(human.conversationID, conversationID),
+                  episodeIdentifierEqual(human.projectID, scope.projectID), episodeIdentifierEqual(human.turnID, turnID) else {
                 throw MemoryError.invalid("invocation requires its committed complete human event in the same turn and scope")
             }
-            guard humanEventID != assistantEventID, try findEvent(assistantEventID) == nil,
+            guard !episodeIdentifierEqual(humanEventID, assistantEventID), try findEvent(assistantEventID) == nil,
                   try query("SELECT id FROM invocations WHERE assistant_event_id=?", [.text(assistantEventID)], map: { string($0, 0) }).isEmpty else {
                 throw MemoryError.conflict("assistant event ID was already used or reserved")
             }
@@ -522,7 +546,7 @@ final class MemoryStore: @unchecked Sendable {
                     guard let episode = try findEpisode(episodeID), episode.state == .active else { throw EpisodeBudgetError.inactive }
                     if episode.clockDomain.hasPrefix("mach-continuous-v1:") {
                         let current = try SystemEpisodeClock().now()
-                        guard current.domain == episode.clockDomain else { throw EpisodeBudgetError.clockUnavailable }
+                        guard episodeIdentifierEqual(current.domain, episode.clockDomain) else { throw EpisodeBudgetError.clockUnavailable }
                         guard current.continuousNanoseconds < episode.deadlineNanoseconds else { throw EpisodeBudgetError.deadlineExceeded }
                     }
                 }
@@ -728,9 +752,9 @@ final class MemoryStore: @unchecked Sendable {
         if let existingStatus = attempt.finalStatus {
             guard existingStatus == status, attempt.terminalReason == reason, attempt.usageJSON == usageJSON,
                   let existing = try findEvent(attempt.assistantEventID),
-                  existing.conversationID == attempt.conversationID, existing.projectID == attempt.projectID,
-                  existing.role == .assistant, existing.turnID == attempt.turnID,
-                  existing.status == status, existing.text == text else {
+                  episodeIdentifierEqual(existing.conversationID, attempt.conversationID), episodeIdentifierEqual(existing.projectID, attempt.projectID),
+                  existing.role == .assistant, episodeIdentifierEqual(existing.turnID, attempt.turnID),
+                  existing.status == status, episodeIdentifierEqual(existing.text, text) else {
                 throw MemoryError.conflict("invocation was already finalized with a different terminal result")
             }
             return existing
@@ -968,18 +992,48 @@ final class MemoryStore: @unchecked Sendable {
 }
 
 extension MemoryStore: EpisodeLedger {
-    private func createEpisodeSchema() throws {
-        try execute("""
-            CREATE TABLE IF NOT EXISTS episodes (
-              id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
-              project_id TEXT NOT NULL, turn_id TEXT NOT NULL, human_event_id TEXT NOT NULL UNIQUE REFERENCES events(id),
+    private func createEpisodeParent(table: String, ifAbsent: Bool) throws {
+        guard table == "episodes" || table == "episodes_v4" else { throw EpisodeBudgetError.invalid }
+        try execute("CREATE TABLE " + (ifAbsent ? "IF NOT EXISTS " : "") + "\"" + table + "\"" + """
+             (
+              id TEXT PRIMARY KEY, conversation_id TEXT REFERENCES conversations(id),
+              project_id TEXT NOT NULL, turn_id TEXT, human_event_id TEXT UNIQUE REFERENCES events(id),
               limits_json BLOB NOT NULL CHECK(length(limits_json)>0 AND length(limits_json)<=65536),
               limits_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','completed','failed','cancelled','interrupted','deadlineExceeded','budgetExceeded')),
               revision INTEGER NOT NULL CHECK(revision>=0), clock_domain TEXT NOT NULL,
               created_ticks INTEGER NOT NULL CHECK(created_ticks>0), deadline_ticks INTEGER NOT NULL CHECK(deadline_ticks>created_ticks),
               last_ticks INTEGER NOT NULL CHECK(last_ticks>=created_ticks), created_utc REAL NOT NULL,
-              terminal_reason TEXT NOT NULL DEFAULT '', CHECK((state='active' AND terminal_reason='') OR (state!='active' AND terminal_reason!=''))
+              terminal_reason TEXT NOT NULL DEFAULT '',
+              origin_json BLOB NOT NULL CHECK(length(origin_json)>0 AND length(origin_json)<=65536), origin_digest TEXT NOT NULL,
+              CHECK((conversation_id IS NULL AND turn_id IS NULL AND human_event_id IS NULL) OR
+                    (conversation_id IS NOT NULL AND turn_id IS NOT NULL AND human_event_id IS NOT NULL)),
+              CHECK((state='active' AND terminal_reason='') OR (state!='active' AND terminal_reason!=''))
             )
+            """)
+    }
+    private func migrateEpisodeSchemaThree(checkpoint: ((String) throws -> Void)?) throws {
+        try createEpisodeParent(table: "episodes_v4", ifAbsent: false)
+        let legacy = try query("SELECT id,conversation_id,turn_id,human_event_id,project_id FROM episodes") {
+            (string($0, 0), string($0, 1), string($0, 2), string($0, 3), string($0, 4))
+        }
+        for (id, conversationID, turnID, humanEventID, projectID) in legacy {
+            let origin = try episodeJSON(EpisodeOrigin.chat(conversationID: conversationID, turnID: turnID, humanEventID: humanEventID))
+            try execute("""
+                INSERT INTO episodes_v4 (id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,terminal_reason,origin_json,origin_digest)
+                SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,terminal_reason,?,? FROM episodes WHERE id=?
+                """, [.blob(origin), .text(try Self.episodeOriginDigest(projectID: projectID, originJSON: origin)), .text(id)])
+        }
+        try checkpoint?("beforeParentReplacement")
+        try execute("DROP TABLE episodes")
+        try execute("ALTER TABLE episodes_v4 RENAME TO episodes")
+        try checkpoint?("afterParentReplacement")
+    }
+    private func createEpisodeSchema() throws {
+        try createEpisodeParent(table: "episodes", ifAbsent: true)
+        try execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS episode_local_read_request
+            ON episodes(json_extract(origin_json,'$.binding.initiator'),json_extract(origin_json,'$.binding.requestID'))
+            WHERE json_extract(origin_json,'$.kind')='localRead'
             """)
         try execute("""
             CREATE TABLE IF NOT EXISTS episode_resource_totals (
@@ -1013,6 +1067,12 @@ extension MemoryStore: EpisodeLedger {
         if !columns.contains("episode_id") { try execute("ALTER TABLE invocations ADD COLUMN episode_id TEXT REFERENCES episodes(id)") }
         if !columns.contains("episode_work_id") { try execute("ALTER TABLE invocations ADD COLUMN episode_work_id TEXT REFERENCES episode_work(id)") }
     }
+    /// Domain-separated binding of the exact stored origin bytes and project.
+    static func episodeOriginDigest(projectID: String, originJSON: Data) throws -> String {
+        guard !projectID.isEmpty, projectID.utf8.count <= 256, !projectID.contains("\0"),
+              !originJSON.isEmpty, originJSON.count <= 65536 else { throw EpisodeBudgetError.invalid }
+        return digest(Data(("boros-episode-origin-v1\0" + projectID + "\0").utf8) + originJSON)
+    }
     private func episodeJSON<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(value)
@@ -1036,7 +1096,7 @@ extension MemoryStore: EpisodeLedger {
         // merely by reaching the lock in a different order.
         if supplied.domain.hasPrefix("mach-continuous-v1:") {
             let current = try SystemEpisodeClock().now()
-            guard current.domain == supplied.domain else { throw EpisodeBudgetError.clockUnavailable }
+            guard episodeIdentifierEqual(current.domain, supplied.domain) else { throw EpisodeBudgetError.clockUnavailable }
             return current
         }
         return supplied
@@ -1047,11 +1107,24 @@ extension MemoryStore: EpisodeLedger {
         guard limits.deadlineMilliseconds > 0, limits.deadlineMilliseconds <= 86_400_000 else { throw EpisodeBudgetError.invalid }
     }
     private func findEpisode(_ id: String) throws -> EpisodeReceipt? {
-        try query("SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,deadline_ticks,created_utc FROM episodes WHERE id=?", [.text(id)]) { row in
+        try query("SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,deadline_ticks,created_utc,origin_json,origin_digest FROM episodes WHERE id=?", [.text(id)]) { row in
             let data = blob(row, 5)
             guard Self.digest(data) == string(row, 6), let state = EpisodeState(rawValue: string(row, 7)) else { throw MemoryError.database("episode failed integrity verification") }
             let limits = try episodeDecode(EpisodeLimits.self, data)
             try validateEpisodeLimits(limits)
+            let originBytes = blob(row, 12)
+            guard try Self.episodeOriginDigest(projectID: string(row, 2), originJSON: originBytes) == string(row, 13) else { throw MemoryError.database("episode origin integrity failure") }
+            let origin = try episodeDecode(EpisodeOrigin.self, originBytes)
+            guard try episodeJSON(origin) == originBytes else { throw MemoryError.database("episode origin is not canonical") }
+            let conversationID = sqlite3_column_type(row, 1) == SQLITE_NULL ? nil : string(row, 1)
+            let turnID = sqlite3_column_type(row, 3) == SQLITE_NULL ? nil : string(row, 3)
+            let humanEventID = sqlite3_column_type(row, 4) == SQLITE_NULL ? nil : string(row, 4)
+            switch origin {
+            case .chat(let conversation, let turn, let human):
+                guard episodeIdentifierEqual(conversationID, conversation), episodeIdentifierEqual(turnID, turn), episodeIdentifierEqual(humanEventID, human) else { throw MemoryError.database("episode origin chat linkage mismatch") }
+            case .localRead:
+                guard conversationID == nil, turnID == nil, humanEventID == nil else { throw MemoryError.database("episode origin read linkage mismatch") }
+            }
             var charged = EpisodeResources.zero, held = EpisodeResources.zero
             let totals = try query("SELECT resource,charged,held,cap FROM episode_resource_totals WHERE episode_id=?", [.text(id)]) { total in
                 guard let resource = EpisodeResource(rawValue: string(total, 0)) else { throw MemoryError.database("unknown episode resource") }
@@ -1062,7 +1135,7 @@ extension MemoryStore: EpisodeLedger {
             }
             guard totals.count == EpisodeResource.allCases.count, Set(totals).count == totals.count else { throw MemoryError.database("episode resource vector incomplete") }
             let unknown = try query("SELECT count(*) FROM episode_work WHERE episode_id=? AND state NOT IN ('prepared','cancelledBeforeDispatch') AND json_extract(request_json,'$.inputTokensKnown')=0 AND json_extract(request_json,'$.resources.modelCalls')>0", [.text(id)]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
-            return EpisodeReceipt(id: string(row, 0), conversationID: string(row, 1), projectID: string(row, 2), turnID: string(row, 3), humanEventID: string(row, 4), limits: limits, state: state, revision: Int(sqlite3_column_int64(row, 8)), clockDomain: string(row, 9), deadlineNanoseconds: UInt64(sqlite3_column_int64(row, 10)), createdAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 11)), charged: charged, held: held, unknownInputOperations: unknown)
+            return EpisodeReceipt(id: string(row, 0), conversationID: conversationID, projectID: string(row, 2), turnID: turnID, humanEventID: humanEventID, origin: origin, limits: limits, state: state, revision: Int(sqlite3_column_int64(row, 8)), clockDomain: string(row, 9), deadlineNanoseconds: UInt64(sqlite3_column_int64(row, 10)), createdAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 11)), charged: charged, held: held, unknownInputOperations: unknown)
         }.first
     }
     private func findEpisodeWork(_ id: String) throws -> EpisodeWorkRecord? {
@@ -1116,7 +1189,7 @@ extension MemoryStore: EpisodeLedger {
         try validateEpisodeClock(clock)
         guard episode.state == .active else { return .inactive }
         let previous = try query("SELECT last_ticks FROM episodes WHERE id=?", [.text(episode.id)]) { UInt64(sqlite3_column_int64($0, 0)) }.first ?? 0
-        if episode.clockDomain != clock.domain || clock.continuousNanoseconds < previous {
+        if !episodeIdentifierEqual(episode.clockDomain, clock.domain) || clock.continuousNanoseconds < previous {
             try terminalizeEpisode(episode, reason: .interrupted, ticks: previous)
             return .clockUnavailable
         }
@@ -1135,10 +1208,10 @@ extension MemoryStore: EpisodeLedger {
             let scope = try conversation(conversationID), payload = try validatePayload(text)
             guard !payload.isEmpty else { throw EpisodeBudgetError.invalid }
             if let existing = try findEpisode(episodeID) {
-                guard existing.conversationID == conversationID, existing.projectID == scope.projectID,
-                      existing.turnID == turnID, existing.humanEventID == humanEventID, existing.limits == limits,
-                      let human = try findEvent(humanEventID), human.text == text, human.role == .human,
-                      human.status == .complete, human.turnID == turnID else { throw EpisodeBudgetError.conflict }
+                guard episodeIdentifierEqual(existing.conversationID, conversationID), episodeIdentifierEqual(existing.projectID, scope.projectID),
+                      episodeIdentifierEqual(existing.turnID, turnID), episodeIdentifierEqual(existing.humanEventID, humanEventID), existing.limits == limits,
+                      let human = try findEvent(humanEventID), episodeIdentifierEqual(human.text, text), human.role == .human,
+                      human.status == .complete, episodeIdentifierEqual(human.turnID, turnID) else { throw EpisodeBudgetError.conflict }
                 return existing
             }
             guard try findEvent(humanEventID) == nil,
@@ -1147,17 +1220,53 @@ extension MemoryStore: EpisodeLedger {
             let (deadline, overflow) = clock.continuousNanoseconds.addingReportingOverflow(duration)
             guard !overflow, deadline <= UInt64(Int64.max) else { throw EpisodeBudgetError.clockUnavailable }
             let limitsJSON = try episodeJSON(limits)
+            let originJSON = try episodeJSON(EpisodeOrigin.chat(conversationID: conversationID, turnID: turnID, humanEventID: humanEventID))
             try transaction {
                 let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
                 let human = MemoryEvent(id: humanEventID, conversationID: conversationID, projectID: scope.projectID, role: .human, text: text, status: .complete, turnID: turnID, createdAt: formatter.string(from: clock.utc), digest: Self.digest(payload), byteCount: payload.count)
                 try insertEvent(human, payload: payload)
-                try execute("INSERT INTO episodes (id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc) VALUES (?,?,?,?,?,?,?,'active',0,?,?,?,?,?)", [.text(episodeID), .text(conversationID), .text(scope.projectID), .text(turnID), .text(humanEventID), .blob(limitsJSON), .text(Self.digest(limitsJSON)), .text(clock.domain), .integer(Int(clock.continuousNanoseconds)), .integer(Int(deadline)), .integer(Int(clock.continuousNanoseconds)), .text(String(clock.utc.timeIntervalSince1970))])
+                try execute("INSERT INTO episodes (id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,origin_json,origin_digest) VALUES (?,?,?,?,?,?,?,'active',0,?,?,?,?,?,?,?)", [.text(episodeID), .text(conversationID), .text(scope.projectID), .text(turnID), .text(humanEventID), .blob(limitsJSON), .text(Self.digest(limitsJSON)), .text(clock.domain), .integer(Int(clock.continuousNanoseconds)), .integer(Int(deadline)), .integer(Int(clock.continuousNanoseconds)), .text(String(clock.utc.timeIntervalSince1970)), .blob(originJSON), .text(try Self.episodeOriginDigest(projectID: scope.projectID, originJSON: originJSON))])
                 for resource in EpisodeResource.allCases {
                     try execute("INSERT INTO episode_resource_totals VALUES (?,?,0,0,?)", [.text(episodeID), .text(resource.rawValue), .integer(limits.resources[resource])])
                 }
             }
             guard let result = try findEpisode(episodeID) else { throw MemoryError.database("episode publication failed") }
             return result
+        }
+    }
+    func beginLocalReadEpisode(episodeID: String, projectID: String, binding: EpisodeLocalReadBinding,
+        limits: EpisodeLimits, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt {
+        try locked {
+            try validateIdentifier(episodeID, name: "episode ID"); try validateIdentifier(projectID, name: "project ID")
+            try validateEpisodeClock(clock); try validateEpisodeLimits(limits); _ = try binding.validated()
+            let origin = EpisodeOrigin.localRead(binding)
+            if let existing = try findEpisode(episodeID) {
+                guard episodeIdentifierEqual(existing.projectID, projectID), existing.origin == origin, existing.limits == limits else { throw EpisodeBudgetError.conflict }
+                return existing
+            }
+            // A stable local request identifies one allowance across episodes
+            // and projects. The matching predicate uses the unique partial index.
+            let priorRequest = try query("""
+                SELECT id FROM episodes WHERE json_extract(origin_json,'$.kind')='localRead'
+                  AND json_extract(origin_json,'$.binding.initiator')=? AND json_extract(origin_json,'$.binding.requestID')=?
+                """, [.text(binding.initiator.rawValue), .text(binding.requestID)]) { string($0, 0) }
+            guard priorRequest.isEmpty else { throw EpisodeBudgetError.conflict }
+            let (deadline, overflow) = clock.continuousNanoseconds.addingReportingOverflow(UInt64(limits.deadlineMilliseconds) * 1_000_000)
+            guard !overflow, deadline <= UInt64(Int64.max) else { throw EpisodeBudgetError.clockUnavailable }
+            let limitsJSON = try episodeJSON(limits), originJSON = try episodeJSON(origin)
+            try transaction {
+                try execute("""
+                    INSERT INTO episodes (id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,origin_json,origin_digest)
+                    VALUES (?,NULL,?,NULL,NULL,?,?,'active',0,?,?,?,?,?,?,?)
+                    """, [.text(episodeID), .text(projectID), .blob(limitsJSON), .text(Self.digest(limitsJSON)), .text(clock.domain),
+                        .integer(Int(clock.continuousNanoseconds)), .integer(Int(deadline)), .integer(Int(clock.continuousNanoseconds)),
+                        .text(String(clock.utc.timeIntervalSince1970)), .blob(originJSON), .text(try Self.episodeOriginDigest(projectID: projectID, originJSON: originJSON))])
+                for resource in EpisodeResource.allCases {
+                    try execute("INSERT INTO episode_resource_totals VALUES (?,?,0,0,?)", [.text(episodeID), .text(resource.rawValue), .integer(limits.resources[resource])])
+                }
+            }
+            guard let receipt = try findEpisode(episodeID) else { throw MemoryError.database("local read episode publication failed") }
+            return receipt
         }
     }
     func reserveEpisodeWork(episodeID: String, request: EpisodeWorkRequest, clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord {
@@ -1179,8 +1288,12 @@ extension MemoryStore: EpisodeLedger {
             guard !request.adapterIdentity.isEmpty, request.adapterIdentity.utf8.count <= 2048, !request.adapterIdentity.contains("\0") else { throw EpisodeBudgetError.invalid }
             if request.adapterIdentity.hasPrefix("http:") || request.adapterIdentity.hasPrefix("https:") { try validateProviderIdentity(request.adapterIdentity) }
             if let snapshot = request.snapshot { try validateRequestBody(snapshot) }
+            guard let originEpisode = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
+            if originEpisode.origin.isLocalRead {
+                guard [.retrieval, .sourceRead, .queryEmbedding].contains(request.kind), request.resources.outputTokens == 0 else { throw EpisodeBudgetError.invalid }
+            }
             if let existing = try findEpisodeWork(request.id) {
-                guard existing.episodeID == episodeID, existing.request == request else { throw EpisodeBudgetError.conflict }
+                guard episodeIdentifierEqual(existing.episodeID, episodeID), existing.request == request else { throw EpisodeBudgetError.conflict }
                 return existing
             }
             var failure: EpisodeBudgetError?
@@ -1191,7 +1304,7 @@ extension MemoryStore: EpisodeLedger {
                     failure = .unobservableInput; return
                 }
                 if let parent = request.parentID {
-                    guard let work = try findEpisodeWork(parent), work.episodeID == episodeID else { throw EpisodeBudgetError.invalid }
+                    guard let work = try findEpisodeWork(parent), episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.invalid }
                 }
                 let blocked = try query("SELECT id FROM episode_work WHERE adapter_identity=? AND adapter_violation=1 LIMIT 1", [.text(request.adapterIdentity)]) { string($0, 0) }
                 guard blocked.isEmpty else { failure = .adapterViolation; return }
@@ -1242,7 +1355,10 @@ extension MemoryStore: EpisodeLedger {
         let clock = try episodeRuntimeClock(clock)
         var failure: EpisodeBudgetError?
         try transaction {
-            guard let episode = try findEpisode(episodeID), let work = try findEpisodeWork(operationID), work.episodeID == episodeID else { throw MemoryError.missing("episode work") }
+            guard let episode = try findEpisode(episodeID), let work = try findEpisodeWork(operationID), episodeIdentifierEqual(work.episodeID, episodeID) else { throw MemoryError.missing("episode work") }
+            if episode.origin.isLocalRead {
+                guard [.retrieval, .sourceRead, .queryEmbedding].contains(work.request.kind), work.request.resources.outputTokens == 0 else { throw EpisodeBudgetError.invalid }
+            }
             if let problem = try advanceEpisodeClock(episode, clock: clock) { failure = problem; return }
             guard expectedRevision == work.revision, expectedRevision == episode.revision else { failure = .staleRevision; return }
             if work.state == .dispatchArmed { return }
@@ -1266,7 +1382,7 @@ extension MemoryStore: EpisodeLedger {
             // owner mutex, so Stop cannot interleave between its check and start.
             if let episode = try findEpisode(episodeID) {
                 let finalClock = try episodeRuntimeClock(clock)
-                if episode.state != .active || finalClock.domain != episode.clockDomain || finalClock.continuousNanoseconds >= episode.deadlineNanoseconds {
+                if episode.state != .active || !episodeIdentifierEqual(finalClock.domain, episode.clockDomain) || finalClock.continuousNanoseconds >= episode.deadlineNanoseconds {
                     try transaction { try terminalizeEpisode(episode, reason: .deadlineExceeded, ticks: finalClock.continuousNanoseconds) }
                     throw EpisodeBudgetError.deadlineExceeded
                 }
@@ -1296,16 +1412,16 @@ extension MemoryStore: EpisodeLedger {
                     guard let latest = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
                     episode = latest
                 }
-                guard let work = try findEpisodeWork(operationID), work.episodeID == episodeID else { throw MemoryError.missing("episode work") }
+                guard let work = try findEpisodeWork(operationID), episodeIdentifierEqual(work.episodeID, episodeID) else { throw MemoryError.missing("episode work") }
                 let oldData = try query("SELECT receipt_json FROM episode_work WHERE id=?", [.text(operationID)], map: { blob($0, 0) }).first ?? Data()
                 var receipts = oldData.isEmpty ? [] : try episodeDecode([EpisodeWorkSettlement].self, oldData)
-                if let previous = receipts.first(where: { $0.receiptID == settlement.receiptID }) {
+                if let previous = receipts.first(where: { episodeIdentifierEqual($0.receiptID, settlement.receiptID) }) {
                     guard previous == settlement else { failure = .conflict; return }
                     return
                 }
                 let otherReceipts = try query("SELECT receipt_json FROM episode_work WHERE episode_id=? AND id!=? AND length(receipt_json)>0", [.text(episodeID), .text(operationID)]) { blob($0, 0) }
                 for data in otherReceipts {
-                    guard !((try episodeDecode([EpisodeWorkSettlement].self, data)).contains { $0.receiptID == settlement.receiptID }) else { failure = .conflict; return }
+                    guard !((try episodeDecode([EpisodeWorkSettlement].self, data)).contains { episodeIdentifierEqual($0.receiptID, settlement.receiptID) }) else { failure = .conflict; return }
                 }
                 guard receipts.count < 3 else { failure = .conflict; return }
                 let wasPrepared = work.state == .prepared || work.state == .cancelledBeforeDispatch
@@ -1399,7 +1515,7 @@ extension MemoryStore: EpisodeLedger {
             let now = try? SystemEpisodeClock().now()
             for (id, previous) in ids {
                 guard let episode = try findEpisode(id) else { throw MemoryError.database("interrupted episode disappeared") }
-                let comparable = now?.domain == episode.clockDomain
+                let comparable = episodeIdentifierEqual(now?.domain, episode.clockDomain)
                 let ticks = comparable ? max(previous, now!.continuousNanoseconds) : previous
                 let reason: EpisodeState = comparable && ticks >= episode.deadlineNanoseconds ? .deadlineExceeded : .interrupted
                 try terminalizeEpisode(episode, reason: reason, ticks: ticks)
@@ -1412,7 +1528,7 @@ extension MemoryStore: EpisodeLedger {
         try locked {
             try validateIdentifier(episodeID, name: "episode ID"); try validateIdentifier(operationID, name: "work ID")
             guard let work = try findEpisodeWork(operationID) else { return nil }
-            guard work.episodeID == episodeID else { throw EpisodeBudgetError.conflict }
+            guard episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.conflict }
             return work
         }
     }
@@ -1471,9 +1587,32 @@ extension MemoryStore: EpisodeLedger {
             return digest
         }
         guard Set(snapshots).count == snapshots.count else { throw MemoryError.database("duplicate episode archive snapshots") }
-        struct CheckEpisode { let id: String; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
-        let episodes = try rows("SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,terminal_reason FROM episodes") { row -> CheckEpisode in
-            for index: Int32 in [0,1,2,3,4,9] { try identifier(text(row, index)) }
+        let schemaVersion = try rows("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
+        guard schemaVersion == 3 || schemaVersion == 4 else { throw MemoryError.database("unsupported episode archive schema") }
+        struct CheckEpisode { let id: String; let origin: EpisodeOrigin; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
+        let originColumns = schemaVersion == 4 ? ",origin_json,origin_digest" : ""
+        var localReadRequestIDs = Set<Data>()
+        let episodes = try rows("SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,terminal_reason" + originColumns + " FROM episodes") { row -> CheckEpisode in
+            for index: Int32 in [0,2,9] { try identifier(text(row, index)) }
+            let origin: EpisodeOrigin
+            if schemaVersion == 4 {
+                let originBytes = data(row, 15)
+                guard try Self.episodeOriginDigest(projectID: text(row, 2), originJSON: originBytes) == text(row, 16) else { throw MemoryError.database("episode archive origin integrity failure") }
+                origin = try decode(EpisodeOrigin.self, originBytes)
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                guard try encoder.encode(origin) == originBytes else { throw MemoryError.database("episode archive origin is not canonical") }
+            } else {
+                origin = .chat(conversationID: text(row, 1), turnID: text(row, 3), humanEventID: text(row, 4))
+                _ = try origin.validated()
+            }
+            switch origin {
+            case .chat(let conversation, let turn, let human):
+                guard [Int32(1), 3, 4].allSatisfy({ sqlite3_column_type(row, $0) != SQLITE_NULL }),
+                      episodeIdentifierEqual(text(row, 1), conversation), episodeIdentifierEqual(text(row, 3), turn), episodeIdentifierEqual(text(row, 4), human) else { throw MemoryError.database("episode archive chat origin linkage failure") }
+            case .localRead(let binding):
+                guard [Int32(1), 3, 4].allSatisfy({ sqlite3_column_type(row, $0) == SQLITE_NULL }),
+                      localReadRequestIDs.insert(Data((binding.initiator.rawValue + "\0" + binding.requestID).utf8)).inserted else { throw MemoryError.database("episode archive read origin linkage failure") }
+            }
             let bytes = data(row, 5)
             guard Self.digest(bytes) == text(row, 6), let state = EpisodeState(rawValue: text(row, 7)) else { throw MemoryError.database("episode archive integrity failure") }
             try credentialFree(bytes)
@@ -1484,12 +1623,12 @@ extension MemoryStore: EpisodeLedger {
                   deadline - created == limits.deadlineMilliseconds * 1_000_000,
                   sqlite3_column_double(row, 13).isFinite,
                   state == .active ? (text(row, 14).isEmpty && revision == 0) : (text(row, 14) == state.rawValue && revision > 0) else { throw MemoryError.database("invalid episode archive lifecycle") }
-            return CheckEpisode(id: text(row, 0), limits: limits, state: state, revision: revision, created: created, deadline: deadline, last: last)
+            return CheckEpisode(id: text(row, 0), origin: origin, limits: limits, state: state, revision: revision, created: created, deadline: deadline, last: last)
         }
-        let invalidScopes = try rows("SELECT count(*) FROM episodes ep JOIN conversations c ON c.id=ep.conversation_id JOIN events e ON e.id=ep.human_event_id WHERE ep.project_id!=c.project_id OR e.project_id!=ep.project_id OR e.conversation_id!=ep.conversation_id OR e.turn_id!=ep.turn_id OR e.role!='human' OR e.status!='complete'") { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
+        let invalidScopes = try rows("SELECT count(*) FROM episodes ep LEFT JOIN conversations c ON c.id=ep.conversation_id LEFT JOIN events e ON e.id=ep.human_event_id WHERE ep.conversation_id IS NOT NULL AND (c.id IS NULL OR e.id IS NULL OR ep.project_id!=c.project_id OR e.project_id!=ep.project_id OR e.conversation_id!=ep.conversation_id OR e.turn_id!=ep.turn_id OR e.role!='human' OR e.status!='complete')") { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
         guard invalidScopes == 0 else { throw MemoryError.database("episode archive scope mismatch") }
         struct CheckWork { let id: String; let episodeID: String; let request: EpisodeWorkRequest; let charged: EpisodeResources; let held: EpisodeResources; let violation: Bool }
-        var receiptIDs = Set<String>()
+        var receiptIDs = Set<Data>()
         let works = try rows("SELECT id,episode_id,parent_id,kind,adapter_identity,request_json,request_digest,snapshot_digest,revision,state,charged_json,held_json,observed_json,receipt_id,receipt_json,receipt_digest,created_ticks,armed_ticks,ended_ticks,recovered,adapter_violation FROM episode_work") { row -> CheckWork in
             let id = text(row, 0), episodeID = text(row, 1)
             try identifier(id); try identifier(episodeID)
@@ -1498,12 +1637,24 @@ extension MemoryStore: EpisodeLedger {
             try credentialFree(metadata)
             let request = try decode(EpisodeWorkRequest.self, metadata)
             _ = try request.resources.validated()
-            guard request.id == id, request.snapshot == nil, request.parentID == (sqlite3_column_type(row, 2) == SQLITE_NULL ? nil : text(row, 2)), request.kind.rawValue == text(row, 3), request.adapterIdentity == text(row, 4),
+            guard episodeIdentifierEqual(request.id, id), request.snapshot == nil, episodeIdentifierEqual(request.parentID, sqlite3_column_type(row, 2) == SQLITE_NULL ? nil : text(row, 2)), request.kind.rawValue == text(row, 3), episodeIdentifierEqual(request.adapterIdentity, text(row, 4)),
                   !request.adapterIdentity.isEmpty, request.adapterIdentity.utf8.count <= 2048, !request.adapterIdentity.contains("\0"),
-                  let episode = episodes.first(where: { $0.id == episodeID }), sqlite3_column_int64(row, 8) >= 0,
+                  let episode = episodes.first(where: { episodeIdentifierEqual($0.id, episodeID) }), sqlite3_column_int64(row, 8) >= 0,
                   sqlite3_column_int64(row, 8) <= episode.revision,
                   sqlite3_column_int64(row, 16) >= episode.created,
                   [0,1].contains(sqlite3_column_int(row, 19)), [0,1].contains(sqlite3_column_int(row, 20)) else { throw MemoryError.database("invalid episode archive work linkage") }
+            if episode.origin.isLocalRead {
+                guard [.retrieval, .sourceRead, .queryEmbedding].contains(request.kind), request.resources.outputTokens == 0 else { throw MemoryError.database("local read episode archive contains generative work") }
+            }
+            switch request.kind {
+            case .calibration, .answer, .nativeInference, .queryEmbedding:
+                guard request.resources.modelCalls == 1 else { throw MemoryError.database("episode archive model call mismatch") }
+            case .providerDiscovery, .tokenizer:
+                guard request.resources.modelCalls == 0, request.resources.httpAttempts == 1 else { throw MemoryError.database("episode archive HTTP attempt mismatch") }
+            case .retrieval, .sourceRead:
+                guard request.resources.modelCalls == 0 else { throw MemoryError.database("episode archive retrieval call mismatch") }
+            }
+            guard (request.resources.inputTokens == 0 && request.resources.outputTokens == 0) || request.resources.modelCalls > 0 else { throw MemoryError.database("episode archive tokens lack model call") }
             let snapshot = text(row, 7)
             if !snapshot.isEmpty { guard snapshots.contains(snapshot) else { throw MemoryError.database("episode archive snapshot missing") } }
             let charged = try decode(EpisodeResources.self, data(row, 10)).validated(), held = try decode(EpisodeResources.self, data(row, 11)).validated()
@@ -1512,7 +1663,7 @@ extension MemoryStore: EpisodeLedger {
             let receiptBytes = data(row, 14)
             guard (receiptBytes.isEmpty ? "" : Self.digest(receiptBytes)) == text(row, 15) else { throw MemoryError.database("episode archive receipt integrity failure") }
             let receipts = receiptBytes.isEmpty ? [] : try decode([EpisodeWorkSettlement].self, receiptBytes)
-            guard receipts.count <= 3, receipts.last?.receiptID == (sqlite3_column_type(row, 13) == SQLITE_NULL ? nil : text(row, 13)), receipts.last?.observed == observed else { throw MemoryError.database("episode archive receipt linkage mismatch") }
+            guard receipts.count <= 3, episodeIdentifierEqual(receipts.last?.receiptID, sqlite3_column_type(row, 13) == SQLITE_NULL ? nil : text(row, 13)), receipts.last?.observed == observed else { throw MemoryError.database("episode archive receipt linkage mismatch") }
             let createdTicks = sqlite3_column_int64(row, 16), armedTicks = sqlite3_column_int64(row, 17), endedTicks = sqlite3_column_int64(row, 18)
             guard createdTicks <= episode.last, createdTicks < episode.deadline,
                   armedTicks == 0 || (armedTicks >= createdTicks && armedTicks < episode.deadline),
@@ -1549,7 +1700,7 @@ extension MemoryStore: EpisodeLedger {
             }
             for receipt in receipts {
                 try identifier(receipt.receiptID)
-                guard receiptIDs.insert(episodeID + "\0" + receipt.receiptID).inserted else { throw MemoryError.database("duplicate episode archive receipt ID") }
+                guard receiptIDs.insert(Data((episodeID + "\0" + receipt.receiptID).utf8)).inserted else { throw MemoryError.database("duplicate episode archive receipt ID") }
                 if let evidence = receipt.evidence { guard evidence.count <= 16384 else { throw MemoryError.database("episode archive receipt exceeds bound") }; try credentialFree(evidence) }
                 if let usage = receipt.observed { _ = try usage.validated() }
             }
@@ -1574,7 +1725,7 @@ extension MemoryStore: EpisodeLedger {
             return CheckWork(id: id, episodeID: episodeID, request: request, charged: charged, held: held, violation: violation)
         }
         for work in works {
-            if let parent = work.request.parentID { guard works.contains(where: { $0.id == parent && $0.episodeID == work.episodeID }) else { throw MemoryError.database("episode archive parent scope mismatch") } }
+            if let parent = work.request.parentID { guard works.contains(where: { episodeIdentifierEqual($0.id, parent) && episodeIdentifierEqual($0.episodeID, work.episodeID) }) else { throw MemoryError.database("episode archive parent scope mismatch") } }
         }
         let totals = try rows("SELECT episode_id,resource,charged,held,cap FROM episode_resource_totals") { row -> (String, EpisodeResource, Int, Int, Int) in
             guard let resource = EpisodeResource(rawValue: text(row, 1)) else { throw MemoryError.database("unknown episode archive resource") }
@@ -1584,12 +1735,12 @@ extension MemoryStore: EpisodeLedger {
         let snapshotTotals = try rows("SELECT ep.id,coalesce(sum(s.byte_count),0) FROM episodes ep LEFT JOIN (SELECT DISTINCT episode_id,snapshot_digest FROM episode_work WHERE snapshot_digest IS NOT NULL) w ON w.episode_id=ep.id LEFT JOIN episode_request_snapshots s ON s.digest=w.snapshot_digest GROUP BY ep.id") { (text($0, 0), Int(sqlite3_column_int64($0, 1))) }
         for episode in episodes {
             var spent = EpisodeResources.zero, reserved = EpisodeResources.zero
-            let ownWorks = works.filter { $0.episodeID == episode.id }
+            let ownWorks = works.filter { episodeIdentifierEqual($0.episodeID, episode.id) }
             guard ownWorks.count <= maximumEpisodeWorkRecords else { throw MemoryError.database("episode archive work row bound exceeded") }
-            guard snapshotTotals.first(where: { $0.0 == episode.id })?.1 ?? 0 <= maximumEpisodeSnapshotBytes else { throw MemoryError.database("episode archive snapshot bound exceeded") }
+            guard snapshotTotals.first(where: { episodeIdentifierEqual($0.0, episode.id) })?.1 ?? 0 <= maximumEpisodeSnapshotBytes else { throw MemoryError.database("episode archive snapshot bound exceeded") }
             for work in ownWorks { spent = try spent.adding(work.charged); reserved = try reserved.adding(work.held) }
             for resource in EpisodeResource.allCases {
-                let matches = totals.filter { $0.0 == episode.id && $0.1 == resource }
+                let matches = totals.filter { episodeIdentifierEqual($0.0, episode.id) && $0.1 == resource }
                 guard matches.count == 1, matches[0].2 == spent[resource], matches[0].3 == reserved[resource], matches[0].4 == episode.limits.resources[resource] else { throw MemoryError.database("episode archive totals disagree with work") }
             }
             if !(try spent.adding(reserved)).fits(within: episode.limits.resources) { guard ownWorks.contains(where: { $0.violation }) else { throw MemoryError.database("episode archive budget exceeded without adapter violation") } }
@@ -1601,6 +1752,7 @@ extension MemoryStore: EpisodeLedger {
             WHERE (i.episode_id IS NULL)!=(i.episode_work_id IS NULL)
                OR (i.episode_id IS NOT NULL AND (
                     ep.id IS NULL OR w.id IS NULL OR w.episode_id!=ep.id
+                    OR ep.conversation_id IS NULL OR ep.turn_id IS NULL OR ep.human_event_id IS NULL
                     OR i.conversation_id!=ep.conversation_id OR i.project_id!=ep.project_id
                     OR i.turn_id!=ep.turn_id OR i.human_event_id!=ep.human_event_id
                     OR w.kind NOT IN ('answer','nativeInference')

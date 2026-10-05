@@ -113,12 +113,14 @@ enum ContextAssembler {
         episodeLease: EpisodeLease? = nil,
         operationIsNested: Bool = false
     ) throws -> ContextSnapshot {
-        try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
+        _ = try episodeLease?.checkActive(projectID: projectID)
+        return try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
             guard budgetBytes > 0, maximumRecentBytes >= 0, maximumRecentBytes <= 180000, maximumEvidenceBytes >= 0 else { throw ContextError.invalidBudget }
             if episodeLease != nil {
-                guard try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, { try store.conversationProjectID(conversationID: conversationID) }) == projectID else { throw ContextError.scopeMismatch }
+                let actualProject = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, { try store.conversationProjectID(conversationID: conversationID) })
+                guard episodeIdentifierEqual(actualProject, projectID) else { throw ContextError.scopeMismatch }
             } else {
-                guard try store.listConversations(projectID: projectID).contains(where: { $0.id == conversationID }) else { throw ContextError.scopeMismatch }
+                guard try store.listConversations(projectID: projectID).contains(where: { episodeIdentifierEqual($0.id, conversationID) }) else { throw ContextError.scopeMismatch }
             }
             let systemMessage = ContextMessage(role: "system", content: system.isEmpty ? historyFraming : system + "\n\n" + historyFraming)
             let promptMessage = ContextMessage(role: "user", content: prompt)
@@ -162,6 +164,7 @@ enum ContextAssembler {
                 else if let episodeLease {
                     let report = try MeteredRetrieval.lexicalSearch(store: store, query: historicalQuery ?? "", projectID: projectID,
                         limit: 16, matching: historicalMatching, excludingEventIDs: excluded, lease: episodeLease, nested: true)
+                    try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
                     lexicalReport = report; hits = report.hits
                 } else {
                     hits = try store.search(query: historicalQuery ?? "", projectID: projectID, limit: 16,
@@ -171,7 +174,7 @@ enum ContextAssembler {
                     // Supplied semantic/raw results cannot turn a stale or foreign
                     // excerpt into a source citation in this project's request.
                     guard let reference = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, { try store.sourceReference(eventID: hit.eventID, projectID: projectID) }),
-                          hit.projectID == projectID, hit.conversationID == reference.conversationID,
+                          episodeIdentifierEqual(hit.projectID, projectID), episodeIdentifierEqual(hit.conversationID, reference.conversationID),
                           hit.role == reference.role, hit.status == reference.status, hit.digest == reference.digest,
                           hit.createdAt == reference.createdAt, hit.totalBytes == reference.byteCount,
                           !hit.excerpt.isEmpty, hit.excerpt.utf8.count <= MemoryStore.maximumPageBytes else { throw ContextError.sourceMismatch }

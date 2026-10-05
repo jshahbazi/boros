@@ -1,7 +1,20 @@
 import Foundation
 
+/// SQLite identifiers use BINARY collation. Swift String equality performs
+/// canonical Unicode equivalence, so it must not decide durable identity.
+func episodeIdentifierEqual(_ lhs: String, _ rhs: String) -> Bool {
+    lhs.utf8.elementsEqual(rhs.utf8)
+}
+func episodeIdentifierEqual(_ lhs: String?, _ rhs: String?) -> Bool {
+    switch (lhs, rhs) {
+    case (.none, .none): return true
+    case (.some(let lhs), .some(let rhs)): return episodeIdentifierEqual(lhs, rhs)
+    default: return false
+    }
+}
+
 enum EpisodeBudgetError: Error {
-    case invalid, exhausted, deadlineExceeded, inactive, staleRevision, clockUnavailable, unobservableInput, adapterViolation, conflict
+    case invalid, exhausted, deadlineExceeded, inactive, staleRevision, clockUnavailable, unobservableInput, adapterViolation, conflict, scopeMismatch
     var failureCode: String {
         switch self {
         case .exhausted: return "episode_budget_exceeded"
@@ -10,6 +23,7 @@ enum EpisodeBudgetError: Error {
         case .unobservableInput: return "episode_input_unobservable"
         case .adapterViolation: return "episode_adapter_violation"
         case .clockUnavailable: return "episode_clock_unavailable"
+        case .scopeMismatch: return "episode_scope_mismatch"
         case .invalid, .conflict: return "episode_accounting_failed"
         }
     }
@@ -125,12 +139,109 @@ enum EpisodeWorkOutcome: String, Codable {
     case completed, failedConfirmed, outcomeUnknown, cancelledBeforeDispatch
 }
 
+enum EpisodeLocalReadInitiator: String, Codable { case humanBrowser, localReadCLI, syntheticEvaluation }
+enum EpisodeLocalReadPurpose: String, Codable { case searchInitialPage, sourcePage, contextSelection, retrievalProbe }
+
+private struct EpisodeOriginKey: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
+}
+private func requireEpisodeKeys(_ decoder: Decoder, _ expected: Set<String>) throws {
+    let values = try decoder.container(keyedBy: EpisodeOriginKey.self)
+    guard Set(values.allKeys.map(\.stringValue)) == expected else { throw EpisodeBudgetError.invalid }
+}
+private func validateEpisodeBindingIdentifier(_ value: String) throws {
+    guard !value.isEmpty, value.utf8.count <= 256, !value.contains("\0") else { throw EpisodeBudgetError.invalid }
+}
+
+struct EpisodeLocalReadBinding: Codable, Equatable {
+    let version: String
+    let initiator: EpisodeLocalReadInitiator
+    let purpose: EpisodeLocalReadPurpose
+    let requestID: String
+    let descriptorVersion: String
+    let descriptorSHA256: String
+    init(version: String = "local-read-v1", initiator: EpisodeLocalReadInitiator, purpose: EpisodeLocalReadPurpose,
+         requestID: String, descriptorVersion: String, descriptorSHA256: String) {
+        self.version = version; self.initiator = initiator; self.purpose = purpose
+        self.requestID = requestID; self.descriptorVersion = descriptorVersion; self.descriptorSHA256 = descriptorSHA256
+    }
+    func validated() throws -> Self {
+        guard version == "local-read-v1" else { throw EpisodeBudgetError.invalid }
+        try validateEpisodeBindingIdentifier(requestID)
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-".utf8)
+        guard (1...128).contains(descriptorVersion.utf8.count), descriptorVersion.utf8.allSatisfy({ allowed.contains($0) }),
+              descriptorSHA256.utf8.count == 64,
+              descriptorSHA256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { throw EpisodeBudgetError.invalid }
+        return self
+    }
+    private enum CodingKeys: String, CodingKey { case version, initiator, purpose, requestID, descriptorVersion, descriptorSHA256 }
+    init(from decoder: Decoder) throws {
+        try requireEpisodeKeys(decoder, ["version", "initiator", "purpose", "requestID", "descriptorVersion", "descriptorSHA256"])
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(version: try values.decode(String.self, forKey: .version),
+            initiator: try values.decode(EpisodeLocalReadInitiator.self, forKey: .initiator),
+            purpose: try values.decode(EpisodeLocalReadPurpose.self, forKey: .purpose),
+            requestID: try values.decode(String.self, forKey: .requestID),
+            descriptorVersion: try values.decode(String.self, forKey: .descriptorVersion),
+            descriptorSHA256: try values.decode(String.self, forKey: .descriptorSHA256))
+        _ = try validated()
+    }
+}
+
+enum EpisodeOrigin: Codable, Equatable {
+    case chat(conversationID: String, turnID: String, humanEventID: String)
+    case localRead(EpisodeLocalReadBinding)
+    var isLocalRead: Bool { if case .localRead = self { return true }; return false }
+    func validated() throws -> Self {
+        switch self {
+        case .chat(let conversationID, let turnID, let humanEventID):
+            for value in [conversationID, turnID, humanEventID] { try validateEpisodeBindingIdentifier(value) }
+        case .localRead(let binding): _ = try binding.validated()
+        }
+        return self
+    }
+    private enum CodingKeys: String, CodingKey { case version, kind, conversationID, turnID, humanEventID, binding }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        guard try values.decode(String.self, forKey: .version) == "episode-origin-v1" else { throw EpisodeBudgetError.invalid }
+        switch try values.decode(String.self, forKey: .kind) {
+        case "chat":
+            try requireEpisodeKeys(decoder, ["version", "kind", "conversationID", "turnID", "humanEventID"])
+            self = .chat(conversationID: try values.decode(String.self, forKey: .conversationID),
+                turnID: try values.decode(String.self, forKey: .turnID), humanEventID: try values.decode(String.self, forKey: .humanEventID))
+        case "localRead":
+            try requireEpisodeKeys(decoder, ["version", "kind", "binding"])
+            self = .localRead(try values.decode(EpisodeLocalReadBinding.self, forKey: .binding))
+        default: throw EpisodeBudgetError.invalid
+        }
+        _ = try validated()
+    }
+    func encode(to encoder: Encoder) throws {
+        _ = try validated()
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode("episode-origin-v1", forKey: .version)
+        switch self {
+        case .chat(let conversationID, let turnID, let humanEventID):
+            try values.encode("chat", forKey: .kind)
+            try values.encode(conversationID, forKey: .conversationID)
+            try values.encode(turnID, forKey: .turnID)
+            try values.encode(humanEventID, forKey: .humanEventID)
+        case .localRead(let binding):
+            try values.encode("localRead", forKey: .kind); try values.encode(binding, forKey: .binding)
+        }
+    }
+}
+
 struct EpisodeReceipt: Codable, Equatable {
     let id: String
-    let conversationID: String
+    let conversationID: String?
     let projectID: String
-    let turnID: String
-    let humanEventID: String
+    let turnID: String?
+    let humanEventID: String?
+    let origin: EpisodeOrigin
     let limits: EpisodeLimits
     let state: EpisodeState
     let revision: Int
@@ -140,6 +251,24 @@ struct EpisodeReceipt: Codable, Equatable {
     let charged: EpisodeResources
     let held: EpisodeResources
     let unknownInputOperations: Int
+
+    init(id: String, conversationID: String?, projectID: String, turnID: String?, humanEventID: String?, origin: EpisodeOrigin,
+        limits: EpisodeLimits, state: EpisodeState, revision: Int, clockDomain: String, deadlineNanoseconds: UInt64,
+        createdAt: Date, charged: EpisodeResources, held: EpisodeResources, unknownInputOperations: Int) {
+        self.id = id; self.conversationID = conversationID; self.projectID = projectID; self.turnID = turnID
+        self.humanEventID = humanEventID; self.origin = origin; self.limits = limits; self.state = state
+        self.revision = revision; self.clockDomain = clockDomain; self.deadlineNanoseconds = deadlineNanoseconds
+        self.createdAt = createdAt; self.charged = charged; self.held = held; self.unknownInputOperations = unknownInputOperations
+    }
+    /// Existing trusted chat fixtures and adapters retain their constructor.
+    init(id: String, conversationID: String, projectID: String, turnID: String, humanEventID: String,
+        limits: EpisodeLimits, state: EpisodeState, revision: Int, clockDomain: String, deadlineNanoseconds: UInt64,
+        createdAt: Date, charged: EpisodeResources, held: EpisodeResources, unknownInputOperations: Int) {
+        self.init(id: id, conversationID: conversationID, projectID: projectID, turnID: turnID, humanEventID: humanEventID,
+            origin: .chat(conversationID: conversationID, turnID: turnID, humanEventID: humanEventID), limits: limits, state: state,
+            revision: revision, clockDomain: clockDomain, deadlineNanoseconds: deadlineNanoseconds,
+            createdAt: createdAt, charged: charged, held: held, unknownInputOperations: unknownInputOperations)
+    }
 }
 
 struct EpisodeWorkRequest: Codable, Equatable {
@@ -175,6 +304,8 @@ struct EpisodeWorkSettlement: Codable, Equatable {
 /// Implemented by the exclusive MemoryStore owner. Consumers cannot start an
 /// inference or network task until armEpisodeWork durably returns.
 protocol EpisodeLedger: AnyObject {
+    func beginLocalReadEpisode(episodeID: String, projectID: String, binding: EpisodeLocalReadBinding,
+        limits: EpisodeLimits, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt
     func acceptRequestAndBeginEpisode(conversationID: String, turnID: String, humanEventID: String,
         episodeID: String, text: String, limits: EpisodeLimits, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt
     func reserveEpisodeWork(episodeID: String, request: EpisodeWorkRequest, clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord
@@ -185,4 +316,71 @@ protocol EpisodeLedger: AnyObject {
         clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord
     func finishEpisode(episodeID: String, reason: EpisodeState, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt
     func episodeReceipt(id: String, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt
+}
+
+// Ledgers used solely by provider adapter fixtures have no local-read capture
+// authority. Production owners implement the durable constructor explicitly.
+extension EpisodeLedger {
+    func beginLocalReadEpisode(episodeID: String, projectID: String, binding: EpisodeLocalReadBinding,
+        limits: EpisodeLimits, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt { throw EpisodeBudgetError.invalid }
+}
+
+// Durable metadata equality preserves the exact UTF-8 identity stored by SQLite.
+extension EpisodeLimits {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.version, rhs.version) && lhs.resources == rhs.resources
+            && lhs.deadlineMilliseconds == rhs.deadlineMilliseconds && lhs.requireKnownModelInput == rhs.requireKnownModelInput
+    }
+}
+extension EpisodeClockSnapshot {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.domain, rhs.domain) && lhs.continuousNanoseconds == rhs.continuousNanoseconds && lhs.utc == rhs.utc
+    }
+}
+extension EpisodeLocalReadBinding {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.version, rhs.version) && lhs.initiator == rhs.initiator && lhs.purpose == rhs.purpose
+            && episodeIdentifierEqual(lhs.requestID, rhs.requestID) && episodeIdentifierEqual(lhs.descriptorVersion, rhs.descriptorVersion)
+            && episodeIdentifierEqual(lhs.descriptorSHA256, rhs.descriptorSHA256)
+    }
+}
+extension EpisodeOrigin {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.chat(let lc, let lt, let lh), .chat(let rc, let rt, let rh)):
+            return episodeIdentifierEqual(lc, rc) && episodeIdentifierEqual(lt, rt) && episodeIdentifierEqual(lh, rh)
+        case (.localRead(let lhs), .localRead(let rhs)): return lhs == rhs
+        default: return false
+        }
+    }
+}
+extension EpisodeReceipt {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.id, rhs.id) && episodeIdentifierEqual(lhs.conversationID, rhs.conversationID)
+            && episodeIdentifierEqual(lhs.projectID, rhs.projectID) && episodeIdentifierEqual(lhs.turnID, rhs.turnID)
+            && episodeIdentifierEqual(lhs.humanEventID, rhs.humanEventID) && lhs.origin == rhs.origin && lhs.limits == rhs.limits
+            && lhs.state == rhs.state && lhs.revision == rhs.revision && episodeIdentifierEqual(lhs.clockDomain, rhs.clockDomain)
+            && lhs.deadlineNanoseconds == rhs.deadlineNanoseconds && lhs.createdAt == rhs.createdAt && lhs.charged == rhs.charged
+            && lhs.held == rhs.held && lhs.unknownInputOperations == rhs.unknownInputOperations
+    }
+}
+extension EpisodeWorkRequest {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.id, rhs.id) && episodeIdentifierEqual(lhs.parentID, rhs.parentID) && lhs.kind == rhs.kind
+            && lhs.resources == rhs.resources && episodeIdentifierEqual(lhs.adapterIdentity, rhs.adapterIdentity)
+            && lhs.snapshot == rhs.snapshot && lhs.inputTokensKnown == rhs.inputTokensKnown
+    }
+}
+extension EpisodeWorkRecord {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.id, rhs.id) && episodeIdentifierEqual(lhs.episodeID, rhs.episodeID) && lhs.request == rhs.request
+            && lhs.revision == rhs.revision && lhs.state == rhs.state && lhs.charged == rhs.charged && lhs.held == rhs.held
+            && lhs.observed == rhs.observed && episodeIdentifierEqual(lhs.receiptID, rhs.receiptID) && lhs.recovered == rhs.recovered
+    }
+}
+extension EpisodeWorkSettlement {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.receiptID, rhs.receiptID) && lhs.outcome == rhs.outcome && lhs.observed == rhs.observed
+            && lhs.evidence == rhs.evidence && lhs.adapterViolation == rhs.adapterViolation
+    }
 }

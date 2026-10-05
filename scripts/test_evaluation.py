@@ -10,12 +10,14 @@ import subprocess
 import tempfile
 import unittest
 import re
+import os
+import sqlite3
 
 from evaluation_fixtures import canonical_json, corpus_summary, generate
 from evaluation_statistics import (clustered_recall, paired_score_interval, trajectory_cost_ratio, percentile,
                                    minimum_power_histories, quality_joint_power_histories, tree_gate_decision, PRIMARY_CATEGORIES)
 from evaluate_retrieval import (ROOT, PREREGISTRATION, PROTOCOL_AMENDMENT, CORE_FILES, PYTHON_FILES,
-                               compile_harness, execute, rows, binary_coverage)
+                               compile_harness, execute, rows, binary_coverage, summarize)
 
 
 class EvaluationContracts(unittest.TestCase):
@@ -278,6 +280,7 @@ class SwiftRetrievalContracts(unittest.TestCase):
         cls.input.write_bytes(canonical_json(cls.fixtures))
         cls.binary, cls.implementation = compile_harness(cls.scratch)
         runtime = cls.scratch / "store"
+        cls.runtime = runtime
         cls.warm = execute(cls.binary, "warm", cls.input, runtime, cls.scratch)
         cls.restart = execute(cls.binary, "restart", cls.input, runtime, cls.scratch)
 
@@ -306,6 +309,74 @@ class SwiftRetrievalContracts(unittest.TestCase):
         # source IDs or appear in either stable source list.
         for episode in rows(self.restart):
             self.assertNotIn(episode["episodeID"], episode["protocols"]["raw_source_probe"]["lexicalSourceIDs"])
+
+    def test_read_episodes_change_only_ledger_not_sources_or_invocations(self):
+        for history in self.fixtures["histories"]:
+            directory = self.runtime / history["id"]
+            databases = list(directory.glob("*.sqlite3")) + list(directory.glob("*.sqlite"))
+            self.assertEqual(len(databases), 1)
+            with sqlite3.connect(f"file:{databases[0]}?mode=ro", uri=True) as database:
+                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 4)
+                self.assertEqual(database.execute("SELECT count(*) FROM events").fetchone()[0], len(history["events"]))
+                self.assertEqual(database.execute("SELECT count(*) FROM invocations").fetchone()[0], 0)
+                origins = database.execute("SELECT origin_json FROM episodes").fetchall()
+                self.assertEqual(len(origins), len(history["episodes"]) * 5 * 2)
+                self.assertTrue(all(json.loads(row[0])["kind"] == "localRead" for row in origins))
+
+    def test_each_protocol_has_authoritative_bounded_read_accounting(self):
+        ids = []
+        projects = {episode["id"]: episode["projectID"] for history in self.fixtures["histories"] for episode in history["episodes"]}
+        for report in (self.warm, self.restart):
+            self.assertEqual(report["episodeAccountingVersion"], "standalone-read-episode-v1")
+            for episode in rows(report):
+                for protocol in episode["protocols"].values():
+                    journal = protocol["episodeAccounting"]
+                    receipt = journal["receipt"]
+                    ids.append(receipt["id"])
+                    self.assertNotEqual(receipt["state"], "active")
+                    self.assertEqual(receipt["origin"]["kind"], "localRead")
+                    self.assertNotIn("conversationID", receipt)
+                    self.assertEqual(receipt["projectID"], projects[episode["episodeID"]])
+                    for resource, cap in receipt["limits"]["resources"].items():
+                        self.assertLessEqual(receipt["charged"][resource] + receipt["held"][resource], cap)
+                    self.assertGreaterEqual(journal["fullEpisodeMilliseconds"], 0)
+                    self.assertIsNone(journal["modelFeasibility"])
+                    self.assertIsNone(journal["billedCost"])
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_budget_failures_remain_in_all_protocol_denominators(self):
+        scratch = self.scratch / "zero-memory-budget"
+        scratch.mkdir()
+        report = execute(self.binary, "warm", self.input, scratch / "stores", scratch,
+                         env={**os.environ, "BOROS_EVALUATION_MEMORY_OPERATION_CAP": "0"})
+        self.assertEqual(len(rows(report)), len(rows(self.warm)))
+        for episode in rows(report):
+            self.assertEqual(len(episode["protocols"]), 5)
+            for protocol in episode["protocols"].values():
+                self.assertEqual(protocol["terminalStatus"], "error")
+                self.assertEqual(protocol["errorCode"], "episode_budget_exceeded")
+                self.assertFalse(protocol["allRequiredSpansPresent"])
+                receipt = protocol["episodeAccounting"]["receipt"]
+                self.assertEqual(receipt["state"], "budgetExceeded")
+                self.assertEqual(receipt["charged"]["memoryOperations"], 0)
+                self.assertEqual(receipt["held"]["memoryOperations"], 0)
+        summary = summarize(report)
+        eligible = sum(episode["answerable"] and episode["prototypeByteFeasible"] for episode in rows(self.warm))
+        for protocol in summary.values():
+            self.assertEqual(protocol["eligibleProbeCount"], eligible)
+            self.assertEqual(protocol["successfulProbeCount"], 0)
+            self.assertEqual(protocol["selectionFailures"], len(rows(report)))
+
+    def test_semantic_unavailable_notice_is_not_a_coverage_limit(self):
+        complete = []
+        for episode in rows(self.warm):
+            gui = episode["protocols"]["gui_lexical_anyterm"]
+            self.assertTrue(gui["retrievalNoticePresent"])
+            self.assertEqual(gui["coverageLimited"], bool(gui["coverageLimits"]))
+            if not gui["coverageLimits"]:
+                complete.append(gui)
+                self.assertFalse(gui["coverageLimited"])
+        self.assertTrue(complete, "fixture must contain a complete lexical result despite its availability notice")
 
     def test_byte_infeasible_gold_not_silently_counted_as_success(self):
         for episode in rows(self.warm):

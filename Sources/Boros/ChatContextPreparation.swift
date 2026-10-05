@@ -13,7 +13,8 @@ enum ChatContextPreparation {
         semanticIndex: SemanticIndex? = nil,
         episodeLease: EpisodeLease? = nil
     ) throws -> ContextSnapshot {
-        try MeteredRetrieval.operation(lease: episodeLease) {
+        _ = try episodeLease?.checkActive(projectID: projectID)
+        return try MeteredRetrieval.operation(lease: episodeLease) {
             let lexical = historicalQuery(prompt)
             guard let semanticIndex else {
                 var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
@@ -49,6 +50,9 @@ enum ChatContextPreparation {
                 if snapshot.retrievalNotice == nil { snapshot.retrievalNotice = "Semantic recall failed; archive recall used lexical search." }
                 return snapshot
             }
+            try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease,
+                resourceLimited: report.manifest.meteredLexicalCoverage?.continuation != nil
+                    || report.manifest.meteredLiteralCoverage?.incompleteReason == "raw_source_budget")
             var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                 prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
                 historicalHits: report.hits, episodeLease: episodeLease, operationIsNested: true)

@@ -1759,6 +1759,13 @@ private enum BonsaiPlayground {
         signal(SIGPIPE, SIG_IGN)
         _ = ReasoningSupervisor.runIfRequested()
         if let code = BackupCommand.run(arguments: CommandLine.arguments) { exit(code) }
+        if CommandLine.arguments.contains("--local-read-self-test") {
+            do {
+                let checks = try LocalReadChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"local_read_self_test\":false}"); exit(1) }
+        }
         if CommandLine.arguments.contains("--backup-self-test") {
             do {
                 let checks = try BackupChecks.run()
