@@ -109,74 +109,115 @@ enum ContextAssembler {
         maximumRecentBytes: Int = 24000,
         maximumEvidenceBytes: Int = 12000,
         historicalMatching: LexicalMatchMode = .allTerms,
-        historicalHits: [MemoryHit]? = nil
+        historicalHits: [MemoryHit]? = nil,
+        episodeLease: EpisodeLease? = nil,
+        operationIsNested: Bool = false
     ) throws -> ContextSnapshot {
-        guard budgetBytes > 0, maximumRecentBytes >= 0, maximumRecentBytes <= 180000, maximumEvidenceBytes >= 0 else { throw ContextError.invalidBudget }
-        guard try store.listConversations(projectID: projectID).contains(where: { $0.id == conversationID }) else { throw ContextError.scopeMismatch }
-        let systemMessage = ContextMessage(role: "system", content: system.isEmpty ? historyFraming : system + "\n\n" + historyFraming)
-        let promptMessage = ContextMessage(role: "user", content: prompt)
-        let mandatory = [systemMessage, promptMessage]
-        let mandatorySize = try serializedMessages(mandatory).count
-        guard mandatorySize <= budgetBytes else { throw ContextError.mandatoryOverflow(required: mandatorySize, available: budgetBytes) }
-
-        // Each serialized role/content message requires more than 20 bytes
-        // even for empty content, so this row limit cannot omit a message that
-        // would fit inside the independent recent-message byte budget.
-        let history = try store.recentEvents(conversationID: conversationID, excludingEventID: excludingEventID, limit: maximumRecentBytes / 20 + 1, maximumBytes: maximumRecentBytes)
-        let historyCount = try store.eventCount(conversationID: conversationID, excludingEventID: excludingEventID)
-        var selected: [MemoryEvent] = []
-        var recent: [ContextMessage] = []
-        for source in history.reversed() {
-            let candidate = [message(source)] + recent
-            guard try serializedMessages(candidate).count <= maximumRecentBytes,
-                  try serializedMessages([systemMessage] + candidate + [promptMessage]).count <= budgetBytes else { break }
-            selected.insert(source, at: 0)
-            recent = candidate
-        }
-
-        var evidence: [MemoryHit] = []
-        var evidenceText = ""
-        if maximumEvidenceBytes > 0, historicalHits != nil || historicalQuery?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-            let excluded = Set(selected.map(\.id) + [excludingEventID].compactMap { $0 })
-            let hits = try historicalHits ?? store.search(query: historicalQuery ?? "", projectID: projectID, limit: 16,
-                matching: historicalMatching, excludingEventIDs: excluded)
-            for hit in hits where !excluded.contains(hit.eventID) {
-                // Supplied semantic/raw results cannot turn a stale or foreign
-                // excerpt into a source citation in this project's request.
-                guard let reference = try store.sourceReference(eventID: hit.eventID, projectID: projectID),
-                      hit.projectID == projectID, hit.conversationID == reference.conversationID,
-                      hit.role == reference.role, hit.status == reference.status, hit.digest == reference.digest,
-                      hit.createdAt == reference.createdAt, hit.totalBytes == reference.byteCount,
-                      !hit.excerpt.isEmpty, hit.excerpt.utf8.count <= MemoryStore.maximumPageBytes else { throw ContextError.sourceMismatch }
-                let original = try store.read(eventID: hit.eventID, offset: hit.excerptOffset, length: hit.excerpt.utf8.count)
-                guard original.text == hit.excerpt, original.digest == hit.digest else { throw ContextError.sourceMismatch }
-                let source = """
-                    BEGIN HISTORICAL SOURCE
-                    event_id: \(hit.eventID)
-                    conversation_id: \(hit.conversationID)
-                    role: \(hit.role.rawValue)
-                    capture_status: \(hit.status.rawValue)
-                    source_created_utc: \(hit.createdAt)
-                    source_sha256: \(hit.digest)
-                    excerpt_utf8_offset: \(hit.excerptOffset)
-                    source_total_bytes: \(hit.totalBytes)
-                    quoted_excerpt:
-                    \(hit.excerpt)
-                    END HISTORICAL SOURCE
-                    """
-                let candidateText = evidenceText.isEmpty ? source : evidenceText + "\n\n" + source
-                let candidateMessage = ContextMessage(role: "user", content: "Historical source excerpts for reference:\n\n" + candidateText)
-                guard try serializedMessages([candidateMessage]).count <= maximumEvidenceBytes,
-                      try serializedMessages([systemMessage] + recent + [candidateMessage, promptMessage]).count <= budgetBytes else { continue }
-                evidenceText = candidateText
-                evidence.append(hit)
+        try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
+            guard budgetBytes > 0, maximumRecentBytes >= 0, maximumRecentBytes <= 180000, maximumEvidenceBytes >= 0 else { throw ContextError.invalidBudget }
+            if episodeLease != nil {
+                guard try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, { try store.conversationProjectID(conversationID: conversationID) }) == projectID else { throw ContextError.scopeMismatch }
+            } else {
+                guard try store.listConversations(projectID: projectID).contains(where: { $0.id == conversationID }) else { throw ContextError.scopeMismatch }
             }
-        }
+            let systemMessage = ContextMessage(role: "system", content: system.isEmpty ? historyFraming : system + "\n\n" + historyFraming)
+            let promptMessage = ContextMessage(role: "user", content: prompt)
+            let mandatory = [systemMessage, promptMessage]
+            let mandatorySize = try serializedMessages(mandatory).count
+            guard mandatorySize <= budgetBytes else { throw ContextError.mandatoryOverflow(required: mandatorySize, available: budgetBytes) }
 
-        let evidenceMessages = evidenceText.isEmpty ? [] : [ContextMessage(role: "user", content: "Historical source excerpts for reference:\n\n" + evidenceText)]
-        let messages = [systemMessage] + recent + evidenceMessages + [promptMessage]
-        return ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try serializedMessages(messages).count,
-            omittedRecentCount: historyCount - selected.count, includedRecentCount: selected.count, recentSourceIDs: selected.map(\.id))
+            // Each serialized role/content message requires more than 20 bytes
+            // even for empty content, so this row limit cannot omit a message that
+            // would fit inside the independent recent-message byte budget.
+            let history: [MemoryEvent]
+            if let episodeLease {
+                let references = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: maximumRecentBytes / 20 + 1) {
+                    try store.recentSourceReferences(conversationID: conversationID, excludingEventID: excludingEventID,
+                        limit: maximumRecentBytes / 20 + 1, maximumBytes: maximumRecentBytes)
+                }
+                history = try references.map { try MeteredRetrieval.load(store: store, reference: $0, lease: episodeLease) }
+            } else {
+                history = try store.recentEvents(conversationID: conversationID, excludingEventID: excludingEventID, limit: maximumRecentBytes / 20 + 1, maximumBytes: maximumRecentBytes)
+            }
+            let historyCount = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1) {
+                try store.eventCount(conversationID: conversationID, excludingEventID: excludingEventID)
+            }
+            var selected: [MemoryEvent] = []
+            var recent: [ContextMessage] = []
+            for source in history.reversed() {
+                let candidate = [message(source)] + recent
+                guard try serializedMessages(candidate).count <= maximumRecentBytes,
+                      try serializedMessages([systemMessage] + candidate + [promptMessage]).count <= budgetBytes else { break }
+                selected.insert(source, at: 0)
+                recent = candidate
+            }
+
+            var evidence: [MemoryHit] = []
+            var evidenceText = ""
+            var lexicalReport: MeteredLexicalReport?
+            if maximumEvidenceBytes > 0, historicalHits != nil || historicalQuery?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                let excluded = Set(selected.map(\.id) + [excludingEventID].compactMap { $0 })
+                let hits: [MemoryHit]
+                if let historicalHits { hits = historicalHits }
+                else if let episodeLease {
+                    let report = try MeteredRetrieval.lexicalSearch(store: store, query: historicalQuery ?? "", projectID: projectID,
+                        limit: 16, matching: historicalMatching, excludingEventIDs: excluded, lease: episodeLease, nested: true)
+                    lexicalReport = report; hits = report.hits
+                } else {
+                    hits = try store.search(query: historicalQuery ?? "", projectID: projectID, limit: 16,
+                        matching: historicalMatching, excludingEventIDs: excluded)
+                }
+                for hit in hits where !excluded.contains(hit.eventID) {
+                    // Supplied semantic/raw results cannot turn a stale or foreign
+                    // excerpt into a source citation in this project's request.
+                    guard let reference = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, { try store.sourceReference(eventID: hit.eventID, projectID: projectID) }),
+                          hit.projectID == projectID, hit.conversationID == reference.conversationID,
+                          hit.role == reference.role, hit.status == reference.status, hit.digest == reference.digest,
+                          hit.createdAt == reference.createdAt, hit.totalBytes == reference.byteCount,
+                          !hit.excerpt.isEmpty, hit.excerpt.utf8.count <= MemoryStore.maximumPageBytes else { throw ContextError.sourceMismatch }
+                    let original = try MeteredRetrieval.read(store: store, source: reference, offset: hit.excerptOffset,
+                        length: hit.excerpt.utf8.count, lease: episodeLease, nested: true, examinedPasses: 2)
+                    guard original.text == hit.excerpt, original.digest == hit.digest else { throw ContextError.sourceMismatch }
+                    let source = """
+                        BEGIN HISTORICAL SOURCE
+                        event_id: \(hit.eventID)
+                        conversation_id: \(hit.conversationID)
+                        role: \(hit.role.rawValue)
+                        capture_status: \(hit.status.rawValue)
+                        source_created_utc: \(hit.createdAt)
+                        source_sha256: \(hit.digest)
+                        excerpt_utf8_offset: \(hit.excerptOffset)
+                        source_total_bytes: \(hit.totalBytes)
+                        quoted_excerpt:
+                        \(hit.excerpt)
+                        END HISTORICAL SOURCE
+                        """
+                    let candidateText = evidenceText.isEmpty ? source : evidenceText + "\n\n" + source
+                    let candidateMessage = ContextMessage(role: "user", content: "Historical source excerpts for reference:\n\n" + candidateText)
+                    guard try serializedMessages([candidateMessage]).count <= maximumEvidenceBytes,
+                          try serializedMessages([systemMessage] + recent + [candidateMessage, promptMessage]).count <= budgetBytes else { continue }
+                    evidenceText = candidateText
+                    evidence.append(hit)
+                }
+            }
+
+            let evidenceMessages = evidenceText.isEmpty ? [] : [ContextMessage(role: "user", content: "Historical source excerpts for reference:\n\n" + evidenceText)]
+            let messages = [systemMessage] + recent + evidenceMessages + [promptMessage]
+            var snapshot = ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try serializedMessages(messages).count,
+                omittedRecentCount: historyCount - selected.count, includedRecentCount: selected.count, recentSourceIDs: selected.map(\.id))
+            if let lexicalReport {
+                snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: ["mode": "metered_lexical",
+                    "raw_work_version": "raw_work_v1", "source_frontier": lexicalReport.sourceFrontier,
+                    "raw_work_charged": lexicalReport.rawWorkCharged, "inspected_candidates": lexicalReport.inspectedCandidates,
+                    "candidate_window_full": lexicalReport.candidateWindowFull,
+                    "candidate_window_complete": lexicalReport.candidateWindowComplete,
+                    "continuation_available": lexicalReport.continuation != nil], options: [.sortedKeys])
+                if !lexicalReport.candidateWindowComplete || lexicalReport.candidateWindowFull {
+                    snapshot.retrievalNotice = "Archive recall inspected a bounded lexical candidate window; additional evidence may remain."
+                }
+            }
+            return snapshot
+        }
     }
 
     static func serializedMessages(_ messages: [ContextMessage]) throws -> Data {

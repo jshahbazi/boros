@@ -1,16 +1,16 @@
 # Durable episode budgets and preflight accounting
 
-Status: proposed next implementation wave, October 4, 2026. This document specifies work that is not enforced by the current application. It covers the phase 0 resource contract and phase 2 answering/retrieval baseline. It does not introduce a service, policy mutation, deletion, external actions, or a summary tree.
+Status: GUI/CLI answering, metered core retrieval and schema-3 backup integration verified, October 4, 2026. The complete phase 0/2 contract remains partial: manual source browsing, evaluation ledger adoption, background-index budgets and matched recent/evidence token allocations remain pending. Service, policy mutation, deletion, external actions and the optional summary tree remain separate work.
 
-## Current gaps and the next outcome
+## Gaps motivating this wave
 
-The selected Qwen adapter admits an exact request against its provider context limit. It records completed admission attempts, calibration usage and an unknown-calibration flag. `ProviderAdmissionOperation` increments its counters immediately before `URLSessionDataTask.resume()`, but those counters remain in process memory. The GUI collects them in `pendingAdmissionAccounting` and writes them through `admissionAudit()` only when it starts or terminalizes the answering invocation. A process death during preflight can therefore leave accepted human input with no durable preflight attempt or usage reservation.
+At checkpoint `38675c5`, the selected Qwen adapter admitted an exact request against its provider context limit. Its completed-attempt counters, calibration usage and unknown-calibration flag remained in process memory until the GUI journaled the answering invocation. A process death during preflight could leave accepted human input without a durable preflight attempt or usage reservation.
 
-Context overflow can initiate another admission operation. Each operation has its own 45-second preflight bound; the answer transport has its own timeout. There is no shared durable episode deadline, aggregate token allowance, model-call allowance, or retrieval-work allowance across those attempts. Stop records completed in-memory accounting and cancels transport; it cannot prove that an already submitted calibration or answer stopped computing on the server.
+Context overflow could initiate another admission operation with another 45-second preflight bound; the answer transport had its own timeout. Those attempts lacked a shared durable deadline and aggregate work allowance. Stop could cancel the client transport without proving that an already submitted calibration or answer stopped computing on the server.
 
-The next outcome is one persisted episode per accepted top-level request, containing every preflight attempt, retrieval operation and answering invocation. Work reserves capacity before it runs. Network attempts are durably armed before handoff. Restart preserves spent and uncertain capacity, terminalizes interrupted episodes, and never resumes their requests automatically. One counter model governs GUI, CLI answering and evaluation paths.
+The current answering implementation persists one episode per accepted top-level request, containing preflight, retrieval and answering work. It reserves capacity before execution and durably arms handoffs. Restart preserves spent and uncertain capacity, terminalizes interrupted episodes and never resumes requests automatically. GUI and CLI answering share this counter model. Extending it to evaluation and standalone source-browser reads remains required.
 
-## Resource contract to freeze
+## Development resource contract
 
 An episode begins at human submission, before context preparation or model discovery, and ends at a final answer, terminal error, Stop, interruption or its deadline. Automatic context reductions, reformulations, fallbacks and retries retain the same episode ID. An explicit new human submission creates a new episode; an implementation must not disguise an automatic retry as a fresh episode to replenish quotas.
 
@@ -25,7 +25,9 @@ The plan and `preregistration-v1.json` already propose these aggregate limits:
 | Raw source work | 256 MiB | Payload bytes loaded or examined, including unsuccessful candidates, validation and repeated reads; define the accounting version below. |
 | Wall time | 120 seconds | Submission through terminal outcome, including capture, queueing, retrieval, preflight, answering and finalization. |
 
-Add a proposed auxiliary cap of 64 provider HTTP attempts, including discovery and tokenization, so metadata retries cannot consume unbounded work without using a model-call slot. Retain current per-request body/response limits. Keep bounded candidate/metadata/vector limits, and report their consumption independently. These auxiliary limits and the raw-work counting version need a development protocol amendment before measurement; do not rewrite the original preregistration.
+The implementation also caps provider HTTP attempts at 64, vector work at 64 MiB, metadata rows at 100,000 and encoder input bytes at 49,152. Discovery and tokenization consume HTTP attempts. Existing per-request body/response limits still apply. These auxiliary limits and `raw_work_v1` need a development protocol amendment before registered measurement; do not rewrite the original preregistration. The Swift limit version is `development-episode-v1`.
+
+The implementation also bounds authoritative journal growth to 100,000 work records and 64 MiB of distinct request-snapshot bytes referenced by one episode. Identical idempotent retries add no rows or snapshot charge. These are fixed auxiliary guards, independent of source-read work; shared identical snapshots are stored once. They require inclusion in the next frozen development configuration.
 
 Per-request admission remains mandatory. The current provider limit, safety margin and response reserve must fit together even when ample episode budget remains. Output headroom must not be silently reduced to make an episode pass. If an explicit smaller output request is supported, create and admit a new canonical body within the same episode and retain the previous attempt's accounting.
 
@@ -93,9 +95,9 @@ Default generative calibration retries should be zero. A transport error without
 
 ## Raw source work and bounded retrieval
 
-The current candidate count is not a byte budget. `MemoryStore.search` selects complete payload BLOBs, decodes and verifies each event, and only then computes a clipped `MemoryHit`. The lexical-only assembler can load 16 complete events before delivering 12 KiB of evidence. `SemanticIndex.search` asks raw lexical and optional literal search for 100 candidates each: one branch can materialize 400 MiB at the current 4 MiB/event limit. Ordinary Send disables literal scanning, but its semantic branch still performs the 100-candidate lexical load. Fallback can repeat those loads, and the assembler revalidates delivered excerpt pages again.
+The legacy unmetered candidate count is not a byte budget. `MemoryStore.search` selects complete payload BLOBs, decodes and verifies each event, and only then computes a clipped `MemoryHit`. A 100-candidate branch can materialize 400 MiB at the 4 MiB/event limit. The current lease-aware assembler and semantic search use the metadata-first path below. Legacy/manual nil-lease APIs remain available and cannot support an episode-budget claim.
 
-`literalSearch` uses SQLite `instr(payload, ...)`. Its hit limit does not bound the number or bytes of nonmatching rows inspected. Its current scan-byte report is unknown. A zero-hit query can still examine the entire project. Recent context is better bounded before BLOB loading, but must still be charged, including the repeated recent preparation in the semantic path. Semantic digest sealing may read a whole source through many pages; query-time result validation, continuation replay and source paging incur real source work too.
+Legacy `literalSearch` uses SQLite `instr(payload, ...)`; its hit limit does not bound inspected nonmatching rows or bytes. The metered literal API instead uses bounded host reads and a byte matcher. Recent preparation, full-source sealing, query-time validation, continuation replay and source paging are charged when a lease is supplied, including repeated passes.
 
 Freeze `raw_work_v1` as a conservative logical work measure, not physical disk I/O:
 
@@ -159,4 +161,10 @@ These streams can proceed in parallel after the interfaces and fixtures are froz
 
 Completion requires shared GUI/CLI/evaluation execution against this ledger, real kill/reopen tests at preflight boundaries, provider-fixture reservation/usage checks, and retrieval stress fixtures covering bytes loaded behind small excerpts. Report observed usage, conservative bound charges, remaining reservations, terminal reason, coverage limitations, memory-path time and total episode time independently. Missing exact encoder usage and production cost remain explicit limits.
 
-The immediate engineering work needs no new user permission. Maintainers must resolve the opaque embedding-input accounting mode and freeze the still-null matched recent-context token cap before claiming a complete phase 0 budget contract or running a matched held-out comparison. The proposed defaults above are starting configuration choices, not measured optimal settings.
+## Recorded integration evidence
+
+The assembled application passed 793 checks: 67 episode, 51 conversation/profile, 89 GUI, 9 native parser, 100 memory, 49 endpoint/admission, 64 context, 76 semantic, 99 backup/CLI and 189 HTTP integration checks. Separate suites passed 86 episode checks with actual SIGKILL/reopen, 110 backup checks with corruption/compatibility/process recovery, and six semantic process-kill checks. Counts overlap. Independent review reproduced and closed missing-usage calibration quarantine and complete-capture/episode-state disagreement. Recovered empty/partial Stop cancellations now remain backable and recognizable by the CLI; inconsistent cancellation archives are rejected. Regression fixtures exercise these triggers.
+
+GUI fixtures exercise Stop during preparation, deadline expiry during final publication, a short live native pipe prefix and native cleanup that ignores SIGTERM until the owned SIGKILL fallback. The built bundle passed strict deep signature verification. The running mlx-serve passed two synthetic arithmetic turns through the shared CLI episode path. These results establish integration and failure handling, not general retrieval quality or model competence.
+
+The immediate engineering work needs no new user permission. Development mode records opaque encoder/native input tokens as unknown; strict known-input mode rejects or skips those inference paths. The still-null matched recent-context token allocation and evaluation adoption must be frozen before claiming a complete phase 0 budget contract or running a matched held-out comparison. The proposed component defaults above are starting configuration choices, not measured optimal settings. External continuation ingestion also needs explicit ranking/scanner version identities; the current continuations are internal to this executable.

@@ -28,6 +28,10 @@ struct GenerationSettings {
     var endpointSafetyTokens = 256
     var endpointAdmission: EndpointAdmissionReceipt?
     var preparedNativeBody: Data?
+    // One durable allowance spans preparation, calibration and answering.
+    // These runtime references never enter persisted settings or request JSON.
+    var episodeLease: EpisodeLease?
+    var preparedAnswerWork: EpisodeWorkRecord?
 
     func messages(_ prompt: String, conversation: Conversation) -> [[String: String]] {
         messagesOverride ?? profile.chatMessages(system: system, prompt: prompt, conversation: conversation)
@@ -69,6 +73,21 @@ struct GenerationResult {
     var providerUsage: ProviderUsage? = nil
     var providerAdmission: EndpointAdmissionReceipt? = nil
 
+    func reconcilingEpisodeState(_ state: EpisodeState) -> GenerationResult {
+        let failure: String?
+        let stopped: Bool
+        switch state {
+        case .deadlineExceeded: failure = "episode_deadline_exceeded"; stopped = false
+        case .budgetExceeded: failure = "episode_budget_exceeded"; stopped = false
+        case .cancelled: failure = self.failure; stopped = true
+        case .failed, .interrupted: failure = self.failure ?? "episode_inactive"; stopped = false
+        case .completed: failure = self.failure; stopped = self.stopped
+        case .active: failure = "episode_accounting_failed"; stopped = false
+        }
+        return GenerationResult(elapsed: elapsed, tokensPerSecond: tokensPerSecond, failure: failure, stopped: stopped,
+            providerUsage: providerUsage, providerAdmission: providerAdmission)
+    }
+
     var message: String {
         if stopped && failure != "incomplete_result" { return "Stopped." }
         switch failure {
@@ -93,6 +112,12 @@ struct GenerationResult {
         case "provider_template_mismatch": return "The server's chat template changed. Its token adapter must be verified before sending."
         case "admission_mismatch": return "The prepared request changed after token admission. Retry the request."
         case "provider_count_mismatch": return "The server's prompt token count disagreed with admission. The response is incomplete."
+        case "episode_budget_exceeded": return "This request reached its work allowance. Its recorded work has been preserved."
+        case "episode_deadline_exceeded": return "This request reached its time limit. Any committed response remains available."
+        case "episode_inactive": return "This request has ended. Start a new request to continue."
+        case "episode_input_unobservable": return "Strict accounting cannot measure this model's input. Choose a verified adapter."
+        case "episode_adapter_violation": return "The model's usage disagreed with its reserved allowance. Its adapter needs verification."
+        case "episode_clock_unavailable", "episode_accounting_failed": return "Boros could not safely account for this request. Its recorded work has been preserved."
         case .some: return "The model could not complete this prompt."
         case .none:
             if let speed = tokensPerSecond {
@@ -136,6 +161,8 @@ final class ModelRunner {
     private var running = false
     private var native = false
     private var endpoint: EndpointRunner?
+
+    var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
 
     func start(prompt: String, settings: GenerationSettings, conversation: Conversation = Conversation(),
                onText: @escaping (String) -> Void, onComplete: @escaping (GenerationResult) -> Void) {
@@ -197,6 +224,8 @@ private final class CompletionRunner {
         var profile = ModelProfile.bonsai
         var hasVisibleText = false
         var completionText = ""
+        var episodeLease: EpisodeLease?
+        var episodeWork: EpisodeWorkRecord?
 
         init(onText: @escaping (String) -> Void,
              onComplete: @escaping (GenerationResult) -> Void) {
@@ -220,6 +249,8 @@ private final class CompletionRunner {
                 return
             }
             let job = Job(onText: onText, onComplete: onComplete)
+            job.episodeLease = settings.episodeLease
+            job.episodeWork = settings.preparedAnswerWork
             job.outputPrefix = settings.profile.assistantOutputPrefix
             job.profile = settings.profile
             let model = (settings.model as NSString).expandingTildeInPath
@@ -248,11 +279,26 @@ private final class CompletionRunner {
                 }
             }
             do {
-                try job.process.run()
+                if let lease = job.episodeLease {
+                    let evidence = try NativeRequest.completionEvidence(prompt: prompt, settings: settings, conversation: conversation)
+                    let work = try job.episodeWork ?? lease.prepare(kind: .nativeInference,
+                        resources: EpisodeResources(outputTokens: settings.maximumOutput, modelCalls: 1),
+                        adapterIdentity: "native:" + settings.profile.rawValue, snapshot: evidence, inputTokensKnown: false)
+                    guard work.request.kind == .nativeInference, work.request.snapshot == evidence,
+                          work.episodeID == lease.episodeID, !work.request.inputTokensKnown,
+                          work.request.adapterIdentity == "native:" + settings.profile.rawValue,
+                          work.request.resources == EpisodeResources(outputTokens: settings.maximumOutput, modelCalls: 1) else { throw EpisodeBudgetError.conflict }
+                    var launchError: Error?
+                    job.episodeWork = try lease.dispatch(work) {
+                        do { try job.process.run() } catch { launchError = error }
+                    }
+                    if let launchError { throw launchError }
+                } else { try job.process.run() }
             } catch {
                 job.process.terminationHandler = nil
                 self.active = nil
-                self.completeUnstarted(job, failure: "launch_failed")
+                if let work = job.episodeWork { _ = try? job.episodeLease?.settle(work, outcome: .outcomeUnknown) }
+                self.completeUnstarted(job, failure: (error as? EpisodeBudgetError)?.failureCode ?? "launch_failed")
                 return
             }
             self.drain(job.output.fileHandleForReading, job: job, isOutput: true)
@@ -260,21 +306,31 @@ private final class CompletionRunner {
             let rendered = Data(settings.render(prompt, conversation: conversation).utf8)
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
+                    _ = try job.episodeLease?.checkActive()
                     try job.input.fileHandleForWriting.write(contentsOf: rendered)
                     try job.input.fileHandleForWriting.close()
                 } catch {
                     try? job.input.fileHandleForWriting.close()
                     self.queue.async {
-                        if job.failure == nil { job.failure = "io_failed" }
+                        if job.failure == nil { job.failure = (error as? EpisodeBudgetError)?.failureCode ?? "io_failed" }
+                        self.stop(job)
                         self.finishIfReady(job)
                     }
                 }
             }
             let timeLimit = settings.profile.generationTimeout(maximumOutput: settings.maximumOutput)
-            self.queue.asyncAfter(deadline: .now() + timeLimit) {
-                guard self.active === job else { return }
+            self.queue.asyncAfter(deadline: .now() + timeLimit) { [weak self, weak job] in
+                guard let self, let job, self.active === job else { return }
                 job.failure = "timeout"
                 self.stop(job)
+            }
+            if let lease = job.episodeLease, let remaining = try? lease.remainingSeconds() {
+                self.queue.asyncAfter(deadline: .now() + remaining) { [weak self, weak job] in
+                    guard let self, let job, self.active === job else { return }
+                    job.failure = "episode_deadline_exceeded"
+                    _ = try? job.episodeLease?.finish(reason: .deadlineExceeded)
+                    self.stop(job)
+                }
             }
         }
     }
@@ -290,8 +346,8 @@ private final class CompletionRunner {
     private func stop(_ job: Job) {
         guard active === job else { return }
         if job.process.isRunning { job.process.terminate() }
-        queue.asyncAfter(deadline: .now() + 2) {
-            guard self.active === job, job.process.isRunning else { return }
+        queue.asyncAfter(deadline: .now() + 2) { [weak self, weak job] in
+            guard let self, let job, self.active === job, job.process.isRunning else { return }
             // This PID belongs to the still-running Process owned by this job.
             Darwin.kill(job.process.processIdentifier, SIGKILL)
         }
@@ -306,20 +362,31 @@ private final class CompletionRunner {
     private func drain(_ handle: FileHandle, job: Job, isOutput: Bool) {
         DispatchQueue.global(qos: .userInitiated).async {
             var failed = false
-            do {
-                while let data = try handle.read(upToCount: 4096), !data.isEmpty {
-                    self.queue.async {
-                        if isOutput {
-                            self.emit(job.decoder.consume(data), job: job, final: false)
-                        } else {
-                            job.stderr.append(data)
-                            if job.stderr.count > 131_072 {
-                                job.stderr.removeFirst(job.stderr.count - 131_072)
-                            }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                // Foundation's read(upToCount:) can wait for all requested
+                // bytes or EOF. read(2) returns a flushed live pipe prefix.
+                let count = buffer.withUnsafeMutableBytes {
+                    Darwin.read(handle.fileDescriptor, $0.baseAddress, $0.count)
+                }
+                if count == 0 { break }
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    failed = true
+                    break
+                }
+                let data = Data(buffer.prefix(count))
+                self.queue.async {
+                    if isOutput {
+                        self.emit(job.decoder.consume(data), job: job, final: false)
+                    } else {
+                        job.stderr.append(data)
+                        if job.stderr.count > 131_072 {
+                            job.stderr.removeFirst(job.stderr.count - 131_072)
                         }
                     }
                 }
-            } catch { failed = true }
+            }
             try? handle.close()
             let readFailed = failed
             self.queue.async {
@@ -336,6 +403,12 @@ private final class CompletionRunner {
     }
 
     private func emit(_ text: String, job: Job, final: Bool) {
+        do { _ = try job.episodeLease?.checkActive() }
+        catch {
+            if job.failure == nil { job.failure = (error as? EpisodeBudgetError)?.failureCode ?? "episode_accounting_failed" }
+            stop(job)
+            return
+        }
         job.tail += text
         let visible: String
         if final {
@@ -387,6 +460,9 @@ private final class CompletionRunner {
                 : (job.status != 0 ? "process_failed" : (job.hasVisibleText ? nil : "empty_result"))))
         let result = GenerationResult(elapsed: Date().timeIntervalSince(job.started),
                                       tokensPerSecond: speed, failure: failure, stopped: job.stopped)
+        // This adapter has no verified complete token receipt. Keep its
+        // output bound held rather than deriving tokens from visible text.
+        if let work = job.episodeWork { _ = try? job.episodeLease?.settle(work, outcome: .outcomeUnknown) }
         job.stderr.removeAll(keepingCapacity: false)
         job.completionText.removeAll(keepingCapacity: false)
         DispatchQueue.main.async { job.onComplete(result) }

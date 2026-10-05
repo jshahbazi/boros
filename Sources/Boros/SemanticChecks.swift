@@ -79,6 +79,7 @@ enum SemanticChecks {
         checks.merge(try sourceIntegrityChecks(store: store!)) { _, new in new }
         checks.merge(try asynchronousChecks(store: store!)) { _, new in new }
         checks.merge(try nativeAdapterChecks()) { _, new in new }
+        checks.merge(try meteredSearchChecks(store: store!)) { _, new in new }
         return checks
     }
 
@@ -277,6 +278,140 @@ enum SemanticChecks {
             if text.contains("cat") { return .vector([0, 1, 0]) }
             return .vector([0, 0, 1])
         }
+    }
+
+    private static func meteredSearchChecks(store: MemoryStore) throws -> [String: Bool] {
+        let project = "semantic-metered"
+        let archive = try store.createConversation(projectID: project, title: "Metered semantic archive")
+        let source = try store.append(conversationID: archive.id, role: .human,
+            text: String(repeating: "A bicycle crosses the quiet town. ", count: 8), status: .complete,
+            turnID: "semantic-metered-first-turn", eventID: "semantic-metered-first-source")
+        let second = try store.append(conversationID: archive.id, role: .human,
+            text: "A bicycle rests against the garden wall.", status: .complete,
+            turnID: "semantic-metered-second-turn", eventID: "semantic-metered-second-source")
+        let encoder = FixtureEncoder()
+        var configuration = SemanticIndexConfiguration()
+        configuration.chunkBytes = 64; configuration.maximumCandidateChunks = 1
+        configuration.maximumManifestSources = 10; configuration.maximumReportedHoles = 4
+        let index = try SemanticIndex(store: store, encoder: encoder, configuration: configuration)
+        _ = try index.process(projectID: project, maximumChunks: 128)
+        var calls = 0
+        encoder.beforeEncoding = { calls += 1 }
+        let fixture = try meteredEpisode(store: store, project: project)
+        let report = try index.search(query: "bike", projectID: project, includeLiteral: false, episodeLease: fixture.lease)
+        let receipt = try fixture.lease.checkActive()
+        var checks: [String: Bool] = [
+            "semantic_metered_query_encoder_has_call_and_unknown_input": calls == 1 && receipt.charged.modelCalls == 1 && receipt.unknownInputOperations == 1 && receipt.charged.encoderInputBytes == 4 && receipt.charged.inputTokens == 0,
+            "semantic_metered_vector_budget_includes_lookahead_row": receipt.charged.vectorBytes == 2 * (encoder.dimension * 4 + 1) && report.manifest.vectorCandidatesInspected == 1,
+            "semantic_metered_search_one_host_operation": receipt.charged.memoryOperations == 1,
+            "semantic_metered_manifest_and_continuation_bind_episode": report.manifest.episodeID == fixture.lease.episodeID && report.manifest.vectorContinuation?.episodeID == fixture.lease.episodeID,
+            "semantic_metered_result_reads_have_raw_charge": report.hits.count == 1 && receipt.charged.rawSourceBytes == (report.hits[0].excerpt.utf8.count + 1) * 2
+        ]
+        let replayed = try index.replay(manifestID: report.manifestID, projectID: project, episodeLease: fixture.lease)
+        let replayReceipt = try fixture.lease.checkActive()
+        checks["semantic_metered_replay_costs_slot_and_repeated_original_bytes"] = replayed.hits.map(\.excerpt) == report.hits.map(\.excerpt)
+            && replayReceipt.charged.memoryOperations == 2 && replayReceipt.charged.rawSourceBytes == receipt.charged.rawSourceBytes * 2
+        let continued = try index.search(query: "bike", projectID: project, includeLiteral: false,
+            continuation: report.manifest.vectorContinuation, episodeLease: fixture.lease)
+        checks["semantic_metered_continuation_preserves_frontier_and_raw_snapshot"] = continued.manifest.sourceFrontier == report.manifest.sourceFrontier
+            && continued.manifest.rawSnapshotID == report.manifest.rawSnapshotID
+            && continued.manifest.meteredLexicalCoverage == report.manifest.meteredLexicalCoverage
+        let other = try meteredEpisode(store: store, project: project)
+        checks["semantic_metered_continuation_rejects_replenished_episode"] = rejects {
+            _ = try index.search(query: "bike", projectID: project, includeLiteral: false,
+                continuation: report.manifest.vectorContinuation, episodeLease: other.lease)
+        }
+        var strictLimits = EpisodeLimits(); strictLimits.requireKnownModelInput = true
+        let strict = try meteredEpisode(store: store, project: project, limits: strictLimits)
+        let beforeStrict = calls
+        let strictReport = try index.search(query: "bicycle", projectID: project, includeLiteral: false, episodeLease: strict.lease)
+        let strictReceipt = try strict.lease.checkActive()
+        checks["semantic_strict_input_mode_skips_opaque_encoder_before_inference"] = calls == beforeStrict && strictReceipt.charged.modelCalls == 0
+            && strictReceipt.unknownInputOperations == 0 && strictReport.manifest.queryDisposition == "inputAccountingUnavailable"
+        checks["semantic_strict_input_mode_retains_original_lexical_evidence"] = Set(strictReport.hits.map(\.eventID)) == [source.id, second.id]
+            && strictReceipt.charged.vectorBytes == 0
+
+        var smallLimits = EpisodeLimits(); smallLimits.resources.vectorBytes = 1
+        let small = try meteredEpisode(store: store, project: project, limits: smallLimits)
+        do {
+            _ = try ChatContextPreparation.prepare(store: store, conversationID: small.conversationID, projectID: project,
+                prompt: "Where is bicycle?", system: "", excludingEventID: small.humanEventID, semanticIndex: index, episodeLease: small.lease)
+            checks["semantic_budget_failure_is_not_swallowed_by_lexical_fallback"] = false
+        } catch let error as EpisodeBudgetError {
+            let result = try store.episodeReceipt(id: small.lease.episodeID, clock: small.clock.now())
+            checks["semantic_budget_failure_is_not_swallowed_by_lexical_fallback"] = error.failureCode == "episode_budget_exceeded"
+                && result.charged.rawSourceBytes == (source.byteCount + second.byteCount) * 5 && result.charged.modelCalls == 1
+        }
+        let stopped = try meteredEpisode(store: store, project: project)
+        encoder.beforeEncoding = { _ = try stopped.lease.finish(reason: .cancelled) }
+        do {
+            _ = try ChatContextPreparation.prepare(store: store, conversationID: stopped.conversationID, projectID: project,
+                prompt: "Where is bicycle?", system: "", excludingEventID: stopped.humanEventID, semanticIndex: index, episodeLease: stopped.lease)
+            checks["semantic_stop_during_encoder_fences_result_and_fallback"] = false
+        } catch let error as EpisodeBudgetError {
+            let result = try store.episodeReceipt(id: stopped.lease.episodeID, clock: stopped.clock.now())
+            checks["semantic_stop_during_encoder_fences_result_and_fallback"] = error.failureCode == "episode_inactive"
+                && result.charged.rawSourceBytes == (source.byteCount + second.byteCount) * 5 && result.charged.modelCalls == 1
+        }
+        let deadline = try meteredEpisode(store: store, project: project)
+        encoder.beforeEncoding = { deadline.clock.ticks = 200_000_000_000 }
+        do {
+            _ = try ChatContextPreparation.prepare(store: store, conversationID: deadline.conversationID, projectID: project,
+                prompt: "Where is bicycle?", system: "", excludingEventID: deadline.humanEventID, semanticIndex: index, episodeLease: deadline.lease)
+            checks["semantic_deadline_during_encoder_fences_result_and_fallback"] = false
+        } catch let error as EpisodeBudgetError {
+            let result = try store.episodeReceipt(id: deadline.lease.episodeID, clock: deadline.clock.now())
+            checks["semantic_deadline_during_encoder_fences_result_and_fallback"] = error.failureCode == "episode_deadline_exceeded"
+                && result.charged.modelCalls == 1 && result.charged.vectorBytes == 0
+        }
+        encoder.beforeEncoding = nil
+        let sidecar = index.directory.appendingPathComponent("index.sqlite3")
+        try alter(sidecar, sql: "UPDATE chunks SET vector=? WHERE event_id='semantic-metered-first-source'", bytes: Data(repeating: 0, count: 1_048_576))
+        let corrupt = try meteredEpisode(store: store, project: project)
+        do {
+            _ = try ChatContextPreparation.prepare(store: store, conversationID: corrupt.conversationID, projectID: project,
+                prompt: "Where is bike?", system: "", excludingEventID: corrupt.humanEventID, semanticIndex: index, episodeLease: corrupt.lease)
+            checks["semantic_oversized_vector_integrity_error_propagates_without_fallback"] = false
+        } catch SemanticError.sourceMismatch {
+            let result = try corrupt.lease.checkActive()
+            checks["semantic_oversized_vector_integrity_error_propagates_without_fallback"] = result.charged.rawSourceBytes == 0
+                && result.charged.vectorBytes == 2 * (encoder.dimension * 4 + 1) && result.charged.modelCalls == 1
+        }
+        try alter(sidecar, sql: "UPDATE chunks SET vector=? WHERE event_id='semantic-metered-first-source'", bytes: SemanticIndex.vectorData([1, 0, 0]))
+        encoder.failing = true
+        let encoderFailure = try meteredEpisode(store: store, project: project)
+        let failedReport = try index.search(query: "bicycle", projectID: project, includeLiteral: false, episodeLease: encoderFailure.lease)
+        let failureReceipt = try encoderFailure.lease.checkActive()
+        checks["semantic_encoder_failure_keeps_spent_call_and_same_lease_lexical_evidence"] = failureReceipt.charged.modelCalls == 1
+            && failureReceipt.unknownInputOperations == 1 && failedReport.hits.count == 2 && failedReport.manifest.queryDisposition == "adapterUnavailable"
+        encoder.failing = false
+        // A genuine sidecar outage after raw candidate work exercises the
+        // coordinator fallback. The original sources and FTS remain usable.
+        try alter(sidecar, sql: "ALTER TABLE chunks RENAME TO unavailable_chunks", bytes: nil)
+        let fallback = try meteredEpisode(store: store, project: project)
+        let fallbackSnapshot = try ChatContextPreparation.prepare(store: store, conversationID: fallback.conversationID, projectID: project,
+            prompt: "Where is bicycle?", system: "", excludingEventID: fallback.humanEventID, semanticIndex: index, episodeLease: fallback.lease)
+        let fallbackReceipt = try fallback.lease.checkActive()
+        let audit = try JSONSerialization.jsonObject(with: fallbackSnapshot.retrievalAuditJSON!) as! [String: Any]
+        checks["semantic_sidecar_outage_fallback_preserves_prior_raw_work"] = fallbackReceipt.charged.rawSourceBytes >= (source.byteCount + second.byteCount) * 10
+            && fallbackReceipt.charged.modelCalls == 1 && fallbackReceipt.charged.memoryOperations == 1
+            && audit["mode"] as? String == "lexical_fallback" && fallbackSnapshot.evidence.count == 2
+        return checks
+    }
+
+    private struct MeteredFixture { let lease: EpisodeLease; let conversationID: String; let humanEventID: String; let clock: MeteredClock }
+    private final class MeteredClock: EpisodeClockSource {
+        var ticks: UInt64 = 1_000_000_000
+        func now() throws -> EpisodeClockSnapshot {
+            EpisodeClockSnapshot(domain: "synthetic-semantic-metered-clock", continuousNanoseconds: ticks, utc: Date())
+        }
+    }
+    private static func meteredEpisode(store: MemoryStore, project: String, limits: EpisodeLimits = .init()) throws -> MeteredFixture {
+        let chat = try store.createConversation(projectID: project, title: "Synthetic metered query")
+        let clock = MeteredClock(), id = UUID().uuidString, human = "semantic-metered-current-" + UUID().uuidString
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "semantic-metered-turn-" + id,
+            humanEventID: human, episodeID: id, text: "Synthetic accepted query", limits: limits, clock: clock.now())
+        return MeteredFixture(lease: EpisodeLease(ledger: store, episodeID: id, clock: clock), conversationID: chat.id, humanEventID: human, clock: clock)
     }
 
     private struct Range { let offset: Int; let byteCount: Int; let digest: String }

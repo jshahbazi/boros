@@ -4,6 +4,8 @@ import Foundation
 
 enum ProviderAdmissionError: Error {
     case invalidRequest, unavailable, unverifiedAdapter, templateMismatch, countMismatch, contextOverflow, cancelled
+    case episodeBudgetExceeded, episodeDeadlineExceeded, episodeInactive, episodeInputUnobservable
+    case episodeAdapterViolation, episodeClockUnavailable, episodeAccountingFailed
 
     var failureCode: String {
         switch self {
@@ -14,6 +16,26 @@ enum ProviderAdmissionError: Error {
         case .countMismatch: return "provider_count_mismatch"
         case .contextOverflow: return "context_full"
         case .cancelled: return "cancelled"
+        case .episodeBudgetExceeded: return "episode_budget_exceeded"
+        case .episodeDeadlineExceeded: return "episode_deadline_exceeded"
+        case .episodeInactive: return "episode_inactive"
+        case .episodeInputUnobservable: return "episode_input_unobservable"
+        case .episodeAdapterViolation: return "episode_adapter_violation"
+        case .episodeClockUnavailable: return "episode_clock_unavailable"
+        case .episodeAccountingFailed: return "episode_accounting_failed"
+        }
+    }
+
+    static func budget(_ error: Error) -> ProviderAdmissionError {
+        guard let error = error as? EpisodeBudgetError else { return .episodeAccountingFailed }
+        switch error {
+        case .exhausted: return .episodeBudgetExceeded
+        case .deadlineExceeded: return .episodeDeadlineExceeded
+        case .inactive, .staleRevision: return .episodeInactive
+        case .unobservableInput: return .episodeInputUnobservable
+        case .adapterViolation: return .episodeAdapterViolation
+        case .clockUnavailable: return .episodeClockUnavailable
+        case .invalid, .conflict: return .episodeAccountingFailed
         }
     }
 }
@@ -29,9 +51,15 @@ struct ProviderUsage: Equatable, Codable {
         guard let object = value as? [String: Any],
               let input = integer(object["prompt_tokens"]), let output = integer(object["completion_tokens"]),
               let total = integer(object["total_tokens"]), input <= Int.max - output, total == input + output else { return nil }
-        let cached = (object["prompt_tokens_details"] as? [String: Any]).flatMap { integer($0["cached_tokens"]) }
-        let reasoning = (object["completion_tokens_details"] as? [String: Any]).flatMap { integer($0["reasoning_tokens"]) }
-        guard cached.map({ $0 <= input }) ?? true, reasoning.map({ $0 <= output }) ?? true else { return nil }
+        let inputDetails = object["prompt_tokens_details"], outputDetails = object["completion_tokens_details"]
+        guard inputDetails == nil || inputDetails is NSNull || inputDetails is [String: Any],
+              outputDetails == nil || outputDetails is NSNull || outputDetails is [String: Any] else { return nil }
+        let cachedRaw = (inputDetails as? [String: Any])?["cached_tokens"]
+        let reasoningRaw = (outputDetails as? [String: Any])?["reasoning_tokens"]
+        let cached = integer(cachedRaw), reasoning = integer(reasoningRaw)
+        guard cachedRaw == nil || cachedRaw is NSNull || cached != nil,
+              reasoningRaw == nil || reasoningRaw is NSNull || reasoning != nil,
+              cached.map({ $0 <= input }) ?? true, reasoning.map({ $0 <= output }) ?? true else { return nil }
         return ProviderUsage(promptTokens: input, completionTokens: output, totalTokens: total,
                              cachedTokens: cached, reasoningTokens: reasoning)
     }
@@ -60,12 +88,21 @@ struct EndpointAdmissionReceipt: Codable {
     let calibrationUsage: ProviderUsage?
     let admittedAt: Date
     var accounting: ProviderAdmissionAccounting? = nil
+    var episodeID: String? = nil
+    var calibrationWorkID: String? = nil
+    var thinkingEnabled = false
 
     var reservedTokens: Int { promptTokens + outputReserve + safetyTokens }
 
+    var answerAdapterIdentity: String {
+        ProviderAdmission.adapterIdentity(endpoint: endpoint, modelEpoch: loadedModelEpoch, thinking: thinkingEnabled)
+    }
+
     func accepts(body: Data, address: String, maximumAge: TimeInterval = 30) -> Bool {
         guard let url = LocalEndpoint.chatURL(address), Date().timeIntervalSince(admittedAt) >= 0,
-              Date().timeIntervalSince(admittedAt) <= maximumAge else { return false }
+              Date().timeIntervalSince(admittedAt) <= maximumAge,
+              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              object["enable_thinking"] as? Bool == thinkingEnabled else { return false }
         return endpoint == url.absoluteString && bodyDigest == EndpointRequest.digest(body)
             && envelopeBytes == body.count && modelID == Qwen38TextAdapter.modelID
             && templateDigest == Qwen38TextAdapter.templateDigest && serverVersion == Qwen38TextAdapter.serverVersion
@@ -83,6 +120,8 @@ struct EndpointAdmissionReceipt: Codable {
             value["calibration_prompt_tokens"] = usage.promptTokens
             value["calibration_completion_tokens"] = usage.completionTokens
         }
+        if let episodeID { value["episode_id"] = episodeID }
+        if let calibrationWorkID { value["calibration_work_id"] = calibrationWorkID }
         return value
     }
 }
@@ -207,10 +246,16 @@ enum Qwen38TextAdapter {
 }
 
 enum ProviderAdmission {
+    static func adapterIdentity(endpoint: String, modelEpoch: Int, thinking: Bool) -> String {
+        "mlx-serve-qwen38-text-v1|" + endpoint + "|" + Qwen38TextAdapter.modelID + "|"
+            + Qwen38TextAdapter.serverVersion + "|" + Qwen38TextAdapter.templateDigest + "|"
+            + String(modelEpoch) + "|thinking=" + String(thinking)
+    }
     static func prepare(requestBody: Data, address: String, apiKey: String, contextLimit: Int, safetyTokens: Int,
+                        episodeLease: EpisodeLease? = nil,
                         completion: @escaping (Result<EndpointAdmissionReceipt, ProviderAdmissionError>) -> Void) -> ProviderAdmissionOperation {
         let operation = ProviderAdmissionOperation(body: requestBody, address: address, apiKey: apiKey,
-            contextLimit: contextLimit, safetyTokens: safetyTokens, completion: completion)
+            contextLimit: contextLimit, safetyTokens: safetyTokens, episodeLease: episodeLease, completion: completion)
         operation.start()
         return operation
     }
@@ -231,10 +276,13 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     private let apiKey: String
     private let requestedLimit: Int
     private let safety: Int
+    private let episodeLease: EpisodeLease?
     private var completion: ((Result<EndpointAdmissionReceipt, ProviderAdmissionError>) -> Void)?
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private var response = Data()
+    private var receivedBytes = 0
+    private var responseLimitExceeded = false
     private var responseCallback: (([String: Any]) -> Void)?
     private var ended = false
     private var modelEpoch = 0
@@ -250,25 +298,42 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     private var calibrationRequestCount = 0
     private var calibrationPromptTokens: Int?
     private var unknownCalibrationOutcome = false
+    private var activeWork: EpisodeWorkRecord?
+    private var activeInference = false
+    private var activeDispatched = false
+    private var lateWork: EpisodeWorkRecord?
+    private var lateViolationRecorded = false
+    private var calibrationWorkID: String?
+    private var deadlineTimer: DispatchSourceTimer?
 
     var accounting: ProviderAdmissionAccounting { queue.sync { accountingSnapshot() } }
 
     private func accountingSnapshot() -> ProviderAdmissionAccounting {
         ProviderAdmissionAccounting(httpRequestCount: httpRequestCount, tokenizerRequestCount: tokenizerRequestCount,
             calibrationRequestCount: calibrationRequestCount, calibrationPromptTokens: calibrationPromptTokens,
-            calibrationOutputReserve: calibrationRequestCount > 0 ? 1 : 0, calibrationUsage: calibrationUsage,
+            calibrationOutputReserve: calibrationRequestCount > 0 || unknownCalibrationOutcome ? 1 : 0, calibrationUsage: calibrationUsage,
             unknownCalibrationOutcome: unknownCalibrationOutcome, elapsed: max(0, (finishedAt ?? Date()).timeIntervalSince(started)))
     }
 
     init(body: Data, address: String, apiKey: String, contextLimit: Int, safetyTokens: Int,
+         episodeLease: EpisodeLease? = nil,
          completion: @escaping (Result<EndpointAdmissionReceipt, ProviderAdmissionError>) -> Void) {
         self.body = body; self.address = address; self.apiKey = apiKey
-        requestedLimit = contextLimit; safety = safetyTokens; self.completion = completion
+        requestedLimit = contextLimit; safety = safetyTokens; self.episodeLease = episodeLease; self.completion = completion
     }
 
     func start() {
         queue.async {
             self.started = Date()
+            if let lease = self.episodeLease {
+                do {
+                    let remaining = try lease.remainingSeconds()
+                    let timer = DispatchSource.makeTimerSource(queue: self.queue)
+                    timer.schedule(deadline: .now() + remaining)
+                    timer.setEventHandler { [weak self] in self?.finish(.failure(.episodeDeadlineExceeded)) }
+                    self.deadlineTimer = timer; timer.resume()
+                } catch { self.finish(.failure(.budget(error))); return }
+            }
             guard let url = LocalEndpoint.chatURL(self.address), self.requestedLimit > 0, self.safety >= 0,
                   self.body.count <= EndpointRequest.maximumEnvelopeBytes,
                   !self.apiKey.contains("\r"), !self.apiKey.contains("\n"),
@@ -332,8 +397,7 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
         guard let rendered = try? Qwen38TextAdapter.render(probe) else { finish(.failure(.unverifiedAdapter)); return }
         count(rendered) { expected in
             self.calibrationPromptTokens = expected
-            self.unknownCalibrationOutcome = true
-            self.request(path: "/v1/chat/completions", json: probe) { object in
+            self.request(path: "/v1/chat/completions", json: probe, inferencePromptTokens: expected, outputReserve: 1) { object in
                 if let usage = ProviderUsage.parse(object["usage"]) {
                     self.calibrationUsage = usage; self.unknownCalibrationOutcome = false
                 }
@@ -357,7 +421,9 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                 outputReserve: output, safetyTokens: self.safety, effectiveContextLimit: self.contextLimit,
                 envelopeBytes: self.body.count, templateDigest: Qwen38TextAdapter.templateDigest,
                 serverVersion: Qwen38TextAdapter.serverVersion, loadedModelEpoch: self.modelEpoch,
-                calibrationUsage: self.calibrationUsage, admittedAt: Date(), accounting: self.accountingSnapshot())))
+                calibrationUsage: self.calibrationUsage, admittedAt: Date(), accounting: self.accountingSnapshot(),
+                episodeID: self.episodeLease?.episodeID, calibrationWorkID: self.calibrationWorkID,
+                thinkingEnabled: self.payload["enable_thinking"] as? Bool ?? false)))
         }
     }
 
@@ -372,6 +438,7 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     }
 
     private func request(path: String, json: [String: Any]? = nil, modelQuery: Bool = false,
+                         inferencePromptTokens: Int? = nil, outputReserve: Int = 0,
                          completion: @escaping ([String: Any]) -> Void) {
         guard !ended, Date().timeIntervalSince(started) < 45, let chatURL,
               var parts = URLComponents(url: chatURL, resolvingAgainstBaseURL: false) else {
@@ -380,7 +447,10 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
         parts.path = path
         if modelQuery { parts.queryItems = [URLQueryItem(name: "model", value: Qwen38TextAdapter.modelID)] }
         guard let url = parts.url else { finish(.failure(.invalidRequest)); return }
-        var request = URLRequest(url: url); request.timeoutInterval = min(15, 45 - Date().timeIntervalSince(started))
+        let remaining: TimeInterval
+        do { remaining = try episodeLease?.remainingSeconds() ?? 45 - Date().timeIntervalSince(started) }
+        catch { finish(.failure(.budget(error))); return }
+        var request = URLRequest(url: url); request.timeoutInterval = min(15, remaining, 45 - Date().timeIntervalSince(started))
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if !apiKey.isEmpty { request.setValue("Bearer " + apiKey, forHTTPHeaderField: "Authorization") }
         if let json {
@@ -388,11 +458,107 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
             request.httpMethod = "POST"; request.httpBody = bytes
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        response = Data(); responseCallback = completion
-        httpRequestCount += 1
-        if path == "/tokenize" { tokenizerRequestCount += 1 }
-        if path == "/v1/chat/completions" { calibrationRequestCount += 1 }
-        task = session!.dataTask(with: request); task!.resume()
+        response = Data(); receivedBytes = 0; responseLimitExceeded = false; responseCallback = completion
+        activeInference = inferencePromptTokens != nil; activeDispatched = false
+        do {
+            if let lease = episodeLease {
+                let snapshot = try request.httpBody ?? EndpointRequest.serialize(["method": "GET", "endpoint": url.absoluteString])
+                let resources = EpisodeResources(inputTokens: inferencePromptTokens ?? 0, outputTokens: outputReserve,
+                    modelCalls: activeInference ? 1 : 0, httpAttempts: 1)
+                activeWork = try lease.prepare(kind: activeInference ? .calibration : (path == "/tokenize" ? .tokenizer : .providerDiscovery),
+                    resources: resources, adapterIdentity: ProviderAdmission.adapterIdentity(endpoint: chatURL.absoluteString,
+                        modelEpoch: modelEpoch, thinking: payload["enable_thinking"] as? Bool ?? false), snapshot: snapshot)
+            }
+            let next = session!.dataTask(with: request); task = next
+            let start = {
+                self.activeDispatched = true
+                self.httpRequestCount += 1
+                if path == "/tokenize" { self.tokenizerRequestCount += 1 }
+                if self.activeInference {
+                    self.calibrationRequestCount += 1; self.unknownCalibrationOutcome = true
+                    self.calibrationWorkID = self.activeWork?.id
+                }
+                next.resume()
+            }
+            if let lease = episodeLease, let work = activeWork { activeWork = try lease.dispatch(work, start: start) }
+            else { start() }
+        } catch { finish(.failure(.budget(error))) }
+    }
+
+    /// HTTP success alone establishes no model usage. Missing inference usage keeps
+    /// the conservative reservation, including the one-token calibration output.
+    private func settleActive(object: [String: Any]? = nil) throws {
+        guard let lease = episodeLease, let work = activeWork else { return }
+        let usage = activeInference ? ProviderUsage.parse(object?["usage"]) : nil
+        if let usage { calibrationUsage = usage; unknownCalibrationOutcome = false }
+        let outcome: EpisodeWorkOutcome
+        let observed: EpisodeResources?
+        if !activeDispatched { outcome = .cancelledBeforeDispatch; observed = nil }
+        else if activeInference {
+            if let usage {
+                outcome = .completed
+                observed = EpisodeResources(inputTokens: usage.promptTokens, outputTokens: usage.completionTokens,
+                    modelCalls: 1, httpAttempts: 1)
+            } else { outcome = .outcomeUnknown; observed = nil }
+        } else {
+            outcome = object == nil ? .failedConfirmed : .completed
+            observed = EpisodeResources(httpAttempts: 1)
+        }
+        let model = object?["model"] as? String
+        let identityMismatch = activeInference && (model.map { $0 != Qwen38TextAdapter.modelID } ?? (usage != nil))
+        let rawUsage = object?["usage"]
+        let protocolMismatch = activeInference && rawUsage != nil && !(rawUsage is NSNull) && usage == nil
+        let violation = identityMismatch || protocolMismatch
+        let evidence = try usage.map { try JSONEncoder().encode($0) }
+            ?? (activeInference ? unknownCalibrationEvidence(identityMismatch: identityMismatch,
+                protocolMismatch: protocolMismatch, observedModel: model) : nil)
+        // Clear first: a ledger adapter violation is durable and must never cause
+        // finish() to overwrite its receipt with an unknown transport outcome.
+        activeWork = nil
+        if outcome == .outcomeUnknown { lateWork = work; lateViolationRecorded = violation }
+        do {
+            _ = try lease.settle(work, outcome: outcome, observed: observed, evidence: evidence,
+                adapterViolation: violation)
+        } catch EpisodeBudgetError.conflict where outcome == .cancelledBeforeDispatch {
+            // The durable arm may precede a lease-local Stop that suppressed
+            // resume. Preserve that reservation instead of asserting nonuse.
+            lateWork = work
+            if activeInference { unknownCalibrationOutcome = true; calibrationWorkID = work.id }
+            _ = try lease.settle(work, outcome: .outcomeUnknown)
+        }
+    }
+
+    private func unknownCalibrationEvidence(identityMismatch: Bool, protocolMismatch: Bool, observedModel: String?) throws -> Data {
+        var evidence: [String: Any] = ["usage_observed": false, "model_identity_mismatch": identityMismatch,
+            "protocol_count_mismatch": protocolMismatch, "expected_model_sha256": EndpointRequest.digest(Data(Qwen38TextAdapter.modelID.utf8))]
+        if let observedModel { evidence["observed_model_sha256"] = EndpointRequest.digest(Data(observedModel.utf8)) }
+        return try EndpointRequest.serialize(evidence)
+    }
+
+    private func settleLateUsage(_ object: [String: Any]) {
+        guard let lease = episodeLease, let work = lateWork, work.request.kind == .calibration else { return }
+        let model = object["model"] as? String
+        guard let usage = ProviderUsage.parse(object["usage"]) else {
+            let identityMismatch = model.map { $0 != Qwen38TextAdapter.modelID } ?? false
+            let rawUsage = object["usage"]
+            let protocolMismatch = rawUsage != nil && !(rawUsage is NSNull)
+            if !lateViolationRecorded, identityMismatch || protocolMismatch {
+                do {
+                    _ = try lease.settle(work, outcome: .outcomeUnknown,
+                        evidence: unknownCalibrationEvidence(identityMismatch: identityMismatch, protocolMismatch: protocolMismatch, observedModel: model),
+                        adapterViolation: true)
+                    lateViolationRecorded = true
+                } catch EpisodeBudgetError.adapterViolation { lateViolationRecorded = true }
+                catch { return }
+            }
+            return
+        }
+        lateWork = nil
+        calibrationUsage = usage; unknownCalibrationOutcome = false
+        _ = try? lease.settle(work, outcome: .completed,
+            observed: EpisodeResources(inputTokens: usage.promptTokens, outputTokens: usage.completionTokens, modelCalls: 1, httpAttempts: 1),
+            evidence: try? JSONEncoder().encode(usage),
+            adapterViolation: lateViolationRecorded || model != Qwen38TextAdapter.modelID)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
@@ -409,17 +575,31 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         queue.async {
-            guard !self.ended else { return }
-            guard data.count <= 4 * 1_048_576 - self.response.count else { self.finish(.failure(.unavailable)); return }
+            guard (!self.ended || self.lateWork != nil), !self.responseLimitExceeded else { return }
+            guard data.count <= 4 * 1_048_576 - self.receivedBytes else {
+                self.responseLimitExceeded = true; self.response.removeAll(keepingCapacity: true)
+                self.finish(.failure(.unavailable)); return
+            }
+            self.receivedBytes += data.count
             self.response.append(data)
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         queue.async {
-            guard !self.ended else { return }
+            if self.ended {
+                if let object = (try? JSONSerialization.jsonObject(with: self.response)) as? [String: Any] {
+                    self.settleLateUsage(object)
+                    self.response.removeAll(keepingCapacity: true)
+                }
+                return
+            }
             guard error == nil, let object = (try? JSONSerialization.jsonObject(with: self.response)) as? [String: Any],
                   let callback = self.responseCallback else { self.finish(.failure(.unavailable)); return }
+            do {
+                try self.settleActive(object: object)
+                _ = try self.episodeLease?.checkActive()
+            } catch { self.finish(.failure(.budget(error))); return }
             self.responseCallback = nil; self.task = nil; self.response = Data(); callback(object)
         }
     }
@@ -431,7 +611,13 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
 
     private func finish(_ result: Result<EndpointAdmissionReceipt, ProviderAdmissionError>) {
         guard !ended else { return }
+        var result = result
+        do {
+            let object = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any]
+            try settleActive(object: object)
+        } catch { result = .failure(.budget(error)) }
         ended = true; finishedAt = Date(); let callback = completion; completion = nil; responseCallback = nil
+        deadlineTimer?.cancel(); deadlineTimer = nil
         task?.cancel(); task = nil; session?.invalidateAndCancel(); session = nil
         if let callback { DispatchQueue.main.async { callback(result) } }
     }

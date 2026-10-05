@@ -14,7 +14,8 @@ import re
 from evaluation_fixtures import canonical_json, corpus_summary, generate
 from evaluation_statistics import (clustered_recall, paired_score_interval, trajectory_cost_ratio, percentile,
                                    minimum_power_histories, quality_joint_power_histories, tree_gate_decision, PRIMARY_CATEGORIES)
-from evaluate_retrieval import ROOT, PREREGISTRATION, compile_harness, execute, rows, binary_coverage
+from evaluate_retrieval import (ROOT, PREREGISTRATION, PROTOCOL_AMENDMENT, CORE_FILES, PYTHON_FILES,
+                               compile_harness, execute, rows, binary_coverage)
 
 
 class EvaluationContracts(unittest.TestCase):
@@ -275,7 +276,7 @@ class SwiftRetrievalContracts(unittest.TestCase):
         cls.fixtures = generate("development", history_count=2)
         cls.input = cls.scratch / "fixtures.json"
         cls.input.write_bytes(canonical_json(cls.fixtures))
-        cls.binary, _ = compile_harness(cls.scratch)
+        cls.binary, cls.implementation = compile_harness(cls.scratch)
         runtime = cls.scratch / "store"
         cls.warm = execute(cls.binary, "warm", cls.input, runtime, cls.scratch)
         cls.restart = execute(cls.binary, "restart", cls.input, runtime, cls.scratch)
@@ -351,25 +352,77 @@ class SwiftRetrievalContracts(unittest.TestCase):
             for protocol in episode["protocols"].values():
                 self.assertGreaterEqual(protocol["oracleScoringMilliseconds"], 0)
 
-    def test_runner_emits_required_manifest_and_implementation_hashes(self):
-        destination = self.scratch / "manifest-contract.json"
+    def test_compile_dependency_closure_is_copied_and_hashed(self):
+        hashes = self.implementation["sourceSHA256"]
+        self.assertEqual(set(hashes), set(CORE_FILES) | set(PYTHON_FILES))
+        for relative, expected in hashes.items():
+            captured = self.scratch / "source" / relative
+            self.assertEqual(hashlib.sha256(captured.read_bytes()).hexdigest(), expected)
+        for dependency in ("EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MeteredRetrieval.swift"):
+            self.assertIn("Sources/Boros/" + dependency, hashes)
+
+    def test_registered_runner_preserves_historical_source_pin_refusal(self):
+        destination = self.scratch / "refused-registered-manifest.json"
+        historical = PROTOCOL_AMENDMENT.read_bytes()
         process = subprocess.run(["python3", str(ROOT / "scripts/evaluate_retrieval.py"),
             "--history-count", "1", "--profile", "warm", "--output", str(destination)],
+            capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("Frozen v4 evaluation implementation changed", process.stderr)
+        self.assertFalse(destination.exists())
+        self.assertEqual(PROTOCOL_AMENDMENT.read_bytes(), historical)
+
+    def test_contract_runner_emits_unregistered_manifest_and_implementation_hashes(self):
+        destination = self.scratch / "manifest-contract.json"
+        process = subprocess.run(["python3", str(ROOT / "scripts/evaluate_retrieval.py"),
+            "--contract-only", "--history-count", "1", "--profile", "warm", "--output", str(destination)],
             capture_output=True, text=True, timeout=30)
         self.assertEqual(process.returncode, 0, "synthetic manifest runner failed")
         report = json.loads(destination.read_text())
         schema = json.loads((ROOT / "Tests/fixtures/evaluation/run-manifest-schema-v4.json").read_text())
-        self.assertEqual(set(report), set(schema["required"]))
-        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", report["preregistrationSHA256"]))
-        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", report["protocolAmendmentSHA256"]))
+        self.assertNotIn("reportSchemaVersion", report)
+        self.assertNotIn("protocolAmendmentSHA256", report)
+        self.assertEqual(report["contractReportSchemaVersion"], 1)
+        self.assertEqual(report["executionMode"], "contract-only-current-source")
+        self.assertEqual(report["registrationStatus"], "unregistered")
+        self.assertIs(report["registeredProtocolApplied"], False)
+        self.assertEqual(report["comparisonUse"], "prohibited")
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", report["historicalPreregistrationSHA256"]))
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", report["historicalProtocolAmendmentSHA256"]))
         self.assertEqual(set(report["fixtureSet"]), set(schema["properties"]["fixtureSet"]["required"]))
         self.assertEqual(set(report["hardware"]), set(schema["properties"]["hardware"]["required"]))
         self.assertEqual(report["hardware"]["concurrency"], 1)
         self.assertEqual(report["hardware"]["providerRequests"], 0)
         hashes = report["implementation"]["sourceSHA256"]
         self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes.values()))
-        for name in ("scripts/evaluate_retrieval.py", "scripts/evaluation_statistics.py", "scripts/evaluation_fixtures.py"):
+        for name in (*CORE_FILES, *PYTHON_FILES):
             self.assertIn(name, hashes)
+        for profile in report["profiles"].values():
+            self.assertNotIn("summary", profile)
+            for episode in rows(profile["report"]):
+                self.assertIsNone(episode["taskScore"])
+                self.assertIsNone(episode["providerTokenFeasible"])
+
+    def test_contract_only_scope_is_bounded_and_nondevelopment_runs_remain_blocked(self):
+        for arguments in ([], ["--history-count", "3"], ["--history-count", "1", "--scale-events", "1000"],
+                          ["--history-count", "1", "--split", "validation"],
+                          ["--history-count", "1", "--split", "held-out"]):
+            with self.subTest(arguments=arguments):
+                process = subprocess.run(["python3", str(ROOT / "scripts/evaluate_retrieval.py"),
+                    "--contract-only", *arguments], capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(process.returncode, 0)
+                self.assertIn("contract-only mode requires", process.stderr)
+
+    def test_contract_only_output_cannot_replace_existing_evidence(self):
+        destination = self.scratch / "preserved-evidence.json"
+        original = b'{"reportSchemaVersion":4,"syntheticSentinel":true}\n'
+        destination.write_bytes(original)
+        process = subprocess.run(["python3", str(ROOT / "scripts/evaluate_retrieval.py"),
+            "--contract-only", "--history-count", "1", "--output", str(destination)],
+            capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("contract-only output already exists", process.stderr)
+        self.assertEqual(destination.read_bytes(), original)
 
 
 if __name__ == "__main__":

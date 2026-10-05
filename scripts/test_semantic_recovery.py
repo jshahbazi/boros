@@ -12,7 +12,7 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = [ROOT / "Sources/Boros" / name for name in ("MemoryStore.swift", "SemanticIndex.swift")]
+SOURCES = [ROOT / "Sources/Boros" / name for name in ("EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "MeteredRetrieval.swift", "SemanticIndex.swift")]
 HARNESS = ROOT / "Tests/SemanticCrashHarness.swift"
 TIMEOUT = 60
 

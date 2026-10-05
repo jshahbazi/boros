@@ -18,6 +18,11 @@ struct BackupCommandReport: Codable {
     let chunks: Int
     let unfinishedArchivedInvocations: Int
     let restoredInterruptedAttempts: Int?
+    var episodes: Int? = nil
+    var episodeWork: Int? = nil
+    var unfinishedArchivedEpisodes: Int? = nil
+    var uncertainArchivedWork: Int? = nil
+    var restoredInterruptedEpisodes: Int? = nil
 }
 
 /// Takes argv with or without its executable name. The caller invokes this
@@ -101,7 +106,11 @@ enum BackupCommand {
             archivedEvents: manifest.inventory.events, archivedSourceBytes: manifest.inventory.sourceBytes,
             invocations: manifest.inventory.invocations, chunks: manifest.inventory.chunks,
             unfinishedArchivedInvocations: manifest.inventory.unfinishedInvocations,
-            restoredInterruptedAttempts: operation == "--backup-restore" ? manifest.inventory.unfinishedInvocations : nil)
+            restoredInterruptedAttempts: operation == "--backup-restore" ? manifest.inventory.unfinishedInvocations : nil,
+            episodes: manifest.inventory.episodes, episodeWork: manifest.inventory.episodeWork,
+            unfinishedArchivedEpisodes: manifest.inventory.unfinishedEpisodes,
+            uncertainArchivedWork: manifest.inventory.episodeUncertainWork,
+            restoredInterruptedEpisodes: operation == "--backup-restore" ? manifest.inventory.unfinishedEpisodes : nil)
     }
 
     private static func requireExistingSource(_ directory: URL) throws {

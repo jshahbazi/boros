@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Verify SQLite backups with synthetic stores, including a real SIGKILL."""
 import json
+import os
 from pathlib import Path
+import selectors
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = r'''
@@ -19,7 +22,12 @@ enum BackupHarness {
                 let destination = URL(fileURLWithPath: CommandLine.arguments[3], isDirectory: true)
                 let owner = try MemoryStore(directory: source)
                 let conversation = try owner.createConversation(projectID: "synthetic-crash-backup", title: "Synthetic crash")
-                _ = try owner.append(conversationID: conversation.id, role: .human, text: "SYNTHETIC_BACKUP_CRASH_SOURCE", status: .complete, turnID: "crash-turn", eventID: "crash-source")
+                let clock = EpisodeClockSnapshot(domain: "synthetic-backup-kill-clock", continuousNanoseconds: 1_000_000_000, utc: Date(timeIntervalSince1970: 1_700_000_000))
+                _ = try owner.acceptRequestAndBeginEpisode(conversationID: conversation.id, turnID: "crash-turn", humanEventID: "crash-source", episodeID: "crash-episode", text: "SYNTHETIC_BACKUP_CRASH_SOURCE", limits: EpisodeLimits(), clock: clock)
+                let body = Data("{\"model\":\"synthetic-crash-model\",\"messages\":[{\"role\":\"user\",\"content\":\"SYNTHETIC_BACKUP_CRASH_PROBE\"}]}".utf8)
+                _ = try owner.reserveEpisodeWork(episodeID: "crash-episode", request: EpisodeWorkRequest(id: "crash-prepared", parentID: nil, kind: .tokenizer, resources: EpisodeResources(httpAttempts: 1), adapterIdentity: "synthetic-backup-kill-adapter", snapshot: body, inputTokensKnown: true), clock: clock)
+                let armed = try owner.reserveEpisodeWork(episodeID: "crash-episode", request: EpisodeWorkRequest(id: "crash-armed", parentID: nil, kind: .calibration, resources: EpisodeResources(inputTokens: 17, outputTokens: 1, modelCalls: 1, httpAttempts: 1), adapterIdentity: "synthetic-backup-kill-adapter", snapshot: body, inputTokensKnown: true), clock: clock)
+                _ = try owner.armEpisodeWork(episodeID: "crash-episode", operationID: armed.id, expectedRevision: armed.revision, clock: clock)
                 var first = true
                 _ = try BackupArchive.create(from: owner, at: destination, cancellation: {
                     if first {
@@ -30,6 +38,24 @@ enum BackupHarness {
                     return false
                 })
                 exit(1)
+            }
+            if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "recover-interrupted-backup" {
+                let owner = try MemoryStore(directory: URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true))
+                let clock = EpisodeClockSnapshot(domain: "synthetic-backup-kill-clock", continuousNanoseconds: 1_000_000_000, utc: Date(timeIntervalSince1970: 1_700_000_000))
+                let episode = try owner.episodeReceipt(id: "crash-episode", clock: clock)
+                let prepared = try owner.episodeWork(episodeID: episode.id, operationID: "crash-prepared")!
+                let armed = try owner.episodeWork(episodeID: episode.id, operationID: "crash-armed")!
+                let sources = try owner.sourceManifest(projectID: "synthetic-crash-backup", afterSequence: 0, limit: 10)
+                let checks = [
+                    "episode_interrupted": episode.state == .interrupted,
+                    "accepted_source_survives": sources.count == 1 && sources[0].eventID == "crash-source",
+                    "prepared_work_released": prepared.state == .cancelledBeforeDispatch && prepared.charged == .zero && prepared.held == .zero,
+                    "armed_usage_stays_unknown": armed.state == .outcomeUnknown && armed.observed == nil && armed.recovered,
+                    "charges_and_output_bound_retained": episode.charged == EpisodeResources(inputTokens: 17, modelCalls: 1, httpAttempts: 1) && episode.held == EpisodeResources(outputTokens: 1)
+                ]
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                if checks.values.contains(false) { exit(1) }
+                return
             }
             let checks = try BackupChecks.run()
             print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
@@ -50,10 +76,16 @@ def main():
         harness.write_text(HARNESS)
         binary = scratch / "backup-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
-            "MemoryStore.swift", "BackupArchive.swift", "BackupCommand.swift", "BackupChecks.swift"
+            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "BackupArchive.swift", "BackupCommand.swift", "BackupChecks.swift"
         )]
+        # Compile one captured dependency set. Other integration agents may be
+        # editing shared Swift sources while this isolated suite is running.
+        captured = scratch / "sources"
+        captured.mkdir()
+        for source in sources:
+            (captured / source.name).write_bytes(source.read_bytes())
         subprocess.run(["swiftc", "-I", str(ROOT / "Sources/CSQLite"), "-o", str(binary),
-                        *(str(path) for path in sources), str(harness)], check=True)
+                        *(str(captured / path.name) for path in sources), str(harness)], check=True)
         run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=90)
         if run.returncode:
             if run.stdout.strip():
@@ -69,7 +101,23 @@ def main():
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, text=True)
         try:
-            if interrupted.stdout.readline().strip() != "ready":
+            selector = selectors.DefaultSelector()
+            descriptor = interrupted.stdout.fileno()
+            os.set_blocking(descriptor, False)
+            selector.register(descriptor, selectors.EVENT_READ)
+            buffer = b""
+            deadline = time.monotonic() + 30
+            while b"\n" not in buffer and time.monotonic() < deadline:
+                if not selector.select(timeout=min(1, max(0, deadline - time.monotonic()))):
+                    continue
+                chunk = os.read(descriptor, 1024)
+                if not chunk:
+                    break
+                buffer += chunk
+                if len(buffer) > 1024:
+                    break
+            selector.close()
+            if buffer.strip() != b"ready":
                 raise RuntimeError("Interrupted backup did not reach its staging boundary")
             staging = list(scratch.glob(".boros-staging-*"))
             interrupted.kill()
@@ -78,6 +126,13 @@ def main():
                 interrupted.returncode == -9 and not archive.exists() and len(staging) == 1
                 and staging[0].is_dir() and staging[0].stat().st_mode & 0o777 == 0o700
             )
+            for restart in (1, 2):
+                recovered = subprocess.run([str(binary), "recover-interrupted-backup", str(source)],
+                                           capture_output=True, text=True, timeout=30)
+                if recovered.returncode:
+                    raise RuntimeError("Interrupted synthetic backup source failed recovery")
+                for name, passed in json.loads(recovered.stdout).items():
+                    checks[f"backup_sigkill_restart_{restart}_{name}"] = passed is True
         finally:
             if interrupted.poll() is None:
                 interrupted.kill()

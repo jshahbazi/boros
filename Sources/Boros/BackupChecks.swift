@@ -196,6 +196,9 @@ enum BackupChecks {
         checks["restore_corrupt_archive_never_published"] = rejects { _ = try BackupArchive.restore(from: sourceCorrupt, to: failedRestore, authority: .unmanagedNoDeletion) } && !FileManager.default.fileExists(atPath: failedRestore.path)
         owner = nil
         checks.merge(try commandChecks(in: scratch)) { _, new in new }
+        checks.merge(try episodeChecks(in: scratch)) { _, new in new }
+        checks.merge(try cancelledRecoveryChecks(in: scratch)) { _, new in new }
+        checks.merge(try schemaTwoArchiveChecks(in: scratch, archive: archive)) { _, new in new }
         return checks
     }
 
@@ -225,7 +228,7 @@ enum BackupChecks {
         }
         let allOutput = String(decoding: created.output + verified.output + restored.output + created.errors + verified.errors + restored.errors, as: UTF8.self)
         checks["backup_cli_success_output_excludes_private_content_scope_paths"] = ["PRIVATE_SCOPE_SENTINEL", "PRIVATE_PROMPT_SENTINEL", "PRIVATE_DRAFT_SENTINEL", "PRIVATE_EVENT_SENTINEL", scratch.path].allSatisfy { !allOutput.contains($0) }
-        let allowedMetadata = Set(["operation", "status", "archive_id", "archive_version", "database_schema", "control_state", "conversations", "scope_count", "archived_events", "archived_source_bytes", "invocations", "chunks", "unfinished_archived_invocations"])
+        let allowedMetadata = Set(["operation", "status", "archive_id", "archive_version", "database_schema", "control_state", "conversations", "scope_count", "archived_events", "archived_source_bytes", "invocations", "chunks", "unfinished_archived_invocations", "episodes", "episode_work", "unfinished_archived_episodes", "uncertain_archived_work"])
         checks["backup_cli_metadata_keys_have_no_request_or_configuration_fields"] = createdMetadata.map { Set($0.keys) == allowedMetadata } ?? false
         let activeOwner = try MemoryStore(directory: directory)
         let blocked = try captureCommand(["--backup-create", "--data-directory", directory.path, "--archive", scratch.appendingPathComponent("blocked-command-archive").path])
@@ -245,7 +248,7 @@ enum BackupChecks {
         let unrelatedArchive = scratch.appendingPathComponent("non-boros-command-archive")
         let unrelatedSource = try captureCommand(["--backup-create", "--data-directory", unrelatedDirectory.path, "--archive", unrelatedArchive.path])
         checks["backup_cli_unrecognized_source_schema_refused_without_mutation"] = try unrelatedSource.status == 1 && unrelatedSource.output.isEmpty && Data(contentsOf: unrelatedDatabase) == beforeUnrelated && !FileManager.default.fileExists(atPath: unrelatedArchive.path) && !FileManager.default.fileExists(atPath: unrelatedDirectory.appendingPathComponent("owner.lock").path)
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             let foreignDirectory = scratch.appendingPathComponent("foreign-command-source-\(version)", isDirectory: true)
             try FileManager.default.createDirectory(at: foreignDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let database = foreignDirectory.appendingPathComponent("memory.sqlite3")
@@ -278,15 +281,25 @@ enum BackupChecks {
             legacyConversationID = item.id
             _ = try legacyOwner.append(conversationID: item.id, role: .human, text: "Synthetic recognized legacy history", status: .complete, turnID: "legacy-turn", eventID: "legacy-event")
         }
-        try sql(legacyDirectory.appendingPathComponent("memory.sqlite3"), "DROP TABLE invocation_chunks; DROP TABLE invocations; PRAGMA user_version=1")
+        try downgrade(legacyDirectory.appendingPathComponent("memory.sqlite3"), to: 1)
         let legacyArchive = scratch.appendingPathComponent("legacy-command-archive", isDirectory: true)
         let legacyCommand = try captureCommand(["--backup-create", "--data-directory", legacyDirectory.path, "--archive", legacyArchive.path])
         var legacyReadback = false
         if legacyCommand.status == 0 {
             let legacyOwner = try MemoryStore(directory: legacyDirectory)
-            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 2
+            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 3
         }
         checks["backup_cli_strict_recognition_accepts_genuine_schema_one_upgrade"] = legacyCommand.status == 0 && legacyCommand.errors.isEmpty && legacyReadback
+        let versionTwoDirectory = scratch.appendingPathComponent("schema-two-command-source", isDirectory: true)
+        do {
+            let itemOwner = try MemoryStore(directory: versionTwoDirectory)
+            let item = try itemOwner.createConversation(projectID: "legacy-two-synthetic", title: "Synthetic schema two source")
+            _ = try itemOwner.append(conversationID: item.id, role: .human, text: "Synthetic schema two accepted history", status: .complete, turnID: "legacy-two-turn", eventID: "legacy-two-event")
+        }
+        try downgrade(versionTwoDirectory.appendingPathComponent("memory.sqlite3"), to: 2)
+        let versionTwoArchive = scratch.appendingPathComponent("schema-two-command-archive", isDirectory: true)
+        let versionTwoCommand = try captureCommand(["--backup-create", "--data-directory", versionTwoDirectory.path, "--archive", versionTwoArchive.path])
+        checks["backup_cli_strict_recognition_accepts_genuine_schema_two_upgrade"] = try versionTwoCommand.status == 0 && versionTwoCommand.errors.isEmpty && BackupArchive.verify(at: versionTwoArchive).databaseSchema == 3
         let missingArchive = try captureCommand(["--backup-verify", "--archive", scratch.appendingPathComponent("missing-command-archive").path])
         checks["backup_cli_verify_missing_archive_refused"] = missingArchive.status == 1 && missingArchive.output.isEmpty
         let invalid: [[String]] = [
@@ -309,6 +322,248 @@ enum BackupChecks {
         let empty = try captureCommand([])
         checks["backup_cli_unrelated_and_empty_dispatch_return_nil"] = unrelated.status == nil && unrelated.output.isEmpty && unrelated.errors.isEmpty && empty.status == nil && empty.output.isEmpty && empty.errors.isEmpty
         return checks
+    }
+
+    /// One live schema-3 snapshot includes completed receipts, interrupted
+    /// answering, preflight-only inference and never-armed reservations.
+    private static func episodeChecks(in scratch: URL) throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        let directory = scratch.appendingPathComponent("episode-source", isDirectory: true)
+        var owner: MemoryStore? = try MemoryStore(directory: directory)
+        let conversation = try owner!.createConversation(projectID: "synthetic-episode-backup", title: "Synthetic episode backup")
+        let clock = EpisodeClockSnapshot(domain: "synthetic-backup-clock-v1", continuousNanoseconds: 1_000_000_000, utc: Date(timeIntervalSince1970: 1_700_000_000))
+        let body = Data("{\"model\":\"synthetic-episode-model\",\"messages\":[{\"role\":\"user\",\"content\":\"SYNTHETIC_EPISODE_PRIVATE_REQUEST\"}],\"max_tokens\":128}".utf8)
+        let calibrationBody = Data("{\"model\":\"synthetic-episode-model\",\"messages\":[{\"role\":\"user\",\"content\":\"SYNTHETIC_CALIBRATION\"}],\"max_tokens\":1}".utf8)
+        let adapter = "http://localhost:11234/v1/chat/completions"
+        func begin(_ episode: String, _ turn: String, _ human: String) throws {
+            _ = try owner!.acceptRequestAndBeginEpisode(conversationID: conversation.id, turnID: turn, humanEventID: human,
+                episodeID: episode, text: "SYNTHETIC_EPISODE_BACKUP_ACCEPTED_SOURCE " + human, limits: EpisodeLimits(), clock: clock)
+        }
+        func reserve(_ episode: String, _ operation: String, _ kind: EpisodeWorkKind, _ resources: EpisodeResources, _ snapshot: Data) throws -> EpisodeWorkRecord {
+            try owner!.reserveEpisodeWork(episodeID: episode,
+                request: EpisodeWorkRequest(id: operation, parentID: nil, kind: kind, resources: resources,
+                    adapterIdentity: adapter, snapshot: snapshot, inputTokensKnown: true), clock: clock)
+        }
+        func arm(_ work: EpisodeWorkRecord) throws -> EpisodeWorkRecord {
+            try owner!.armEpisodeWork(episodeID: work.episodeID, operationID: work.id, expectedRevision: work.revision, clock: clock)
+        }
+        func settle(_ work: EpisodeWorkRecord, _ observed: EpisodeResources) throws -> EpisodeWorkRecord {
+            try owner!.settleEpisodeWork(episodeID: work.episodeID, operationID: work.id,
+                settlement: EpisodeWorkSettlement(receiptID: work.id + "-receipt", outcome: .completed, observed: observed,
+                    evidence: Data("{\"synthetic_verified\":true}".utf8)), clock: clock)
+        }
+        try begin("episode-completed", "episode-complete-turn", "episode-complete-human")
+        let calibration = try arm(reserve("episode-completed", "episode-complete-calibration", .calibration,
+            EpisodeResources(inputTokens: 13, outputTokens: 1, modelCalls: 1, httpAttempts: 1), calibrationBody))
+        let calibrationReceipt = try settle(calibration, EpisodeResources(inputTokens: 13, outputTokens: 1, modelCalls: 1, httpAttempts: 1))
+        let answer = try reserve("episode-completed", "episode-complete-answer", .answer,
+            EpisodeResources(inputTokens: 37, outputTokens: 64, modelCalls: 1, httpAttempts: 1), body)
+        _ = try owner!.beginInvocation(invocationID: "episode-complete-invocation", conversationID: conversation.id,
+            turnID: "episode-complete-turn", humanEventID: "episode-complete-human", assistantEventID: "episode-complete-assistant",
+            providerIdentity: adapter, requestBody: body, episodeID: answer.episodeID, episodeWorkID: answer.id)
+        _ = try arm(answer)
+        _ = try owner!.appendInvocationChunk(invocationID: "episode-complete-invocation", sequence: 0, text: "SYNTHETIC_EPISODE_COMPLETED_ANSWER café")
+        let answerReceipt = try settle(answer, EpisodeResources(inputTokens: 37, outputTokens: 5, modelCalls: 1, httpAttempts: 1))
+        let complete = try owner!.finishEpisode(episodeID: "episode-completed", reason: .completed, clock: clock)
+        _ = try owner!.finalizeInvocation(invocationID: "episode-complete-invocation", status: .complete,
+            usageJSON: Data("{\"prompt_tokens\":37,\"completion_tokens\":5}".utf8))
+
+        try begin("episode-preflight", "episode-preflight-turn", "episode-preflight-human")
+        let pendingTokenizer = try reserve("episode-preflight", "episode-pending-tokenizer", .tokenizer,
+            EpisodeResources(httpAttempts: 1), body)
+        let uncertainCalibration = try arm(reserve("episode-preflight", "episode-uncertain-calibration", .calibration,
+            EpisodeResources(inputTokens: 17, outputTokens: 1, modelCalls: 1, httpAttempts: 1), calibrationBody))
+        let pendingAnswer = try reserve("episode-preflight", "episode-pending-answer", .answer,
+            EpisodeResources(inputTokens: 23, outputTokens: 32, modelCalls: 1, httpAttempts: 1), body)
+        try begin("episode-answering", "episode-answering-turn", "episode-answering-human")
+        let uncertainAnswer = try reserve("episode-answering", "episode-uncertain-answer", .answer,
+            EpisodeResources(inputTokens: 31, outputTokens: 128, modelCalls: 1, httpAttempts: 1), body)
+        _ = try owner!.beginInvocation(invocationID: "episode-uncertain-invocation", conversationID: conversation.id,
+            turnID: "episode-answering-turn", humanEventID: "episode-answering-human", assistantEventID: "episode-uncertain-assistant",
+            providerIdentity: adapter, requestBody: body, episodeID: uncertainAnswer.episodeID, episodeWorkID: uncertainAnswer.id)
+        _ = try arm(uncertainAnswer)
+        let fragment = "SYNTHETIC_EPISODE_RESTORED_PARTIAL café \u{1F680}"
+        _ = try owner!.appendInvocationChunk(invocationID: "episode-uncertain-invocation", sequence: 0, text: fragment)
+        let beforePreflight = try owner!.episodeReceipt(id: "episode-preflight", clock: clock)
+        let beforeAnswering = try owner!.episodeReceipt(id: "episode-answering", clock: clock)
+        let archive = scratch.appendingPathComponent("episode-archive", isDirectory: true)
+        let manifest = try BackupArchive.create(from: owner!, at: archive)
+        let expectedCharged = try complete.charged.adding(beforePreflight.charged).adding(beforeAnswering.charged)
+        let expectedHeld = try complete.held.adding(beforePreflight.held).adding(beforeAnswering.held)
+        checks["backup_schema_three_episode_inventory_captures_active_and_settled_work"] = manifest.databaseSchema == 3 && manifest.inventory.episodes == 3 && manifest.inventory.unfinishedEpisodes == 2 && manifest.inventory.episodeWork == 6 && manifest.inventory.episodePreparedWork == 2 && manifest.inventory.episodeUncertainWork == 2 && manifest.inventory.episodeCharged == expectedCharged && manifest.inventory.episodeHeld == expectedHeld
+        checks["backup_episode_request_snapshots_deduplicate_exact_bodies"] = manifest.inventory.episodeSnapshots == 2 && manifest.inventory.episodeSnapshotBytes == Int64(body.count + calibrationBody.count)
+        checks["backup_episode_manifest_roundtrip_verified"] = try BackupArchive.verify(at: archive) == manifest
+        let restored = scratch.appendingPathComponent("episode-restored", isDirectory: true)
+        _ = try BackupArchive.restore(from: archive, to: restored, authority: .unmanagedNoDeletion)
+        var restoredOwner: MemoryStore? = try MemoryStore(directory: restored)
+        let restoredComplete = try restoredOwner!.episodeReceipt(id: "episode-completed", clock: clock)
+        let restoredPreflight = try restoredOwner!.episodeReceipt(id: "episode-preflight", clock: clock)
+        let restoredAnswering = try restoredOwner!.episodeReceipt(id: "episode-answering", clock: clock)
+        let restoredCalibration = try restoredOwner!.episodeWork(episodeID: uncertainCalibration.episodeID, operationID: uncertainCalibration.id)!
+        let restoredAnswer = try restoredOwner!.episodeWork(episodeID: uncertainAnswer.episodeID, operationID: uncertainAnswer.id)!
+        checks["restore_episode_completed_receipts_and_usage_exact"] = try restoredComplete == complete && restoredOwner!.episodeWork(episodeID: calibration.episodeID, operationID: calibration.id) == calibrationReceipt && restoredOwner!.episodeWork(episodeID: answer.episodeID, operationID: answer.id) == answerReceipt
+        checks["restore_preflight_only_episode_interrupts_without_resend"] = restoredPreflight.state == .interrupted && restoredPreflight.charged == beforePreflight.charged && restoredPreflight.held == EpisodeResources(outputTokens: 1) && restoredCalibration.state == .outcomeUnknown && restoredCalibration.observed == nil && restoredCalibration.recovered
+        let restoredTokenizer = try restoredOwner!.episodeWork(episodeID: pendingTokenizer.episodeID, operationID: pendingTokenizer.id)!
+        let restoredPendingAnswer = try restoredOwner!.episodeWork(episodeID: pendingAnswer.episodeID, operationID: pendingAnswer.id)!
+        checks["restore_only_unarmed_reservations_release_capacity"] = restoredTokenizer.state == .cancelledBeforeDispatch && restoredTokenizer.charged == .zero && restoredTokenizer.held == .zero && restoredPendingAnswer.state == .cancelledBeforeDispatch && restoredPendingAnswer.charged == .zero && restoredPendingAnswer.held == .zero
+        let invocation = try restoredOwner!.invocation(id: "episode-uncertain-invocation")!
+        checks["restore_armed_answer_keeps_unknown_output_and_invocation_linkage"] = restoredAnswering.state == .interrupted && restoredAnswering.charged == beforeAnswering.charged && restoredAnswering.held == EpisodeResources(outputTokens: 128) && restoredAnswer.state == .outcomeUnknown && restoredAnswer.observed == nil && restoredAnswer.request.snapshot == body && invocation.episodeID == uncertainAnswer.episodeID && invocation.episodeWorkID == uncertainAnswer.id && invocation.finalStatus == .partial && invocation.terminalReason == .interrupted && invocation.recovered
+        checks["restore_episode_fragment_exact_and_semantic_sidecar_absent"] = try restoredOwner!.events(conversationID: conversation.id).first { $0.id == "episode-uncertain-assistant" }?.text == fragment && !FileManager.default.fileExists(atPath: restored.appendingPathComponent("semantic.sqlite3").path)
+        let recoveredArchive = scratch.appendingPathComponent("episode-recovered-archive", isDirectory: true)
+        let recoveredManifest = try BackupArchive.create(from: restoredOwner!, at: recoveredArchive)
+        checks["restore_episode_recovered_archive_reverifies_held_unknown_bounds"] = try recoveredManifest.inventory.unfinishedEpisodes == 0 && recoveredManifest.inventory.episodeCharged == expectedCharged && recoveredManifest.inventory.episodeHeld == EpisodeResources(outputTokens: 129) && BackupArchive.verify(at: recoveredArchive) == recoveredManifest
+        restoredOwner = nil
+        restoredOwner = try MemoryStore(directory: restored)
+        checks["restore_repeated_episode_reopen_does_not_recharge_or_release_unknown"] = try restoredOwner!.episodeReceipt(id: "episode-preflight", clock: clock) == restoredPreflight && restoredOwner!.episodeReceipt(id: "episode-answering", clock: clock) == restoredAnswering && restoredOwner!.invocation(id: "episode-uncertain-invocation")?.finalizedAt == invocation.finalizedAt
+        restoredOwner = nil
+        owner = nil
+
+        func corrupt(_ name: String, _ statement: String) throws -> URL {
+            let copy = scratch.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.copyItem(at: archive, to: copy)
+            try sql(copy.appendingPathComponent("memory.sqlite3"), statement)
+            try refreshDatabaseHash(copy)
+            return copy
+        }
+        let corruptions: [(String, String)] = [
+            ("limits_digest", "UPDATE episodes SET limits_digest='corrupt' WHERE id='episode-preflight'"),
+            ("request_digest", "UPDATE episode_work SET request_digest='corrupt' WHERE id='episode-uncertain-calibration'"),
+            ("snapshot_digest", "UPDATE episode_request_snapshots SET payload=zeroblob(byte_count)"),
+            ("receipt_digest", "UPDATE episode_work SET receipt_digest='corrupt' WHERE id='episode-complete-answer'"),
+            ("resource_totals", "UPDATE episode_resource_totals SET charged=0 WHERE episode_id='episode-preflight' AND resource='inputTokens'"),
+            ("scope_linkage", "UPDATE episodes SET project_id='wrong-scope' WHERE id='episode-preflight'"),
+            ("invocation_linkage", "UPDATE invocations SET episode_work_id='episode-complete-calibration' WHERE id='episode-complete-invocation'")]
+        for (name, statement) in corruptions {
+            let copy = try corrupt("episode-corrupt-" + name, statement)
+            checks["backup_episode_" + name + "_corruption_refused_after_file_hash_refresh"] = rejects { _ = try BackupArchive.verify(at: copy) }
+        }
+        let inconsistentReceipt = try corrupt("episode-state-receipt-disagreement", "UPDATE episode_work SET state='failedConfirmed' WHERE id='episode-complete-answer'")
+        checks["backup_episode_terminal_state_must_agree_with_receipt_outcome"] = rejects { _ = try BackupArchive.verify(at: inconsistentReceipt) }
+        let inconsistentCapture = try corrupt("episode-complete-capture-after-cancellation", "UPDATE episodes SET state='cancelled',terminal_reason='cancelled' WHERE id='episode-completed'")
+        checks["backup_episode_complete_capture_requires_completed_episode"] = rejects { _ = try BackupArchive.verify(at: inconsistentCapture) }
+        let missingReceipt = try corrupt("episode-completed-without-receipt", "UPDATE episode_work SET state='completed' WHERE id='episode-uncertain-calibration'")
+        let missingReceiptManifest = missingReceipt.appendingPathComponent("manifest.json")
+        var missingReceiptObject = try JSONSerialization.jsonObject(with: Data(contentsOf: missingReceiptManifest)) as! [String: Any]
+        var missingReceiptInventory = missingReceiptObject["inventory"] as! [String: Any]
+        // Preserve a truthful row-state inventory, so this fixture exercises
+        // journal semantics rather than failing merely on aggregate counts.
+        missingReceiptInventory["episodeUncertainWork"] = 1
+        missingReceiptObject["inventory"] = missingReceiptInventory
+        try privateWrite(try JSONSerialization.data(withJSONObject: missingReceiptObject, options: [.sortedKeys]), at: missingReceiptManifest)
+        checks["backup_episode_completed_work_requires_terminal_receipt"] = rejects { _ = try BackupArchive.verify(at: missingReceipt) }
+        let changedBody = Data(String(decoding: body, as: UTF8.self).replacingOccurrences(of: "SYNTHETIC_EPISODE_PRIVATE_REQUEST", with: "ALTERED_SYNTHETIC_EPISODE_PRIVATE_REQUEST").utf8)
+        let changedBodyHex = changedBody.map { String(format: "%02x", $0) }.joined()
+        let changedBodyDigest = SHA256.hash(data: changedBody).map { String(format: "%02x", $0) }.joined()
+        let unboundInvocation = try corrupt("episode-unbound-invocation-body", "UPDATE invocations SET request_body=X'\(changedBodyHex)',request_digest='\(changedBodyDigest)' WHERE id='episode-complete-invocation'")
+        checks["backup_episode_invocation_body_must_equal_admitted_work_snapshot"] = rejects { _ = try BackupArchive.verify(at: unboundInvocation) }
+        let zero = try JSONEncoder().encode(EpisodeResources.zero).map { String(format: "%02x", $0) }.joined()
+        let lostBound = try corrupt("episode-lost-unknown-bound", "UPDATE episode_work SET held_json=X'\(zero)' WHERE id='episode-uncertain-answer'; UPDATE episode_resource_totals SET held=0 WHERE episode_id='episode-answering' AND resource='outputTokens'")
+        checks["backup_episode_unknown_output_bound_cannot_be_erased"] = rejects { _ = try BackupArchive.verify(at: lostBound) }
+        let refusedDestination = scratch.appendingPathComponent("episode-corrupt-not-published", isDirectory: true)
+        checks["restore_corrupt_episode_journal_never_published"] = rejects { _ = try BackupArchive.restore(from: lostBound, to: refusedDestination, authority: .unmanagedNoDeletion) } && !FileManager.default.fileExists(atPath: refusedDestination.path)
+        let sourceDatabase = directory.appendingPathComponent("memory.sqlite3")
+        try sql(sourceDatabase, "UPDATE episodes SET limits_digest='corrupt' WHERE id='episode-preflight'")
+        let sourceBytesBefore = try Data(contentsOf: sourceDatabase)
+        let sourceSchemaBefore = try schemaSnapshot(sourceDatabase)
+        let sourceFilesBefore = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        let commandArchive = scratch.appendingPathComponent("corrupt-episode-command-archive", isDirectory: true)
+        let refusedCommand = try captureCommand(["--backup-create", "--data-directory", directory.path, "--archive", commandArchive.path])
+        checks["backup_cli_corrupt_schema_three_journal_refused_before_source_mutation"] = try refusedCommand.status == 1 && refusedCommand.output.isEmpty && Data(contentsOf: sourceDatabase) == sourceBytesBefore && schemaSnapshot(sourceDatabase) == sourceSchemaBefore && FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() == sourceFilesBefore && !FileManager.default.fileExists(atPath: commandArchive.path)
+        return checks
+    }
+
+    private static func cancelledRecoveryChecks(in scratch: URL) throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        for hasPrefix in [false, true] {
+            let label = hasPrefix ? "partial" : "empty"
+            let directory = scratch.appendingPathComponent("cancelled-recovery-" + label)
+            var owner: MemoryStore? = try MemoryStore(directory: directory)
+            let chat = try owner!.createConversation(projectID: "synthetic-cancelled-recovery", title: "Synthetic Stop recovery")
+            let clock = try SystemEpisodeClock().now()
+            _ = try owner!.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "turn", humanEventID: "human",
+                episodeID: "episode", text: "Synthetic Stop before publication", limits: .init(), clock: clock)
+            let body = Data("{\"messages\":[],\"max_tokens\":8}".utf8)
+            let work = try owner!.reserveEpisodeWork(episodeID: "episode",
+                request: EpisodeWorkRequest(id: "answer", parentID: nil, kind: .answer,
+                    resources: EpisodeResources(inputTokens: 4, outputTokens: 8, modelCalls: 1),
+                    adapterIdentity: "synthetic-cancelled-recovery", snapshot: body, inputTokensKnown: true), clock: clock)
+            _ = try owner!.beginInvocation(invocationID: "invocation", conversationID: chat.id, turnID: "turn",
+                humanEventID: "human", assistantEventID: "assistant", providerIdentity: "native:synthetic",
+                requestBody: body, episodeID: "episode", episodeWorkID: work.id)
+            _ = try owner!.armEpisodeWork(episodeID: "episode", operationID: work.id, expectedRevision: work.revision, clock: clock)
+            if hasPrefix { _ = try owner!.appendInvocationChunk(invocationID: "invocation", sequence: 0, text: "Synthetic committed Stop prefix") }
+            _ = try owner!.finishEpisode(episodeID: "episode", reason: .cancelled, clock: clock)
+            // Model the crash boundary after durable Stop and before capture
+            // publication by reopening with the invocation still unfinished.
+            owner = nil
+            owner = try MemoryStore(directory: directory)
+            let invocation = try owner!.invocation(id: "invocation")!
+            checks["backup_cancelled_recovery_" + label + "_has_expected_terminal_capture"] = invocation.recovered
+                && invocation.terminalReason == .cancelled && invocation.finalStatus == (hasPrefix ? .partial : .cancelled)
+            let archive = scratch.appendingPathComponent("cancelled-recovery-archive-" + label)
+            let manifest = try BackupArchive.create(from: owner!, at: archive)
+            checks["backup_cancelled_recovery_" + label + "_archive_verifies"] = try BackupArchive.verify(at: archive) == manifest
+            if !hasPrefix {
+                let inconsistent = scratch.appendingPathComponent("cancelled-recovery-inconsistent")
+                try FileManager.default.copyItem(at: archive, to: inconsistent)
+                try sql(inconsistent.appendingPathComponent("memory.sqlite3"), "UPDATE episodes SET state='failed',terminal_reason='failed' WHERE id='episode'")
+                try refreshDatabaseHash(inconsistent)
+                checks["backup_cancelled_recovery_requires_matching_cancelled_episode"] = rejects { _ = try BackupArchive.verify(at: inconsistent) }
+            }
+            owner = nil
+            let commandArchive = scratch.appendingPathComponent("cancelled-recovery-cli-" + label)
+            let command = try captureCommand(["--backup-create", "--data-directory", directory.path, "--archive", commandArchive.path])
+            checks["backup_cancelled_recovery_" + label + "_cli_recognition_accepts_source"] = command.status == 0
+            let restored = scratch.appendingPathComponent("cancelled-recovery-restored-" + label)
+            _ = try BackupArchive.restore(from: archive, to: restored, authority: .unmanagedNoDeletion)
+            owner = try MemoryStore(directory: restored)
+            let receipt = try owner!.episodeReceipt(id: "episode", clock: SystemEpisodeClock().now())
+            checks["restore_cancelled_recovery_" + label + "_preserves_terminal_and_unknown_bounds"] = try
+                owner!.invocation(id: "invocation")?.finalizedAt == invocation.finalizedAt
+                && owner!.events(conversationID: chat.id).count == 2 && receipt.state == .cancelled
+                && receipt.charged.inputTokens == 4 && receipt.charged.modelCalls == 1 && receipt.held.outputTokens == 8
+            owner = nil
+        }
+        return checks
+    }
+
+    /// Older manifests have no episode fields. Their exact invocation evidence
+    /// remains historical/unmetered when privately upgraded during restore.
+    private static func schemaTwoArchiveChecks(in scratch: URL, archive: URL) throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        let legacy = scratch.appendingPathComponent("schema-two-archive", isDirectory: true)
+        try FileManager.default.copyItem(at: archive, to: legacy)
+        try downgrade(legacy.appendingPathComponent("memory.sqlite3"), to: 2)
+        let manifestPath = legacy.appendingPathComponent("manifest.json")
+        var object = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestPath)) as! [String: Any]
+        object["databaseSchema"] = 2
+        var inventory = object["inventory"] as! [String: Any]
+        for key in Array(inventory.keys) where key.hasPrefix("episode") || key == "unfinishedEpisodes" { inventory.removeValue(forKey: key) }
+        object["inventory"] = inventory
+        try privateWrite(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), at: manifestPath)
+        try refreshDatabaseHash(legacy)
+        let verified = try BackupArchive.verify(at: legacy)
+        checks["backup_schema_two_manifest_decodes_without_episode_inventory"] = verified.databaseSchema == 2 && verified.inventory.episodes == nil && verified.inventory.episodeCharged == nil && verified.inventory.episodeHeld == nil
+        let destination = scratch.appendingPathComponent("schema-two-restored", isDirectory: true)
+        _ = try BackupArchive.restore(from: legacy, to: destination, authority: .unmanagedNoDeletion)
+        do {
+            let owner = try MemoryStore(directory: destination)
+            let invocation = try owner.invocation(id: "complete-attempt")!
+            checks["restore_schema_two_invocations_remain_unmetered_historical"] = invocation.episodeID == nil && invocation.episodeWorkID == nil && invocation.finalStatus == .complete && invocation.usageJSON == Data("{\"prompt_tokens\":37,\"completion_tokens\":9}".utf8)
+            checks["restore_schema_two_private_upgrade_preserves_recovery_and_counts"] = try owner.invocation(id: "interrupted-attempt")?.finalStatus == .partial && owner.invocation(id: "empty-attempt")?.finalStatus == .failed && owner.sourceManifest(projectID: "synthetic-backup-alpha", afterSequence: 0, limit: 1000).count == 6
+            let upgradedArchive = scratch.appendingPathComponent("schema-two-upgraded-archive", isDirectory: true)
+            let upgraded = try BackupArchive.create(from: owner, at: upgradedArchive)
+            checks["restore_schema_two_upgrades_private_staging_to_schema_three"] = upgraded.databaseSchema == 3 && upgraded.inventory.episodes == 0 && upgraded.inventory.episodeWork == 0 && upgraded.inventory.invocations == verified.inventory.invocations && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
+        }
+        checks["restore_schema_two_preserves_original_verified_archive"] = try BackupArchive.verify(at: legacy) == verified
+        return checks
+    }
+
+    private static func downgrade(_ database: URL, to version: Int) throws {
+        guard version == 1 || version == 2 else { throw BackupError.invalid("synthetic downgrade version") }
+        try sql(database, "ALTER TABLE invocations DROP COLUMN episode_work_id; ALTER TABLE invocations DROP COLUMN episode_id; DROP TABLE episode_work; DROP TABLE episode_resource_totals; DROP TABLE episode_request_snapshots; DROP TABLE episodes")
+        if version == 1 { try sql(database, "DROP TABLE invocation_chunks; DROP TABLE invocations") }
+        try sql(database, "PRAGMA user_version=\(version)")
     }
 
     private struct CommandCapture {

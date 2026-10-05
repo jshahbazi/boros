@@ -15,6 +15,8 @@ final class ReasoningRunner {
         var directory: String?
         var completion = ""
         var token = ""
+        var episodeLease: EpisodeLease?
+        var episodeWork: EpisodeWorkRecord?
 
         func abort() {
             lock.lock()
@@ -42,6 +44,8 @@ final class ReasoningRunner {
             return
         }
         let job = Job()
+        job.episodeLease = settings.episodeLease
+        job.episodeWork = settings.preparedAnswerWork
         active = job
         state.unlock()
         queue.async {
@@ -50,7 +54,8 @@ final class ReasoningRunner {
             do {
                 speed = try self.generate(job: job, prompt: prompt, settings: settings,
                                           conversation: conversation, onText: onText)
-            } catch NativeFailure.fixed(let code) { failure = code }
+            } catch let error as EpisodeBudgetError { failure = error.failureCode }
+            catch NativeFailure.fixed(let code) { failure = code }
             catch { failure = "io_failed" }
             let stopped = job.isStopped
             if failure == nil || stopped {
@@ -62,6 +67,7 @@ final class ReasoningRunner {
                 }
             }
             self.cleanup(job)
+            if let work = job.episodeWork { _ = try? job.episodeLease?.settle(work, outcome: .outcomeUnknown) }
             let result = GenerationResult(elapsed: Date().timeIntervalSince(job.started),
                                           tokensPerSecond: speed, failure: failure, stopped: stopped)
             job.completion.removeAll(keepingCapacity: false)
@@ -124,7 +130,23 @@ final class ReasoningRunner {
         job.supervisor.standardOutput = FileHandle.nullDevice
         job.supervisor.standardError = FileHandle.nullDevice
         guard !job.isStopped else { throw NativeFailure.fixed("io_failed") }
-        do { try job.supervisor.run() } catch { throw NativeFailure.fixed("launch_failed") }
+        if let lease = job.episodeLease {
+            let body = try NativeRequest.reasoningBody(prompt: prompt, settings: settings, conversation: conversation)
+            let work = try job.episodeWork ?? lease.prepare(kind: .nativeInference,
+                resources: EpisodeResources(outputTokens: settings.maximumOutput, modelCalls: 1),
+                adapterIdentity: "native:" + settings.profile.rawValue, snapshot: body, inputTokensKnown: false)
+            guard work.request.kind == .nativeInference, work.request.snapshot == body,
+                  work.episodeID == lease.episodeID, !work.request.inputTokensKnown,
+                  work.request.adapterIdentity == "native:" + settings.profile.rawValue,
+                  work.request.resources == EpisodeResources(outputTokens: settings.maximumOutput, modelCalls: 1) else { throw EpisodeBudgetError.conflict }
+            var launchError: Error?
+            job.episodeWork = try lease.dispatch(work) {
+                do { try job.supervisor.run() } catch { launchError = error }
+            }
+            if launchError != nil { throw NativeFailure.fixed("launch_failed") }
+        } else {
+            do { try job.supervisor.run() } catch { throw NativeFailure.fixed("launch_failed") }
+        }
         let deadline = Date().addingTimeInterval(settings.profile.generationTimeout(maximumOutput: settings.maximumOutput))
         var ready = false
         while !ready {
@@ -135,10 +157,11 @@ final class ReasoningRunner {
                 do {
                     let health = try UnixHTTP(path: socketPath, token: job.token, job: job, deadline: deadline)
                     defer { health.close() }
-                    let status = try health.request(method: "GET", path: "/health", body: Data())
+                    let status = try budgetedRequest(job: job, connection: health, method: "GET", path: "/health", body: Data())
                     ready = status == 200
                     if status == 401 || status == 403 { throw NativeFailure.fixed("process_failed") }
                 } catch NativeFailure.fixed(let code) where code == "timeout" || code == "process_failed" { throw NativeFailure.fixed(code) }
+                catch let error as EpisodeBudgetError { throw error }
                 catch { }
             }
             if !ready { Thread.sleep(forTimeInterval: 0.05) }
@@ -149,7 +172,7 @@ final class ReasoningRunner {
         let request = settings.preparedNativeBody ?? builtRequest
         let connection = try UnixHTTP(path: socketPath, token: job.token, job: job, deadline: deadline)
         defer { connection.close() }
-        let status = try connection.request(method: "POST", path: "/v1/chat/completions", body: request)
+        let status = try budgetedRequest(job: job, connection: connection, method: "POST", path: "/v1/chat/completions", body: request)
         guard status == 200 else {
             let error = try? connection.errorObject()
             let typed = error?["error"] as? [String: Any]
@@ -157,6 +180,7 @@ final class ReasoningRunner {
         }
         var stream = NativeStream(profile: settings.profile, thinking: thinking)
         try connection.events { frame in
+            _ = try job.episodeLease?.checkActive()
             let chunks = try stream.consume(frame)
             for text in chunks {
                 job.completion += text
@@ -169,8 +193,54 @@ final class ReasoningRunner {
     }
 
     private func check(_ job: Job, deadline: Date) throws {
+        _ = try job.episodeLease?.checkActive()
         if job.isStopped { throw NativeFailure.fixed("io_failed") }
         if Date() >= deadline { throw NativeFailure.fixed("timeout") }
+    }
+
+    private final class HTTPResultBox {
+        private let lock = NSLock()
+        private var result: Result<Int, Error>?
+        func finish(_ value: Result<Int, Error>) { lock.lock(); result = value; lock.unlock() }
+        func value() -> Result<Int, Error>? { lock.lock(); defer { lock.unlock() }; return result }
+    }
+
+    /// The durable gate serializes only enqueueing the socket operation. No
+    /// SQLite transaction or owner mutex is held while socket I/O waits.
+    private func budgetedRequest(job: Job, connection: UnixHTTP, method: String, path: String, body: Data) throws -> Int {
+        guard let lease = job.episodeLease else { return try connection.request(method: method, path: path, body: body) }
+        let snapshot = method == "POST" ? body : Data("{\"operation\":\"native_health\"}".utf8)
+        let prepared = try lease.prepare(kind: .providerDiscovery, resources: EpisodeResources(httpAttempts: 1),
+            adapterIdentity: "native-unix-http-v1", snapshot: snapshot, parentID: job.episodeWork?.id)
+        let result = HTTPResultBox()
+        let signal = DispatchSemaphore(value: 0)
+        let submitted = try lease.dispatch(prepared) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { result.finish(.success(try connection.request(method: method, path: path, body: body))) }
+                catch { result.finish(.failure(error)) }
+                signal.signal()
+            }
+        }
+        while signal.wait(timeout: .now() + 0.1) == .timedOut {
+            do { _ = try lease.checkActive() }
+            catch {
+                job.abort()
+                // shutdown unblocks the owned socket. Await its completion
+                // before the caller can close/reuse the descriptor.
+                signal.wait()
+                _ = try? lease.settle(submitted, outcome: .outcomeUnknown)
+                throw error
+            }
+        }
+        guard let outcome = result.value() else { throw EpisodeBudgetError.conflict }
+        switch outcome {
+        case .success(let status):
+            _ = try lease.settle(submitted, outcome: .completed, observed: EpisodeResources(httpAttempts: 1))
+            return status
+        case .failure(let error):
+            _ = try? lease.settle(submitted, outcome: .outcomeUnknown)
+            throw error
+        }
     }
 
     private func cleanup(_ job: Job) {
@@ -228,6 +298,7 @@ final class ReasoningRunner {
         deinit { close() }
 
         private func check() throws {
+            _ = try job.episodeLease?.checkActive()
             if job.isStopped { throw NativeFailure.fixed("io_failed") }
             if Date() >= deadline { throw NativeFailure.fixed("timeout") }
         }

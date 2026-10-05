@@ -65,7 +65,10 @@ def main():
                 "max_tokens": 1, "temperature": 0, "stream": False, "seed": 42})
     with tempfile.TemporaryDirectory(prefix="boros-provider-oracle-") as temp:
         executable = Path(temp) / "renderer"
-        subprocess.run(["/usr/bin/swiftc", "-O", str(ROOT / "Sources/Boros/ProviderAdmission.swift"),
+        subprocess.run(["/usr/bin/swiftc", "-O", "-I", str(ROOT / "Sources/CSQLite"),
+            str(ROOT / "Sources/Boros/EpisodeBudget.swift"),
+            str(ROOT / "Sources/Boros/EpisodeLease.swift"), str(ROOT / "Sources/Boros/EpisodeSQLFence.swift"),
+            str(ROOT / "Sources/Boros/ProviderAdmission.swift"),
             str(ROOT / "Tests/provider_renderer_driver.swift"), "-o", str(executable)], check=True, capture_output=True)
         result = subprocess.run([str(executable)], input=json.dumps(bodies).encode(), capture_output=True, check=True)
         actual = json.loads(result.stdout)

@@ -5,7 +5,7 @@ import CSQLite
 import Darwin
 
 enum SemanticUnsupportedReason: String, Codable {
-    case adapterUnavailable, inputTooLarge, emptyInput, codeLike, nonEnglish, ambiguousLanguage
+    case adapterUnavailable, inputTooLarge, emptyInput, codeLike, nonEnglish, ambiguousLanguage, inputAccountingUnavailable
 }
 
 enum SemanticEncoding {
@@ -139,6 +139,7 @@ struct SemanticSearchContinuation: Codable, Equatable {
     let afterOffset: Int
     let rawSnapshotID: String
     let includeLiteral: Bool
+    var episodeID: String? = nil
 }
 
 struct SemanticResultReference: Codable, Equatable {
@@ -176,6 +177,9 @@ struct SemanticSearchManifest: Codable, Equatable {
     let vectorContinuation: SemanticSearchContinuation?
     let excludedEventIDs: [String]
     let results: [SemanticResultReference]
+    var episodeID: String? = nil
+    var meteredLexicalCoverage: MeteredLexicalCoverage? = nil
+    var meteredLiteralCoverage: MeteredLiteralCoverage? = nil
 }
 
 struct SemanticSearchReport {
@@ -221,6 +225,11 @@ final class SemanticIndex: @unchecked Sendable {
     private var scheduledProjects: Set<String> = []
     private var database: OpaquePointer?
     private var ownerFD: Int32 = -1
+    // Set only while holding the index mutex. It checks the authoritative
+    // episode between bounded SQL steps without opening a sidecar transaction
+    // across source reads, encoder calls or a network operation.
+    private var activeSearchLease: EpisodeLease?
+    private var activeSearchFence: EpisodeSQLFence?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     init(store: MemoryStore, encoder: SemanticEmbeddingAdapter = AppleSentenceEmbeddingAdapter(), configuration: SemanticIndexConfiguration = .init()) throws {
@@ -348,7 +357,17 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     func search(query: String, lexicalQuery: String? = nil, projectID: String, limit: Int = 16,
-                excludingEventIDs: Set<String> = [], includeLiteral: Bool = true, continuation: SemanticSearchContinuation? = nil) throws -> SemanticSearchReport {
+                excludingEventIDs: Set<String> = [], includeLiteral: Bool = true, continuation: SemanticSearchContinuation? = nil,
+                episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false) throws -> SemanticSearchReport {
+        try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
+            try searchWithinOperation(query: query, lexicalQuery: lexicalQuery, projectID: projectID, limit: limit,
+                excludingEventIDs: excludingEventIDs, includeLiteral: includeLiteral, continuation: continuation, episodeLease: episodeLease)
+        }
+    }
+
+    private func searchWithinOperation(query: String, lexicalQuery: String?, projectID: String, limit: Int,
+                                      excludingEventIDs: Set<String>, includeLiteral: Bool,
+                                      continuation: SemanticSearchContinuation?, episodeLease: EpisodeLease?) throws -> SemanticSearchReport {
         guard query.utf8.count <= MemoryStore.maximumPayloadBytes, (1...100).contains(limit), excludingEventIDs.count <= 10000 else { throw SemanticError.invalid }
         let lexical = lexicalQuery ?? query
         guard lexical.utf8.count <= 4096 else {
@@ -359,145 +378,213 @@ final class SemanticIndex: @unchecked Sendable {
         let queryDigest = Self.digest(Data(query.utf8))
         if let continuation {
             guard continuation.projectID == projectID, continuation.indexFingerprint == indexFingerprint, continuation.queryDigest == queryDigest, continuation.includeLiteral == includeLiteral,
+                  continuation.episodeID == episodeLease?.episodeID,
                   continuation.sourceFrontier >= 0, continuation.publishedChunkFrontier >= 0, continuation.afterSequence >= 0, continuation.afterOffset >= 0 else { throw SemanticError.invalid }
         }
-        let frontier = try continuation?.sourceFrontier ?? store.sourceFrontier(projectID: projectID)
-        let literal = continuation == nil && includeLiteral && query.utf8.count <= 4096 ? try store.literalSearch(query: query, projectID: projectID,
-            limit: 100, throughSequence: frontier, excludingEventIDs: excludingEventIDs) : []
-        let lexicalHits = continuation == nil ? try store.search(query: lexical, projectID: projectID, limit: 100, matching: .anyTerm,
-            throughSequence: frontier, excludingEventIDs: excludingEventIDs) : []
+        let frontier = try continuation?.sourceFrontier ?? MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1) { try store.sourceFrontier(projectID: projectID) }
+        var literalReport: MeteredLiteralReport?, lexicalReport: MeteredLexicalReport?
+        let literal: [MemoryHit], lexicalHits: [MemoryHit]
+        if let episodeLease {
+            if continuation == nil && includeLiteral && query.utf8.count <= 4096 {
+                let report = try MeteredRetrieval.literalSearch(store: store, query: query, projectID: projectID, limit: 100,
+                    throughSequence: frontier, excludingEventIDs: excludingEventIDs, lease: episodeLease, nested: true)
+                literalReport = report; literal = report.hits
+            } else { literal = [] }
+            if continuation == nil {
+                let report = try MeteredRetrieval.lexicalSearch(store: store, query: lexical, projectID: projectID, limit: 100,
+                    matching: .anyTerm, throughSequence: frontier, excludingEventIDs: excludingEventIDs, lease: episodeLease, nested: true)
+                lexicalReport = report; lexicalHits = report.hits
+            } else { lexicalHits = [] }
+        } else {
+            literal = continuation == nil && includeLiteral && query.utf8.count <= 4096 ? try store.literalSearch(query: query, projectID: projectID,
+                limit: 100, throughSequence: frontier, excludingEventIDs: excludingEventIDs) : []
+            lexicalHits = continuation == nil ? try store.search(query: lexical, projectID: projectID, limit: 100, matching: .anyTerm,
+                throughSequence: frontier, excludingEventIDs: excludingEventIDs) : []
+        }
         let encoding: SemanticEncoding
-        do { encoding = try encoder.encode(query) } catch { encoding = .unsupported(.adapterUnavailable) }
-        return try locked {
-            let publishedFrontier = try continuation?.publishedChunkFrontier ?? integer("SELECT coalesce(max(publication),0) FROM chunks WHERE index_id=? AND project_id=?", [.text(indexFingerprint), .text(projectID)])
-            let coverage = try coverage(projectID: projectID, frontier: frontier, publishedFrontier: publishedFrontier)
-            var candidates: [String: Candidate] = [:]
-            let configurationDigest = Self.digest(try Self.canonical(configuration))
-            let lexicalDigest = Self.digest(Data(lexical.utf8))
-            let exclusionsDigest = Self.digest(try Self.canonical(excludingEventIDs.sorted()))
-            let queryConfigurationDigest = Self.digest(try Self.canonical(["include_literal": String(includeLiteral), "result_limit": String(limit),
-                "lexical_query": lexicalDigest, "excluded_ids": exclusionsDigest, "lexical_matching": "anyTerm", "ranking": rankingFingerprint]))
-            let rawSnapshotID: String
-            if let continuation {
-                guard let payload = try self.query("SELECT payload FROM raw_snapshots WHERE id=? AND project_id=?", [.text(continuation.rawSnapshotID), .text(projectID)], { blob($0, 0) }).first,
-                      Self.digest(payload) == continuation.rawSnapshotID else { throw SemanticError.invalid }
-                let snapshot = try JSONDecoder().decode(RawSnapshot.self, from: payload)
-                guard snapshot.projectID == projectID, snapshot.queryDigest == queryDigest, snapshot.lexicalQueryDigest == lexicalDigest,
-                      snapshot.indexFingerprint == indexFingerprint, snapshot.rankingFingerprint == rankingFingerprint,
-                      snapshot.configurationFingerprint == configurationDigest, snapshot.exclusionsDigest == exclusionsDigest,
-                      snapshot.queryConfigurationFingerprint == queryConfigurationDigest,
-                      snapshot.includeLiteral == includeLiteral, snapshot.sourceFrontier == frontier, snapshot.publishedChunkFrontier == publishedFrontier else { throw SemanticError.invalid }
-                for result in snapshot.candidates {
-                    guard result.source.projectID == projectID, result.source.sequence <= frontier,
-                          !excludingEventIDs.contains(result.source.eventID), result.fusedScore.isFinite, result.fusedScore > 0,
-                          result.retrievalPaths.allSatisfy({ $0 == "literal" || $0 == "lexical" }) else { throw SemanticError.invalid }
-                    try verify(result.source)
-                    candidates[result.source.eventID] = Candidate(source: result.source, offset: result.offset, byteCount: result.byteCount,
-                        textDigest: result.excerptDigest, paths: Set(result.retrievalPaths), score: result.fusedScore, cosine: nil)
-                }
-                rawSnapshotID = continuation.rawSnapshotID
-            } else {
-                try addRaw(literal, path: "literal", frontier: frontier, excluded: excludingEventIDs, candidates: &candidates)
-                try addRaw(lexicalHits, path: "lexical", frontier: frontier, excluded: excludingEventIDs, candidates: &candidates)
-                let raw = candidates.values.sorted { Self.rangeOrder($0.source, $0.offset, $1.source, $1.offset) }.map {
-                    SemanticResultReference(source: $0.source, offset: $0.offset, byteCount: $0.byteCount, excerptDigest: $0.textDigest,
-                        retrievalPaths: $0.paths.sorted(), fusedScore: $0.score, cosineScore: nil)
-                }
-                let snapshot = RawSnapshot(projectID: projectID, queryDigest: queryDigest, lexicalQueryDigest: lexicalDigest,
-                    indexFingerprint: indexFingerprint, rankingFingerprint: rankingFingerprint, configurationFingerprint: configurationDigest,
-                    exclusionsDigest: exclusionsDigest, queryConfigurationFingerprint: queryConfigurationDigest, includeLiteral: includeLiteral,
-                    sourceFrontier: frontier, publishedChunkFrontier: publishedFrontier, candidates: raw)
-                let payload = try Self.canonical(snapshot)
-                rawSnapshotID = Self.digest(payload)
-                try execute("INSERT OR IGNORE INTO raw_snapshots VALUES (?,?,?)", [.text(rawSnapshotID), .text(projectID), .blob(payload)])
-                guard try self.query("SELECT payload FROM raw_snapshots WHERE id=? AND project_id=?", [.text(rawSnapshotID), .text(projectID)], { blob($0, 0) }).first == payload else { throw SemanticError.publicationConflict }
+        if let episodeLease, try episodeLease.checkActive().limits.requireKnownModelInput {
+            // Apple supplies vectors without token usage or a verified upper
+            // token bound. Strict mode uses original lexical sources and does
+            // not dispatch opaque inference.
+            encoding = .unsupported(.inputAccountingUnavailable)
+        } else if query.utf8.count > 4096 {
+            encoding = .unsupported(.inputTooLarge)
+        } else {
+            do {
+                encoding = try MeteredRetrieval.charge(lease: episodeLease, kind: .queryEmbedding,
+                    resources: EpisodeResources(modelCalls: 1, encoderInputBytes: query.utf8.count),
+                    inputTokensKnown: false, identity: encoderFingerprint) { try encoder.encode(query) }
+            } catch {
+                if error is EpisodeBudgetError || error is MeteredRetrievalError || error is MemoryError { throw error }
+                encoding = .unsupported(.adapterUnavailable)
             }
-            var vectorCount = 0, next: SemanticSearchContinuation?, disposition: String
-            switch encoding {
-            case .unsupported(let reason): disposition = reason.rawValue
-            case .vector(let values):
-                let normalized = try Self.normalized(values, dimension: encoder.dimension)
-                disposition = "supported"
-                var bindings: [Value] = [.text(indexFingerprint), .text(projectID), .integer(frontier), .integer(publishedFrontier), .integer(publishedFrontier)]
-                var cursor = ""
-                if let continuation {
-                    cursor = " AND (c.source_sequence>? OR (c.source_sequence=? AND c.offset>?))"
-                    bindings += [.integer(continuation.afterSequence), .integer(continuation.afterSequence), .integer(continuation.afterOffset)]
-                }
-                if !excludingEventIDs.isEmpty {
-                    cursor += " AND c.event_id NOT IN (SELECT value FROM json_each(?))"
-                    bindings.append(.text(String(decoding: try Self.canonical(excludingEventIDs.sorted()), as: UTF8.self)))
-                }
-                // Filtering by project, fingerprint, frozen source frontier,
-                // and publication frontier occurs before any vector ranking.
-                let rows = try self.query("SELECT j.source,c.offset,c.byte_count,c.text_digest,c.vector FROM chunks c JOIN jobs j ON j.index_id=c.index_id AND j.event_id=c.event_id WHERE c.index_id=? AND c.project_id=? AND c.source_sequence<=? AND c.publication<=? AND j.ready_publication>0 AND j.ready_publication<=? AND c.reason='' AND j.state IN ('complete','unsupported')" + cursor + " ORDER BY c.source_sequence,c.offset LIMIT ?", bindings + [.integer(configuration.maximumCandidateChunks + 1)]) { statement in
-                    ChunkRow(source: try JSONDecoder().decode(MemorySourceReference.self, from: blob(statement, 0)), offset: Int(sqlite3_column_int64(statement, 1)), byteCount: Int(sqlite3_column_int64(statement, 2)), textDigest: string(statement, 3), vector: blob(statement, 4))
-                }
-                let inspected = Array(rows.prefix(configuration.maximumCandidateChunks))
-                vectorCount = inspected.count
-                if rows.count > inspected.count, let last = inspected.last {
-                    next = SemanticSearchContinuation(projectID: projectID, indexFingerprint: indexFingerprint, queryDigest: queryDigest, sourceFrontier: frontier,
-                        publishedChunkFrontier: publishedFrontier, afterSequence: last.source.sequence, afterOffset: last.offset,
-                        rawSnapshotID: rawSnapshotID, includeLiteral: includeLiteral)
-                }
-                var ranked: [(ChunkRow, Double)] = []
-                for row in inspected where !excludingEventIDs.contains(row.source.eventID) {
-                    guard row.source.projectID == projectID else { throw SemanticError.sourceMismatch }
-                    try verify(row.source)
-                    let vector = try Self.decodeVector(row.vector, dimension: encoder.dimension)
-                    let score = zip(vector, normalized).reduce(0.0) { $0 + Double($1.0) * Double($1.1) }
-                    ranked.append((row, max(-1, min(1, score))))
-                }
-                ranked.sort { lhs, rhs in lhs.1 == rhs.1 ? Self.rangeOrder(lhs.0.source, lhs.0.offset, rhs.0.source, rhs.0.offset) : lhs.1 > rhs.1 }
-                var seen: Set<String> = []
-                for (row, score) in ranked where seen.insert(row.source.eventID).inserted {
-                    let rank = seen.count
-                    let contribution = 1.0 / Double(configuration.reciprocalRankConstant + rank)
-                    if var existing = candidates[row.source.eventID] {
-                        existing.paths.insert("semantic"); existing.score += contribution; existing.cosine = score
-                        candidates[row.source.eventID] = existing
-                    } else {
-                        candidates[row.source.eventID] = Candidate(source: row.source, offset: row.offset, byteCount: row.byteCount, textDigest: row.textDigest,
-                            paths: ["semantic"], score: contribution, cosine: score)
+        }
+        return try MeteredRetrieval.metadata(lease: episodeLease, maximumRows: 4) {
+            try locked {
+                let previousLease = activeSearchLease; activeSearchLease = episodeLease
+                defer { activeSearchLease = previousLease }
+                return try withSearchSQLFence(lease: episodeLease) {
+                    let publishedFrontier = try continuation?.publishedChunkFrontier ?? integer("SELECT coalesce(max(publication),0) FROM chunks WHERE index_id=? AND project_id=?", [.text(indexFingerprint), .text(projectID)])
+                    let coverage = try MeteredRetrieval.metadata(lease: episodeLease,
+                        maximumRows: configuration.maximumManifestSources * 3 + configuration.maximumReportedHoles + 1) {
+                        try self.coverage(projectID: projectID, frontier: frontier, publishedFrontier: publishedFrontier)
                     }
+                    var candidates: [String: Candidate] = [:]
+                    let configurationDigest = Self.digest(try Self.canonical(configuration))
+                    let lexicalDigest = Self.digest(Data(lexical.utf8))
+                    let exclusionsDigest = Self.digest(try Self.canonical(excludingEventIDs.sorted()))
+                    var queryConfiguration = ["include_literal": String(includeLiteral), "result_limit": String(limit),
+                        "lexical_query": lexicalDigest, "excluded_ids": exclusionsDigest, "lexical_matching": "anyTerm", "ranking": rankingFingerprint]
+                    if let episodeLease { queryConfiguration["episode_id"] = episodeLease.episodeID; queryConfiguration["raw_work"] = "raw_work_v1" }
+                    let queryConfigurationDigest = Self.digest(try Self.canonical(queryConfiguration))
+                    let rawSnapshotID: String
+                    var meteredLexicalCoverage = lexicalReport?.coverage, meteredLiteralCoverage = literalReport?.coverage
+                    if let continuation {
+                        guard let payload = try self.query("SELECT payload FROM raw_snapshots WHERE id=? AND project_id=?", [.text(continuation.rawSnapshotID), .text(projectID)], { blob($0, 0) }).first,
+                              Self.digest(payload) == continuation.rawSnapshotID else { throw SemanticError.invalid }
+                        let snapshot = try JSONDecoder().decode(RawSnapshot.self, from: payload)
+                        guard snapshot.projectID == projectID, snapshot.queryDigest == queryDigest, snapshot.lexicalQueryDigest == lexicalDigest,
+                              snapshot.indexFingerprint == indexFingerprint, snapshot.rankingFingerprint == rankingFingerprint,
+                              snapshot.configurationFingerprint == configurationDigest, snapshot.exclusionsDigest == exclusionsDigest,
+                              snapshot.queryConfigurationFingerprint == queryConfigurationDigest,
+                              snapshot.includeLiteral == includeLiteral, snapshot.sourceFrontier == frontier, snapshot.publishedChunkFrontier == publishedFrontier else { throw SemanticError.invalid }
+                        for result in snapshot.candidates {
+                            guard result.source.projectID == projectID, result.source.sequence <= frontier,
+                                  !excludingEventIDs.contains(result.source.eventID), result.fusedScore.isFinite, result.fusedScore > 0,
+                                  result.retrievalPaths.allSatisfy({ $0 == "literal" || $0 == "lexical" }) else { throw SemanticError.invalid }
+                            try verify(result.source, lease: activeSearchLease)
+                            candidates[result.source.eventID] = Candidate(source: result.source, offset: result.offset, byteCount: result.byteCount,
+                                textDigest: result.excerptDigest, paths: Set(result.retrievalPaths), score: result.fusedScore, cosine: nil)
+                        }
+                        meteredLexicalCoverage = snapshot.meteredLexicalCoverage
+                        meteredLiteralCoverage = snapshot.meteredLiteralCoverage
+                        rawSnapshotID = continuation.rawSnapshotID
+                    } else {
+                        try addRaw(literal, path: "literal", frontier: frontier, excluded: excludingEventIDs, candidates: &candidates)
+                        try addRaw(lexicalHits, path: "lexical", frontier: frontier, excluded: excludingEventIDs, candidates: &candidates)
+                        let raw = candidates.values.sorted { Self.rangeOrder($0.source, $0.offset, $1.source, $1.offset) }.map {
+                            SemanticResultReference(source: $0.source, offset: $0.offset, byteCount: $0.byteCount, excerptDigest: $0.textDigest,
+                                retrievalPaths: $0.paths.sorted(), fusedScore: $0.score, cosineScore: nil)
+                        }
+                        var snapshot = RawSnapshot(projectID: projectID, queryDigest: queryDigest, lexicalQueryDigest: lexicalDigest,
+                            indexFingerprint: indexFingerprint, rankingFingerprint: rankingFingerprint, configurationFingerprint: configurationDigest,
+                            exclusionsDigest: exclusionsDigest, queryConfigurationFingerprint: queryConfigurationDigest, includeLiteral: includeLiteral,
+                            sourceFrontier: frontier, publishedChunkFrontier: publishedFrontier, candidates: raw)
+                        snapshot.meteredLexicalCoverage = meteredLexicalCoverage
+                        snapshot.meteredLiteralCoverage = meteredLiteralCoverage
+                        let payload = try Self.canonical(snapshot)
+                        rawSnapshotID = Self.digest(payload)
+                        try execute("INSERT OR IGNORE INTO raw_snapshots VALUES (?,?,?)", [.text(rawSnapshotID), .text(projectID), .blob(payload)])
+                        guard try self.query("SELECT payload FROM raw_snapshots WHERE id=? AND project_id=?", [.text(rawSnapshotID), .text(projectID)], { blob($0, 0) }).first == payload else { throw SemanticError.publicationConflict }
+                    }
+                    var vectorCount = 0, next: SemanticSearchContinuation?, disposition: String
+                    switch encoding {
+                    case .unsupported(let reason): disposition = reason.rawValue
+                    case .vector(let values):
+                        let normalized = try Self.normalized(values, dimension: encoder.dimension)
+                        disposition = "supported"
+                        var bindings: [Value] = [.text(indexFingerprint), .text(projectID), .integer(frontier), .integer(publishedFrontier), .integer(publishedFrontier)]
+                        var cursor = ""
+                        if let continuation {
+                            cursor = " AND (c.source_sequence>? OR (c.source_sequence=? AND c.offset>?))"
+                            bindings += [.integer(continuation.afterSequence), .integer(continuation.afterSequence), .integer(continuation.afterOffset)]
+                        }
+                        if !excludingEventIDs.isEmpty {
+                            cursor += " AND c.event_id NOT IN (SELECT value FROM json_each(?))"
+                            bindings.append(.text(String(decoding: try Self.canonical(excludingEventIDs.sorted()), as: UTF8.self)))
+                        }
+                        // Filtering by project, fingerprint, frozen source frontier,
+                        // and publication frontier occurs before any vector ranking.
+                        let vectorRows = configuration.maximumCandidateChunks + 1
+                        let vectorByteBound = try MeteredRetrieval.checkedProduct(vectorRows, encoder.dimension * 4 + 1)
+                        let rows = try MeteredRetrieval.charge(lease: episodeLease,
+                            resources: EpisodeResources(vectorBytes: vectorByteBound, metadataRows: vectorRows)) {
+                            // Bound the BLOB projection before Swift materialization.
+                            // An oversized/corrupt vector is an integrity failure;
+                            // its declared length never enlarges our reservation.
+                            try self.query("SELECT j.source,c.offset,c.byte_count,c.text_digest,substr(c.vector,1,?),length(c.vector) FROM chunks c JOIN jobs j ON j.index_id=c.index_id AND j.event_id=c.event_id WHERE c.index_id=? AND c.project_id=? AND c.source_sequence<=? AND c.publication<=? AND j.ready_publication>0 AND j.ready_publication<=? AND c.reason='' AND j.state IN ('complete','unsupported')" + cursor + " ORDER BY c.source_sequence,c.offset LIMIT ?", [.integer(encoder.dimension * 4 + 1)] + bindings + [.integer(vectorRows)]) { statement in
+                                guard Int(sqlite3_column_int64(statement, 5)) == encoder.dimension * 4 else { throw SemanticError.sourceMismatch }
+                                return ChunkRow(source: try JSONDecoder().decode(MemorySourceReference.self, from: blob(statement, 0)), offset: Int(sqlite3_column_int64(statement, 1)), byteCount: Int(sqlite3_column_int64(statement, 2)), textDigest: string(statement, 3), vector: blob(statement, 4))
+                            }
+                        }
+                        let inspected = Array(rows.prefix(configuration.maximumCandidateChunks))
+                        vectorCount = inspected.count
+                        if rows.count > inspected.count, let last = inspected.last {
+                            next = SemanticSearchContinuation(projectID: projectID, indexFingerprint: indexFingerprint, queryDigest: queryDigest, sourceFrontier: frontier,
+                                publishedChunkFrontier: publishedFrontier, afterSequence: last.source.sequence, afterOffset: last.offset,
+                                rawSnapshotID: rawSnapshotID, includeLiteral: includeLiteral, episodeID: episodeLease?.episodeID)
+                        }
+                        var ranked: [(ChunkRow, Double)] = []
+                        for row in inspected where !excludingEventIDs.contains(row.source.eventID) {
+                            guard row.source.projectID == projectID else { throw SemanticError.sourceMismatch }
+                            try verify(row.source, lease: activeSearchLease)
+                            let vector = try Self.decodeVector(row.vector, dimension: encoder.dimension)
+                            let score = zip(vector, normalized).reduce(0.0) { $0 + Double($1.0) * Double($1.1) }
+                            ranked.append((row, max(-1, min(1, score))))
+                        }
+                        ranked.sort { lhs, rhs in lhs.1 == rhs.1 ? Self.rangeOrder(lhs.0.source, lhs.0.offset, rhs.0.source, rhs.0.offset) : lhs.1 > rhs.1 }
+                        var seen: Set<String> = []
+                        for (row, score) in ranked where seen.insert(row.source.eventID).inserted {
+                            let rank = seen.count
+                            let contribution = 1.0 / Double(configuration.reciprocalRankConstant + rank)
+                            if var existing = candidates[row.source.eventID] {
+                                existing.paths.insert("semantic"); existing.score += contribution; existing.cosine = score
+                                candidates[row.source.eventID] = existing
+                            } else {
+                                candidates[row.source.eventID] = Candidate(source: row.source, offset: row.offset, byteCount: row.byteCount, textDigest: row.textDigest,
+                                    paths: ["semantic"], score: contribution, cosine: score)
+                            }
+                        }
+                    }
+                    let ranked = candidates.values.sorted { lhs, rhs in
+                        let lExact = lhs.paths.contains("literal"), rExact = rhs.paths.contains("literal")
+                        if lExact != rExact { return lExact }
+                        if lhs.score != rhs.score { return lhs.score > rhs.score }
+                        return Self.rangeOrder(lhs.source, lhs.offset, rhs.source, rhs.offset)
+                    }
+                    let results = ranked.prefix(limit).map { candidate in
+                        SemanticResultReference(source: candidate.source, offset: candidate.offset, byteCount: candidate.byteCount, excerptDigest: candidate.textDigest,
+                            retrievalPaths: candidate.paths.sorted(), fusedScore: candidate.score, cosineScore: candidate.cosine)
+                    }
+                    var manifest = SemanticSearchManifest(version: 1, projectID: projectID, queryDigest: queryDigest, lexicalQueryDigest: Self.digest(Data(lexical.utf8)),
+                        indexFingerprint: indexFingerprint, encoderFingerprint: encoderFingerprint, rankingFingerprint: rankingFingerprint,
+                        configurationFingerprint: configurationDigest, configuration: configuration, queryConfigurationFingerprint: queryConfigurationDigest,
+                        resultLimit: limit, sourceFrontier: frontier,
+                        publishedChunkFrontier: publishedFrontier, queryDisposition: disposition, includeLiteral: includeLiteral,
+                        literalScanBytes: literalReport?.rawWorkCharged ?? (continuation == nil && includeLiteral && query.utf8.count <= 4096 ? nil : 0),
+                        literalSearchPerformed: continuation == nil && includeLiteral && query.utf8.count <= 4096,
+                        rawSnapshotID: rawSnapshotID, rawFallbackAvailable: true, coverage: coverage,
+                        vectorCandidatesInspected: vectorCount, vectorContinuation: next, excludedEventIDs: excludingEventIDs.sorted(), results: Array(results))
+                    manifest.episodeID = episodeLease?.episodeID
+                    manifest.meteredLexicalCoverage = meteredLexicalCoverage
+                    manifest.meteredLiteralCoverage = meteredLiteralCoverage
+                    let payload = try Self.canonical(manifest)
+                    guard payload.count <= MemoryStore.maximumPayloadBytes else { throw SemanticError.invalid }
+                    let manifestID = Self.digest(payload)
+                    let hits = try readResults(manifest)
+                    try execute("INSERT OR IGNORE INTO manifests VALUES (?,?,?)", [.text(manifestID), .text(projectID), .blob(payload)])
+                    guard try self.query("SELECT payload FROM manifests WHERE id=? AND project_id=?", [.text(manifestID), .text(projectID)], { blob($0, 0) }).first == payload else { throw SemanticError.publicationConflict }
+                    return SemanticSearchReport(hits: hits, manifestID: manifestID, manifest: manifest)
                 }
             }
-            let ranked = candidates.values.sorted { lhs, rhs in
-                let lExact = lhs.paths.contains("literal"), rExact = rhs.paths.contains("literal")
-                if lExact != rExact { return lExact }
-                if lhs.score != rhs.score { return lhs.score > rhs.score }
-                return Self.rangeOrder(lhs.source, lhs.offset, rhs.source, rhs.offset)
-            }
-            let results = ranked.prefix(limit).map { candidate in
-                SemanticResultReference(source: candidate.source, offset: candidate.offset, byteCount: candidate.byteCount, excerptDigest: candidate.textDigest,
-                    retrievalPaths: candidate.paths.sorted(), fusedScore: candidate.score, cosineScore: candidate.cosine)
-            }
-            let manifest = SemanticSearchManifest(version: 1, projectID: projectID, queryDigest: queryDigest, lexicalQueryDigest: Self.digest(Data(lexical.utf8)),
-                indexFingerprint: indexFingerprint, encoderFingerprint: encoderFingerprint, rankingFingerprint: rankingFingerprint,
-                configurationFingerprint: configurationDigest, configuration: configuration, queryConfigurationFingerprint: queryConfigurationDigest,
-                resultLimit: limit, sourceFrontier: frontier,
-                publishedChunkFrontier: publishedFrontier, queryDisposition: disposition, includeLiteral: includeLiteral,
-                literalScanBytes: continuation == nil && includeLiteral && query.utf8.count <= 4096 ? nil : 0,
-                literalSearchPerformed: continuation == nil && includeLiteral && query.utf8.count <= 4096,
-                rawSnapshotID: rawSnapshotID, rawFallbackAvailable: true, coverage: coverage,
-                vectorCandidatesInspected: vectorCount, vectorContinuation: next, excludedEventIDs: excludingEventIDs.sorted(), results: Array(results))
-            let payload = try Self.canonical(manifest)
-            guard payload.count <= MemoryStore.maximumPayloadBytes else { throw SemanticError.invalid }
-            let manifestID = Self.digest(payload)
-            let hits = try readResults(manifest)
-            try execute("INSERT OR IGNORE INTO manifests VALUES (?,?,?)", [.text(manifestID), .text(projectID), .blob(payload)])
-            guard try self.query("SELECT payload FROM manifests WHERE id=? AND project_id=?", [.text(manifestID), .text(projectID)], { blob($0, 0) }).first == payload else { throw SemanticError.publicationConflict }
-            return SemanticSearchReport(hits: hits, manifestID: manifestID, manifest: manifest)
         }
     }
 
-    func replay(manifestID: String, projectID: String) throws -> SemanticSearchReport {
-        try locked {
-            guard let data = try query("SELECT payload FROM manifests WHERE id=? AND project_id=?", [.text(manifestID), .text(projectID)], { blob($0, 0) }).first else { throw SemanticError.unavailable }
-            guard Self.digest(data) == manifestID else { throw SemanticError.sourceMismatch }
-            let manifest = try JSONDecoder().decode(SemanticSearchManifest.self, from: data)
-            guard manifest.version == 1, manifest.projectID == projectID else { throw SemanticError.sourceMismatch }
-            return SemanticSearchReport(hits: try readResults(manifest), manifestID: manifestID, manifest: manifest)
+    func replay(manifestID: String, projectID: String, episodeLease: EpisodeLease? = nil) throws -> SemanticSearchReport {
+        try MeteredRetrieval.operation(lease: episodeLease) {
+            try locked {
+                let previousLease = activeSearchLease; activeSearchLease = episodeLease
+                defer { activeSearchLease = previousLease }
+                return try withSearchSQLFence(lease: episodeLease) {
+                    guard let data = try MeteredRetrieval.metadata(lease: episodeLease, maximumRows: 1, {
+                        try query("SELECT payload FROM manifests WHERE id=? AND project_id=?", [.text(manifestID), .text(projectID)], { blob($0, 0) }).first
+                    }) else { throw SemanticError.unavailable }
+                    guard Self.digest(data) == manifestID else { throw SemanticError.sourceMismatch }
+                    let manifest = try JSONDecoder().decode(SemanticSearchManifest.self, from: data)
+                    guard manifest.version == 1, manifest.projectID == projectID else { throw SemanticError.sourceMismatch }
+                    return SemanticSearchReport(hits: try readResults(manifest), manifestID: manifestID, manifest: manifest)
+                }
+            }
         }
     }
 
@@ -507,6 +594,8 @@ final class SemanticIndex: @unchecked Sendable {
         let indexFingerprint: String; let rankingFingerprint: String; let configurationFingerprint: String; let exclusionsDigest: String
         let queryConfigurationFingerprint: String
         let includeLiteral: Bool; let sourceFrontier: Int; let publishedChunkFrontier: Int; let candidates: [SemanticResultReference]
+        var meteredLexicalCoverage: MeteredLexicalCoverage? = nil
+        var meteredLiteralCoverage: MeteredLiteralCoverage? = nil
     }
     private struct ChunkRow { let source: MemorySourceReference; let offset: Int; let byteCount: Int; let textDigest: String; let vector: Data }
     private struct Candidate { let source: MemorySourceReference; let offset: Int; let byteCount: Int; let textDigest: String; var paths: Set<String>; var score: Double; var cosine: Double? }
@@ -567,9 +656,11 @@ final class SemanticIndex: @unchecked Sendable {
             [.text(reason), .text(indexFingerprint), .text(job.source.eventID), .integer(job.offset)])
     }
 
-    private func verify(_ source: MemorySourceReference) throws {
+    private func verify(_ source: MemorySourceReference, lease: EpisodeLease? = nil) throws {
         guard source.sequence > 0, source.byteCount >= 0, source.byteCount <= MemoryStore.maximumPayloadBytes,
-              try store.sourceManifest(projectID: source.projectID, afterSequence: source.sequence - 1, throughSequence: source.sequence, limit: 1).first == source else { throw SemanticError.sourceMismatch }
+              try MeteredRetrieval.sourceMetadata(store: store, lease: lease, maximumRows: 1, {
+                  try store.sourceManifest(projectID: source.projectID, afterSequence: source.sequence - 1, throughSequence: source.sequence, limit: 1).first
+              }) == source else { throw SemanticError.sourceMismatch }
     }
 
     /// Reconstruct the accepted source digest through bounded original pages
@@ -591,8 +682,14 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     private func coverage(projectID: String, frontier: Int, publishedFrontier: Int) throws -> SemanticCoverage {
-        let sources = try store.sourceManifest(projectID: projectID, afterSequence: 0, throughSequence: frontier, limit: configuration.maximumManifestSources)
-        let more = try sources.last.map { source in try !store.sourceManifest(projectID: projectID, afterSequence: source.sequence, throughSequence: frontier, limit: 1).isEmpty } ?? false
+        let sources = try MeteredRetrieval.authoritative(store: store, lease: activeSearchLease) {
+            try store.sourceManifest(projectID: projectID, afterSequence: 0, throughSequence: frontier, limit: configuration.maximumManifestSources)
+        }
+        let more = try sources.last.map { source in
+            try MeteredRetrieval.authoritative(store: store, lease: activeSearchLease) {
+                try !store.sourceManifest(projectID: projectID, afterSequence: source.sequence, throughSequence: frontier, limit: 1).isEmpty
+            }
+        } ?? false
         var states: [SemanticSourceCoverage] = [], holes: [SemanticCoverageHole] = [], holesTotal = 0
         for source in sources {
             let job = try query("SELECT source,next_offset,failure_attempts,failure_reason,state FROM jobs WHERE index_id=? AND event_id=? AND project_id=?", [.text(indexFingerprint), .text(source.eventID), .text(projectID)]) { (blob($0, 0), Int(sqlite3_column_int64($0, 1)), Int(sqlite3_column_int64($0, 2)), string($0, 3), string($0, 4)) }.first
@@ -642,7 +739,7 @@ final class SemanticIndex: @unchecked Sendable {
 
     private func querySource(_ hit: MemoryHit) throws -> MemorySourceReference {
         // A scoped indexed lookup obtains sequence without scanning the archive.
-        guard let source = try store.sourceReference(eventID: hit.eventID, projectID: hit.projectID),
+        guard let source = try MeteredRetrieval.sourceMetadata(store: store, lease: activeSearchLease, maximumRows: 1, { try store.sourceReference(eventID: hit.eventID, projectID: hit.projectID) }),
               source.digest == hit.digest, source.byteCount == hit.totalBytes, source.conversationID == hit.conversationID,
               source.role == hit.role, source.status == hit.status, source.createdAt == hit.createdAt else { throw SemanticError.sourceMismatch }
         return source
@@ -652,9 +749,12 @@ final class SemanticIndex: @unchecked Sendable {
         try manifest.results.map { result in
             guard result.source.projectID == manifest.projectID, result.source.sequence <= manifest.sourceFrontier,
                   result.offset >= 0, result.byteCount > 0, result.byteCount <= MemoryStore.maximumPageBytes,
-                  result.offset + result.byteCount <= result.source.byteCount else { throw SemanticError.sourceMismatch }
-            try verify(result.source)
-            let page = try store.read(eventID: result.source.eventID, offset: result.offset, length: result.byteCount)
+                  result.source.byteCount >= 0, result.source.byteCount <= MemoryStore.maximumPayloadBytes,
+                  result.offset <= result.source.byteCount,
+                  result.byteCount <= result.source.byteCount - result.offset else { throw SemanticError.sourceMismatch }
+            try verify(result.source, lease: activeSearchLease)
+            let page = try MeteredRetrieval.read(store: store, source: result.source, offset: result.offset,
+                length: result.byteCount, lease: activeSearchLease, nested: true, examinedPasses: 2)
             guard page.byteCount == result.byteCount, page.digest == result.source.digest, page.totalBytes == result.source.byteCount,
                   page.status == result.source.status, Self.digest(Data(page.text.utf8)) == result.excerptDigest else { throw SemanticError.sourceMismatch }
             return MemoryHit(eventID: result.source.eventID, conversationID: result.source.conversationID, projectID: result.source.projectID,
@@ -740,7 +840,21 @@ final class SemanticIndex: @unchecked Sendable {
     private func query<T>(_ sql: String, _ values: [Value] = [], _ map: (OpaquePointer) throws -> T) throws -> [T] {
         let statement = try prepare(sql, values); defer { sqlite3_finalize(statement) }
         var output: [T] = []
-        while true { let code = sqlite3_step(statement); if code == SQLITE_DONE { return output }; guard code == SQLITE_ROW else { throw SemanticError.database }; output.append(try map(statement)) }
+        while true {
+            _ = try activeSearchLease?.checkActive()
+            let code = sqlite3_step(statement)
+            if code == SQLITE_DONE { return output }
+            guard code == SQLITE_ROW else { throw SemanticError.database }
+            output.append(try map(statement))
+        }
+    }
+    private func withSearchSQLFence<T>(lease: EpisodeLease?, _ body: () throws -> T) throws -> T {
+        guard let lease else { return try body() }
+        guard let database else { throw SemanticError.database }
+        let previous = activeSearchFence, fence = try lease.progressGuard()
+        activeSearchFence = fence
+        defer { activeSearchFence = previous }
+        return try fence.perform(on: database, restoring: previous, body)
     }
     private func integer(_ sql: String, _ values: [Value] = []) throws -> Int { try query(sql, values) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0 }
     private func string(_ statement: OpaquePointer, _ column: Int32) -> String {

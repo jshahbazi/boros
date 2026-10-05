@@ -10,62 +10,87 @@ enum ChatContextPreparation {
         prompt: String,
         system: String,
         excludingEventID: String,
-        semanticIndex: SemanticIndex? = nil
+        semanticIndex: SemanticIndex? = nil,
+        episodeLease: EpisodeLease? = nil
     ) throws -> ContextSnapshot {
-        let lexical = historicalQuery(prompt)
-        guard let semanticIndex else {
+        try MeteredRetrieval.operation(lease: episodeLease) {
+            let lexical = historicalQuery(prompt)
+            guard let semanticIndex else {
+                var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
+                    prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
+                    historicalQuery: lexical, historicalMatching: .anyTerm, episodeLease: episodeLease, operationIsNested: true)
+                try appendAudit(to: &snapshot, fields: ["mode": "lexical", "semantic_available": false])
+                if snapshot.retrievalNotice == nil { snapshot.retrievalNotice = "Archive recall used lexical search; semantic recall is unavailable." }
+                return snapshot
+            }
+            let recent = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
+                prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
+                maximumEvidenceBytes: 0, episodeLease: episodeLease, operationIsNested: true)
+            let report: SemanticSearchReport
+            do {
+                report = try semanticIndex.search(query: prompt, lexicalQuery: lexical ?? "", projectID: projectID,
+                    limit: 16, excludingEventIDs: Set(recent.recentSourceIDs + [excludingEventID]), includeLiteral: false,
+                    episodeLease: episodeLease, operationIsNested: true)
+            } catch {
+                if error is EpisodeBudgetError || error is MeteredRetrievalError || error is MemoryError || error is ContextError { throw error }
+                if let semanticError = error as? SemanticError {
+                    switch semanticError {
+                    case .sourceMismatch, .publicationConflict: throw error
+                    default: break
+                    }
+                }
+                // A sidecar failure cannot erase original sources or invent a hit.
+                // Raw lexical fallback is revalidated by the same assembler.
+                var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
+                    prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
+                    historicalQuery: lexical, historicalMatching: .anyTerm, episodeLease: episodeLease, operationIsNested: true)
+                try appendAudit(to: &snapshot, fields: ["mode": "lexical_fallback",
+                    "semantic_available": false, "failure": "semantic_search_failed"])
+                if snapshot.retrievalNotice == nil { snapshot.retrievalNotice = "Semantic recall failed; archive recall used lexical search." }
+                return snapshot
+            }
             var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                 prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                historicalQuery: lexical, historicalMatching: .anyTerm)
-            snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: ["mode": "lexical", "semantic_available": false], options: [.sortedKeys])
-            snapshot.retrievalNotice = "Archive recall used lexical search; semantic recall is unavailable."
+                historicalHits: report.hits, episodeLease: episodeLease, operationIsNested: true)
+            snapshot.retrievalManifestID = report.manifestID
+            snapshot.retrievalManifestJSON = try report.serializedManifest()
+            let coverage = report.manifest.coverage
+            var audit: [String: Any] = ["mode": "hybrid", "manifest_id": report.manifestID,
+                "index_fingerprint": report.manifest.indexFingerprint, "encoder_fingerprint": report.manifest.encoderFingerprint,
+                "ranking_fingerprint": report.manifest.rankingFingerprint, "configuration_fingerprint": report.manifest.configurationFingerprint,
+                "query_configuration_fingerprint": report.manifest.queryConfigurationFingerprint,
+                "query_sha256": report.manifest.queryDigest, "lexical_query_sha256": report.manifest.lexicalQueryDigest,
+                "raw_snapshot_id": report.manifest.rawSnapshotID,
+                "source_frontier": report.manifest.sourceFrontier, "published_chunk_frontier": report.manifest.publishedChunkFrontier,
+                "query_disposition": report.manifest.queryDisposition, "literal_search": false,
+                "coverage_complete": coverage.complete, "inspected_sources": coverage.inspectedSources,
+                "complete_sources": coverage.completeSources, "pending_sources": coverage.pendingSources,
+                "unsupported_sources": coverage.unsupportedSources, "failed_sources": coverage.failedSources,
+                "holes_truncated": coverage.holesTruncated, "vector_candidates_inspected": report.manifest.vectorCandidatesInspected,
+                "vector_continuation_available": report.manifest.vectorContinuation != nil]
+            if let sequence = coverage.metadataContinuationSequence { audit["metadata_continuation_sequence"] = sequence }
+            if let lexicalCoverage = report.manifest.meteredLexicalCoverage {
+                audit["raw_work_version"] = "raw_work_v1"
+                audit["raw_work_charged"] = lexicalCoverage.rawWorkCharged
+                audit["inspected_candidates"] = lexicalCoverage.inspectedCandidates
+                audit["candidate_window_full"] = lexicalCoverage.candidateWindowFull
+                audit["candidate_window_complete"] = lexicalCoverage.candidateWindowComplete
+                audit["raw_continuation_available"] = lexicalCoverage.continuation != nil
+            }
+            snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
+            if report.manifest.queryDisposition != "supported" {
+                snapshot.retrievalNotice = "This request used lexical archive recall; semantic recall does not support its text."
+            } else if !coverage.complete || report.manifest.vectorContinuation != nil || report.manifest.meteredLexicalCoverage?.candidateWindowComplete == false || report.manifest.meteredLexicalCoverage?.candidateWindowFull == true {
+                snapshot.retrievalNotice = "Archive recall used a partial semantic index. Missing evidence may still be in the archive."
+            }
             return snapshot
         }
-        let recent = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
-            prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-            maximumEvidenceBytes: 0)
-        let report: SemanticSearchReport
-        do {
-            report = try semanticIndex.search(query: prompt, lexicalQuery: lexical ?? "", projectID: projectID,
-                limit: 16, excludingEventIDs: Set(recent.recentSourceIDs + [excludingEventID]), includeLiteral: false)
-        } catch {
-            // A sidecar failure cannot erase original sources or invent a hit.
-            // Raw lexical fallback is revalidated by the same assembler.
-            var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
-                prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                historicalQuery: lexical, historicalMatching: .anyTerm)
-            snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: ["mode": "lexical_fallback",
-                "semantic_available": false, "failure": "semantic_search_failed"], options: [.sortedKeys])
-            snapshot.retrievalNotice = "Semantic recall failed; archive recall used lexical search."
-            return snapshot
-        }
-        var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
-            prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-            historicalHits: report.hits)
-        snapshot.retrievalManifestID = report.manifestID
-        snapshot.retrievalManifestJSON = try report.serializedManifest()
-        let coverage = report.manifest.coverage
-        var audit: [String: Any] = ["mode": "hybrid", "manifest_id": report.manifestID,
-            "index_fingerprint": report.manifest.indexFingerprint, "encoder_fingerprint": report.manifest.encoderFingerprint,
-            "ranking_fingerprint": report.manifest.rankingFingerprint, "configuration_fingerprint": report.manifest.configurationFingerprint,
-            "query_configuration_fingerprint": report.manifest.queryConfigurationFingerprint,
-            "query_sha256": report.manifest.queryDigest, "lexical_query_sha256": report.manifest.lexicalQueryDigest,
-            "raw_snapshot_id": report.manifest.rawSnapshotID,
-            "source_frontier": report.manifest.sourceFrontier, "published_chunk_frontier": report.manifest.publishedChunkFrontier,
-            "query_disposition": report.manifest.queryDisposition, "literal_search": false,
-            "coverage_complete": coverage.complete, "inspected_sources": coverage.inspectedSources,
-            "complete_sources": coverage.completeSources, "pending_sources": coverage.pendingSources,
-            "unsupported_sources": coverage.unsupportedSources, "failed_sources": coverage.failedSources,
-            "holes_truncated": coverage.holesTruncated, "vector_candidates_inspected": report.manifest.vectorCandidatesInspected,
-            "vector_continuation_available": report.manifest.vectorContinuation != nil]
-        if let sequence = coverage.metadataContinuationSequence { audit["metadata_continuation_sequence"] = sequence }
+    }
+
+    private static func appendAudit(to snapshot: inout ContextSnapshot, fields: [String: Any]) throws {
+        var audit = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        audit.merge(fields) { _, new in new }
         snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
-        if report.manifest.queryDisposition != "supported" {
-            snapshot.retrievalNotice = "This request used lexical archive recall; semantic recall does not support its text."
-        } else if !coverage.complete || report.manifest.vectorContinuation != nil {
-            snapshot.retrievalNotice = "Archive recall used a partial semantic index. Missing evidence may still be in the archive."
-        }
-        return snapshot
     }
 
     /// Keep at most eight unique non-filler terms, within the store's query

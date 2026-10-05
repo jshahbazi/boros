@@ -149,15 +149,33 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
     private var started = Date()
     private var ended = false
     private var wireBytes = 0
+    private var wireLimitExceeded = false
     private var receivedResponse = false
     private var cancelled = false
     private var admissionOperation: ProviderAdmissionOperation?
     private var admission: EndpointAdmissionReceipt?
+    private var episodeLease: EpisodeLease?
+    private var answerWork: EpisodeWorkRecord?
+    private var answerDispatched = false
+    private var settledUsage = false
+    private var outcomeRecorded = false
+    private var lateViolationRecorded = false
+    private var deadlineTimer: DispatchSourceTimer?
 
     func start(prompt: String, settings: GenerationSettings, conversation: Conversation,
                onText: @escaping (String) -> Void, onComplete: @escaping (GenerationResult) -> Void) {
         stateQueue.async {
             self.onText = onText; self.onComplete = onComplete; self.started = Date()
+            self.episodeLease = settings.episodeLease
+            if let lease = self.episodeLease {
+                do {
+                    let remaining = try lease.remainingSeconds()
+                    let timer = DispatchSource.makeTimerSource(queue: self.stateQueue)
+                    timer.schedule(deadline: .now() + remaining)
+                    timer.setEventHandler { [weak self] in self?.finish("episode_deadline_exceeded") }
+                    self.deadlineTimer = timer; timer.resume()
+                } catch { self.finish(ProviderAdmissionError.budget(error).failureCode); return }
+            }
             let bytes: Data
             do { bytes = try EndpointRequest.build(prompt: prompt, settings: settings, conversation: conversation) }
             catch let error as ProviderAdmissionError { self.finish(error.failureCode); return }
@@ -176,7 +194,7 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
             } else {
                 self.admissionOperation = ProviderAdmission.prepare(requestBody: bytes, address: settings.endpointURL,
                     apiKey: settings.endpointAPIKey, contextLimit: settings.endpointContextLimit,
-                    safetyTokens: settings.endpointSafetyTokens) { result in
+                    safetyTokens: settings.endpointSafetyTokens, episodeLease: settings.episodeLease) { result in
                     self.stateQueue.async {
                         guard !self.ended else { return }
                         self.admissionOperation = nil
@@ -196,8 +214,11 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
                 finish(cancelled ? nil : "provider_count_mismatch", stopped: cancelled); return
             }
             admission = receipt
+            let timeout: TimeInterval
+            do { timeout = try episodeLease?.remainingSeconds() ?? 180 }
+            catch { finish(ProviderAdmissionError.budget(error).failureCode); return }
             var request = URLRequest(url: url)
-            request.httpMethod = "POST"; request.httpBody = bytes; request.timeoutInterval = 180
+            request.httpMethod = "POST"; request.httpBody = bytes; request.timeoutInterval = min(180, timeout)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             if !settings.endpointAPIKey.isEmpty {
@@ -209,11 +230,35 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
             let configuration = URLSessionConfiguration.ephemeral
             configuration.urlCache = nil; configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
             configuration.httpCookieStorage = nil; configuration.httpShouldSetCookies = false
-            configuration.timeoutIntervalForRequest = 180; configuration.timeoutIntervalForResource = 180
+            configuration.timeoutIntervalForRequest = min(180, timeout); configuration.timeoutIntervalForResource = min(180, timeout)
             let delegateQueue = OperationQueue(); delegateQueue.maxConcurrentOperationCount = 1
             self.session = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
             self.task = self.session!.dataTask(with: request)
-            if self.cancelled { self.finish(nil, stopped: true) } else { self.task!.resume() }
+            if self.cancelled { self.finish(nil, stopped: true); return }
+            do {
+                if let lease = episodeLease {
+                    guard receipt.episodeID == lease.episodeID else { throw EpisodeBudgetError.conflict }
+                    let resources = EpisodeResources(inputTokens: receipt.promptTokens, outputTokens: receipt.outputReserve,
+                        modelCalls: 1, httpAttempts: 1)
+                    if let prepared = settings.preparedAnswerWork {
+                        guard prepared.episodeID == lease.episodeID, prepared.request.kind == .answer,
+                              prepared.request.resources == resources, prepared.request.inputTokensKnown,
+                              prepared.request.snapshot == bytes,
+                              prepared.request.adapterIdentity == receipt.answerAdapterIdentity else {
+                            throw EpisodeBudgetError.conflict
+                        }
+                        answerWork = prepared
+                    } else {
+                        answerWork = try lease.prepare(kind: .answer, resources: resources,
+                            adapterIdentity: receipt.answerAdapterIdentity, snapshot: bytes)
+                    }
+                    answerWork = try lease.dispatch(answerWork!) {
+                        self.answerDispatched = true; self.task!.resume()
+                    }
+                } else {
+                    self.answerDispatched = true; self.task!.resume()
+                }
+            } catch { finish(ProviderAdmissionError.budget(error).failureCode) }
     }
 
     func cancel() {
@@ -240,13 +285,31 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         stateQueue.async {
-            guard !self.ended, self.receivedResponse else { return }
+            guard self.receivedResponse, !self.wireLimitExceeded else { return }
+            guard data.count <= 16 * 1_048_576 - self.wireBytes else {
+                self.wireLimitExceeded = true
+                self.finish("output_limit"); return
+            }
             self.wireBytes += data.count
-            guard self.wireBytes <= 16 * 1_048_576 else { self.finish("output_limit"); return }
+            if self.ended {
+                for payload in self.decoder.consume(data) { self.recordLateUsage(payload) }
+                return
+            }
+            do { _ = try self.episodeLease?.checkActive() }
+            catch {
+                // The same bytes may contain a terminal usage receipt. Account
+                // for it without delivering content after the episode ended.
+                for payload in self.decoder.consume(data) { self.recordLateUsage(payload) }
+                self.finish(ProviderAdmissionError.budget(error).failureCode); return
+            }
             let events = self.decoder.consume(data)
             for payload in events {
                 if let chunk = self.responseState.consume(payload), let callback = self.onText {
-                    DispatchQueue.main.async { callback(chunk) }
+                    let lease = self.episodeLease
+                    DispatchQueue.main.async {
+                        if let lease, (try? lease.checkActive()) == nil { return }
+                        callback(chunk)
+                    }
                 }
                 if let failure = self.responseState.failure { self.finish(failure); return }
                 if self.responseState.done { self.finish(self.completionFailure); return }
@@ -277,7 +340,11 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
 
     private func finish(_ failure: String?, stopped: Bool = false) {
         guard !ended else { return }
+        var failure = failure
+        do { try settleAnswer() }
+        catch { failure = ProviderAdmissionError.budget(error).failureCode }
         ended = true
+        deadlineTimer?.cancel(); deadlineTimer = nil
         let callback = onComplete
         onText = nil; onComplete = nil
         let result = GenerationResult(elapsed: Date().timeIntervalSince(started), tokensPerSecond: nil,
@@ -287,6 +354,75 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
         task?.cancel(); task = nil
         session?.invalidateAndCancel(); session = nil
         if let callback { DispatchQueue.main.async { callback(result) } }
+    }
+
+    private func settleAnswer() throws {
+        guard let lease = episodeLease, let work = answerWork, !outcomeRecorded else { return }
+        outcomeRecorded = true
+        let usage = responseState.usage
+        if let usage {
+            settledUsage = true
+            _ = try lease.settle(work, outcome: .completed,
+                observed: EpisodeResources(inputTokens: usage.promptTokens, outputTokens: usage.completionTokens,
+                    modelCalls: 1, httpAttempts: 1), evidence: JSONEncoder().encode(usage),
+                adapterViolation: responseState.observedModel != admission?.modelID || responseState.failure == "provider_count_mismatch")
+        } else {
+            // An absent usage receipt leaves actual cost unknown. It does not
+            // erase a separately established model/protocol identity violation.
+            let identityMismatch = responseState.observedModel.map { $0 != admission?.modelID } ?? false
+            let protocolMismatch = responseState.failure == "provider_count_mismatch"
+            let violation = answerDispatched && (identityMismatch || protocolMismatch)
+            lateViolationRecorded = violation
+            let evidence = try unknownUsageEvidence(identityMismatch: identityMismatch, protocolMismatch: protocolMismatch,
+                observedModel: responseState.observedModel)
+            do {
+                _ = try lease.settle(work, outcome: answerDispatched ? .outcomeUnknown : .cancelledBeforeDispatch,
+                    evidence: evidence, adapterViolation: violation)
+            } catch EpisodeBudgetError.conflict where !answerDispatched {
+                // A lease can durably arm, then suppress resume because Stop
+                // won its local handoff fence. An armed record keeps its bound.
+                _ = try lease.settle(work, outcome: .outcomeUnknown, evidence: evidence, adapterViolation: violation)
+            }
+        }
+    }
+
+    private func unknownUsageEvidence(identityMismatch: Bool, protocolMismatch: Bool, observedModel: String?) throws -> Data {
+        var evidence: [String: Any] = ["usage_observed": false,
+            "model_identity_mismatch": identityMismatch, "protocol_count_mismatch": protocolMismatch]
+        if let observedModel { evidence["observed_model_sha256"] = EndpointRequest.digest(Data(observedModel.utf8)) }
+        if let model = admission?.modelID { evidence["expected_model_sha256"] = EndpointRequest.digest(Data(model.utf8)) }
+        return try EndpointRequest.serialize(evidence)
+    }
+
+    private func recordLateUsage(_ payload: String) {
+        guard !settledUsage, let lease = episodeLease, let work = answerWork,
+              let bytes = payload.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any] else { return }
+        // A lifecycle check can fail before these bytes are normally consumed.
+        // Retain metadata for the initial settlement while suppressing text.
+        if !ended { _ = responseState.consume(payload) }
+        guard let usage = ProviderUsage.parse(object["usage"]) else {
+            let model = object["model"] as? String
+            let identityMismatch = model.map { $0 != admission?.modelID } ?? false
+            let rawUsage = object["usage"]
+            let protocolMismatch = rawUsage != nil && !(rawUsage is NSNull)
+            if ended, answerDispatched, !lateViolationRecorded, identityMismatch || protocolMismatch {
+                do {
+                    _ = try lease.settle(work, outcome: .outcomeUnknown,
+                        evidence: unknownUsageEvidence(identityMismatch: identityMismatch,
+                            protocolMismatch: protocolMismatch, observedModel: model), adapterViolation: true)
+                    lateViolationRecorded = true
+                } catch EpisodeBudgetError.adapterViolation { lateViolationRecorded = true }
+                catch { return }
+            }
+            return
+        }
+        settledUsage = true; outcomeRecorded = true
+        _ = try? lease.settle(work, outcome: .completed,
+            observed: EpisodeResources(inputTokens: usage.promptTokens, outputTokens: usage.completionTokens, modelCalls: 1, httpAttempts: 1),
+            evidence: try? JSONEncoder().encode(usage),
+            adapterViolation: lateViolationRecorded || object["model"] as? String != admission?.modelID
+                || responseState.failure == "provider_count_mismatch")
     }
 
     private var completionFailure: String? {

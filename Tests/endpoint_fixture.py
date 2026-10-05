@@ -7,8 +7,11 @@ from urllib.parse import urlsplit
 
 MODEL = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
 TEMPLATE = Path(__file__).with_name("qwen38-chat-template.jinja").read_text()
-MODES = ["good", "http-error", "sse-error", "unfinished", "length", "redirect", "malformed", "cancel", "usage-missing", "usage-mismatch", "stream-model-mismatch"]
-ADMISSION_MODES = ["template-mismatch", "version-mismatch", "model-mismatch", "count-mismatch", "bad-tokenizer", "admission-redirect", "admission-cancel"]
+MODES = ["good", "http-error", "sse-error", "unfinished", "length", "redirect", "malformed", "cancel", "usage-missing", "usage-mismatch", "stream-model-mismatch",
+         "wrong-model-no-usage", "wrong-model-invalid-usage", "invalid-usage"]
+ADMISSION_MODES = ["template-mismatch", "version-mismatch", "model-mismatch", "count-mismatch", "bad-tokenizer", "admission-redirect", "admission-cancel",
+                   "calibration-stop", "calibration-zero", "calibration-negative", "calibration-missing", "calibration-excess",
+                   "calibration-wrong-model-missing", "calibration-wrong-model-invalid"]
 LOW = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration."
 
 
@@ -110,9 +113,15 @@ class Fixture(BaseHTTPRequestHandler):
                 self.json_response({"tokens": [True] if admission_mode == "bad-tokenizer" else [1] * count(body["content"])})
                 return
             if self.path == "/v1/chat/completions" and body.get("stream") is False:
+                if admission_mode == "calibration-stop":
+                    time.sleep(2)
                 prompt = count(render(body)) + (1 if admission_mode == "count-mismatch" else 0)
-                self.json_response({"model": MODEL, "usage": {"prompt_tokens": prompt,
-                    "completion_tokens": 1, "total_tokens": prompt + 1}})
+                output = {"calibration-zero": 0, "calibration-negative": -1, "calibration-excess": 2,
+                    "calibration-wrong-model-invalid": -1}.get(admission_mode, 1)
+                response = {"model": "wrong-model" if admission_mode in ("calibration-wrong-model-missing", "calibration-wrong-model-invalid") else MODEL}
+                if admission_mode not in ("calibration-missing", "calibration-wrong-model-missing"):
+                    response["usage"] = {"prompt_tokens": prompt, "completion_tokens": output, "total_tokens": prompt + output}
+                self.json_response(response)
                 return
             valid = (
                 self.path == "/v1/chat/completions"
@@ -158,7 +167,7 @@ class Fixture(BaseHTTPRequestHandler):
                     self.wfile.write(b"data: [DONE]\n\n")
                 elif mode == "cancel":
                     time.sleep(2)
-            elif mode in ("good", "usage-missing", "usage-mismatch", "stream-model-mismatch"):
+            elif mode in ("good", "usage-missing", "usage-mismatch", "stream-model-mismatch", "wrong-model-no-usage", "wrong-model-invalid-usage", "invalid-usage"):
                 self.event({"choices": [{"delta": {"reasoning_content": "Synthetic reasoning."}, "finish_reason": None}]})
                 payload = json.dumps({"choices": [{"delta": {"content": "17日"}, "finish_reason": None}]}, ensure_ascii=False)
                 for byte in ("data: " + payload + "\r\n\r\n").encode():
@@ -166,7 +175,12 @@ class Fixture(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 self.event({"choices": [{"delta": {}, "finish_reason": "stop"}]})
                 prompt = count(render(body))
-                if mode != "usage-missing":
+                if mode == "wrong-model-no-usage":
+                    self.event({"model": "wrong-model", "choices": []})
+                elif mode in ("wrong-model-invalid-usage", "invalid-usage"):
+                    self.event({"model": "wrong-model" if mode == "wrong-model-invalid-usage" else MODEL,
+                        "choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": -1, "total_tokens": prompt - 1}})
+                elif mode != "usage-missing":
                     prompt += 1 if mode == "usage-mismatch" else 0
                     self.event({"model": "wrong-model" if mode == "stream-model-mismatch" else MODEL,
                         "choices": [], "usage": {"prompt_tokens": prompt,

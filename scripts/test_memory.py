@@ -94,7 +94,7 @@ def main() -> None:
         harness.write_text(HARNESS)
         binary = temporary / "memory-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
-            "MemoryStore.swift", "ContextAssembler.swift", "MemoryChecks.swift"
+            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "MeteredRetrieval.swift", "ContextAssembler.swift", "MemoryChecks.swift"
         )]
         subprocess.run([
             "swiftc", "-I", str(ROOT / "Sources/CSQLite"),

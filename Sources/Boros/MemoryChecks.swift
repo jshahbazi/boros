@@ -39,6 +39,12 @@ enum MemoryChecks {
             && references[0].eventID == saved.id && references[0].projectID == saved.projectID
             && references[0].conversationID == saved.conversationID && references[0].digest == saved.digest
             && references[0].byteCount == saved.byteCount && references[0].role == .human && references[0].status == .complete
+        let candidates = try store!.lexicalCandidateReferences(query: "MIDPAYLOAD_SENTINEL", projectID: first.projectID)
+        checks["metadata_lexical_candidates_preserve_scope_and_ranking"] = candidates == references
+        checks["metadata_candidate_explicit_full_load_matches_source"] = try store!.loadCandidate(reference: candidates[0]).text == saved.text
+        checks["metadata_recent_suffix_matches_payload_suffix"] = try store!.recentSourceReferences(conversationID: first.id, limit: 100, maximumBytes: saved.byteCount).map(\.eventID) == store!.recentEvents(conversationID: first.id, limit: 100, maximumBytes: saved.byteCount).map(\.id)
+        checks["metadata_recent_bound_omits_unaffordable_suffix"] = try store!.recentSourceReferences(conversationID: first.id, limit: 100, maximumBytes: 64).isEmpty
+        checks["metadata_conversation_scope_lookup"] = try store!.conversationProjectID(conversationID: first.id) == first.projectID
         checks["source_reference_matches_bounded_manifest"] = try store!.sourceReference(eventID: saved.id, projectID: saved.projectID) == references[0]
         checks["source_reference_cross_scope_denied"] = try store!.sourceReference(eventID: saved.id, projectID: second.projectID) == nil
         checks["source_reference_missing_is_explicit"] = try store!.sourceReference(eventID: "missing-reference", projectID: first.projectID) == nil
@@ -251,7 +257,7 @@ enum MemoryChecks {
         var database: OpaquePointer?
         guard sqlite3_open(directory.appendingPathComponent("memory.sqlite3").path, &database) == SQLITE_OK, let opened = database else { throw MemoryError.database("could not prepare synthetic migration") }
         defer { sqlite3_close(opened) }
-        guard sqlite3_exec(opened, "DROP TABLE invocation_chunks; DROP TABLE invocations; PRAGMA user_version=1;", nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("could not prepare version one schema") }
+        guard sqlite3_exec(opened, "DROP TABLE invocation_chunks; DROP TABLE invocations; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=1;", nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("could not prepare version one schema") }
         store = try MemoryStore(directory: directory)
         let restored = try store!.events(conversationID: conversation.id)
         let checks = [

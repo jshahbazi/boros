@@ -66,6 +66,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var pendingAdmissionAccounting: [ProviderAdmissionAccounting] = []
     private var pendingAdmissionReceipt: EndpointAdmissionReceipt?
     private var pendingNativeConfiguration: Data?
+    private var pendingEpisode: EpisodeLease?
+    private var pendingAnswerWork: EpisodeWorkRecord?
+    private var preparingContext = false
+    private let preparationQueue = DispatchQueue(label: "Boros.episode.preparation", qos: .userInitiated)
     private var restoringDraft = false
     private var draftValidationFailed = false
     private var memoryHealthy = false
@@ -674,35 +678,24 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let humanID = UUID().uuidString
         let assistantID = UUID().uuidString
         let invocationID = UUID().uuidString
-        var requestBody: Data?
-        var providerIdentity = ""
+        let clock = SystemEpisodeClock()
+        let episodeID = UUID().uuidString
+        let lease = EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
         do {
-            // Capture the full human message before preparing or dispatching any model request.
-            _ = try store.append(conversationID: activeChat.id, role: .human, text: prompt, status: .complete, turnID: turnID, eventID: humanID)
-            if !CommandLine.arguments.contains("--ui-self-test") { semanticIndex?.schedule(projectID: projectID) }
-            let snapshot = try ChatContextPreparation.prepare(store: store, conversationID: activeChat.id, projectID: projectID,
-                prompt: prompt, system: settings.system, excludingEventID: humanID, semanticIndex: semanticIndex)
-            settings.messagesOverride = snapshot.messages.map { ["role": $0.role, "content": $0.content] }
+            _ = try store.acceptRequestAndBeginEpisode(conversationID: activeChat.id, turnID: turnID,
+                humanEventID: humanID, episodeID: episodeID, text: prompt,
+                limits: EpisodeLimits(), clock: clock.now())
+            settings.episodeLease = lease
+            // Synthetic preparation checks keep their synchronous observation;
+            // ordinary Send prepares on the coordinator queue below.
             if CommandLine.arguments.contains("--ui-self-test"), let observe = preparedSendObserverForChecks {
+                let snapshot = try ChatContextPreparation.prepare(store: store, conversationID: activeChat.id,
+                    projectID: projectID, prompt: prompt, system: settings.system, excludingEventID: humanID,
+                    semanticIndex: semanticIndex, episodeLease: lease)
                 observe(snapshot)
+                _ = try lease.finish(reason: .cancelled)
                 return
             }
-            pendingContextSnapshot = snapshot
-            let body: Data
-            if selectedProfile == .customLocal {
-                body = try EndpointRequest.build(prompt: prompt, settings: settings, conversation: conversation)
-                settings.preparedEndpointBody = body
-                guard let url = LocalEndpoint.chatURL(settings.endpointURL) else { throw MemoryError.invalid("local endpoint") }
-                providerIdentity = url.absoluteString
-            } else {
-                body = selectedProfile == .bonsai
-                    ? try NativeRequest.completionEvidence(prompt: prompt, settings: settings, conversation: conversation)
-                    : try NativeRequest.reasoningBody(prompt: prompt, settings: settings, conversation: conversation)
-                if selectedProfile != .bonsai { settings.preparedNativeBody = body }
-                pendingNativeConfiguration = try NativeRequest.configuration(settings: settings)
-                providerIdentity = "native:" + selectedProfile.rawValue
-            }
-            requestBody = body
             try store.saveDraft(conversationID: activeChat.id, text: "")
             if selectedProfile == .customLocal {
                 preferences.endpointURL = settings.endpointURL
@@ -712,41 +705,104 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             preferences.profile = selectedProfile.rawValue
             try preferences.save(in: store.directory)
         } catch {
-            // A captured invocation that failed before dispatch is terminal too.
-            if (try? store.invocation(id: invocationID)) != nil {
-                _ = try? store.finalizeInvocation(invocationID: invocationID, status: .failed, reason: .captureFailure)
-            }
+            _ = try? lease.finish(reason: .failed)
             restoreActiveConversation()
-            status.stringValue = "The message was not dispatched because memory capture or context preparation failed. Check its size and local store."
+            status.stringValue = "The request could not be accepted or prepared. Check its size and local store."
             return
         }
         pendingTurnID = turnID; pendingHumanID = humanID; pendingAssistantID = assistantID
         pendingInvocationID = invocationID; pendingChunkSequence = 0; pendingCaptureFailure = false
-        pendingInvocationStarted = false; pendingRequestBody = requestBody; pendingProviderIdentity = providerIdentity
+        pendingInvocationStarted = false; pendingRequestBody = nil; pendingProviderIdentity = ""
         pendingAdmissionAccounting = []; pendingAdmissionReceipt = nil
-        pendingPrompt = prompt
-        pendingResponse = ""
+        pendingContextSnapshot = nil; pendingNativeConfiguration = nil
+        pendingEpisode = lease; pendingAnswerWork = nil; preparingContext = true
+        pendingPrompt = prompt; pendingResponse = ""
         appendTranscript("You", body: prompt)
         appendTranscript(selectedProfile.speakerName, body: "")
         replaceDraft("")
         setGenerating(true)
         started = Date()
-        status.stringValue = selectedProfile == .customLocal ? "Checking the model's token budget…" : "Starting…"
+        status.stringValue = "Preparing context…"
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
+            guard let self, self.generating else { return }
+            do { _ = try self.pendingEpisode?.checkActive() }
+            catch {
+                let failure = (error as? EpisodeBudgetError)?.failureCode ?? "episode_accounting_failed"
+                self.endActiveEpisode(reason: failure == "episode_deadline_exceeded" ? .deadlineExceeded : .failed,
+                    failure: failure, stopped: false)
+                return
+            }
             if !self.pendingCaptureFailure {
-                self.status.stringValue = String(format: "%@ · %.1f s", self.pendingInvocationStarted ? "Generating" : "Checking token budget", Date().timeIntervalSince(self.started))
+                let stage = self.preparingContext ? "Preparing context" : self.pendingInvocationStarted ? "Generating" : "Checking token budget"
+                self.status.stringValue = String(format: "%@ · %.1f s", stage, Date().timeIntervalSince(self.started))
             }
         }
-        if selectedProfile == .customLocal, let body = requestBody {
-            prepareEndpointAdmission(prompt: prompt, settings: settings, body: body)
-        } else { dispatchPreparedGeneration(prompt: prompt, settings: settings) }
+        let frozenSettings = settings
+        let frozenConversation = conversation
+        let index = semanticIndex
+        let scope = projectID
+        preparationQueue.async { [weak self] in
+            let outcome: Result<PreparedEpisodeContext, Error>
+            do {
+                _ = try lease.checkActive()
+                let snapshot = try ChatContextPreparation.prepare(store: store, conversationID: activeChat.id,
+                    projectID: scope, prompt: prompt, system: frozenSettings.system, excludingEventID: humanID,
+                    semanticIndex: index, episodeLease: lease)
+                var preparedSettings = frozenSettings
+                preparedSettings.messagesOverride = snapshot.messages.map { ["role": $0.role, "content": $0.content] }
+                let body: Data
+                let provider: String
+                var nativeConfiguration: Data?
+                if preparedSettings.profile == .customLocal {
+                    body = try EndpointRequest.build(prompt: prompt, settings: preparedSettings, conversation: frozenConversation)
+                    preparedSettings.preparedEndpointBody = body
+                    guard let url = LocalEndpoint.chatURL(preparedSettings.endpointURL) else { throw MemoryError.invalid("local endpoint") }
+                    provider = url.absoluteString
+                } else {
+                    body = preparedSettings.profile == .bonsai
+                        ? try NativeRequest.completionEvidence(prompt: prompt, settings: preparedSettings, conversation: frozenConversation)
+                        : try NativeRequest.reasoningBody(prompt: prompt, settings: preparedSettings, conversation: frozenConversation)
+                    if preparedSettings.profile != .bonsai { preparedSettings.preparedNativeBody = body }
+                    nativeConfiguration = try NativeRequest.configuration(settings: preparedSettings)
+                    provider = "native:" + preparedSettings.profile.rawValue
+                }
+                _ = try lease.checkActive()
+                outcome = .success(PreparedEpisodeContext(snapshot: snapshot, settings: preparedSettings,
+                    body: body, provider: provider, nativeConfiguration: nativeConfiguration))
+            } catch { outcome = .failure(error) }
+            DispatchQueue.main.async {
+                guard let self, self.generating, self.pendingInvocationID == invocationID else { return }
+                self.preparingContext = false
+                switch outcome {
+                case .success(let prepared):
+                    self.pendingContextSnapshot = prepared.snapshot
+                    self.pendingRequestBody = prepared.body
+                    self.pendingProviderIdentity = prepared.provider
+                    self.pendingNativeConfiguration = prepared.nativeConfiguration
+                    if prepared.settings.profile == .customLocal {
+                        self.prepareEndpointAdmission(prompt: prompt, settings: prepared.settings, body: prepared.body)
+                    } else { self.dispatchPreparedGeneration(prompt: prompt, settings: prepared.settings) }
+                case .failure(let error):
+                    self.completeGeneration(GenerationResult(elapsed: Date().timeIntervalSince(self.started),
+                        tokensPerSecond: nil, failure: (error as? EpisodeBudgetError)?.failureCode ?? "context_preparation_failed", stopped: false))
+                }
+            }
+        }
+    }
+
+    private struct PreparedEpisodeContext {
+        let snapshot: ContextSnapshot
+        let settings: GenerationSettings
+        let body: Data
+        let provider: String
+        let nativeConfiguration: Data?
     }
 
     private func prepareEndpointAdmission(prompt: String, settings: GenerationSettings, body: Data) {
         let invocationID = pendingInvocationID
         pendingAdmission = ProviderAdmission.prepare(requestBody: body, address: settings.endpointURL,
-            apiKey: settings.endpointAPIKey, contextLimit: settings.endpointContextLimit, safetyTokens: settings.endpointSafetyTokens) { [weak self] outcome in
+            apiKey: settings.endpointAPIKey, contextLimit: settings.endpointContextLimit, safetyTokens: settings.endpointSafetyTokens,
+            episodeLease: settings.episodeLease) { [weak self] outcome in
             DispatchQueue.main.async {
                 guard let self, self.generating, self.pendingInvocationID == invocationID else { return }
                 if let operation = self.pendingAdmission { self.pendingAdmissionAccounting.append(operation.accounting) }
@@ -779,19 +835,31 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
 
     private func dispatchPreparedGeneration(prompt: String, settings: GenerationSettings) {
         guard generating, let store, let activeChat, let body = pendingRequestBody, !pendingInvocationStarted else { return }
+        var dispatchedSettings = settings
         do {
+            if let lease = pendingEpisode {
+                _ = try lease.checkActive()
+                let input = settings.endpointAdmission?.promptTokens ?? 0
+                let adapter = settings.endpointAdmission?.answerAdapterIdentity ?? ("native:" + settings.profile.rawValue)
+                let work = try lease.prepare(kind: settings.profile == .customLocal ? .answer : .nativeInference,
+                    resources: EpisodeResources(inputTokens: input, outputTokens: settings.maximumOutput,
+                        modelCalls: 1, httpAttempts: settings.profile == .customLocal ? 1 : 0),
+                    adapterIdentity: adapter, snapshot: body, inputTokensKnown: settings.profile == .customLocal)
+                pendingAnswerWork = work
+                dispatchedSettings.preparedAnswerWork = work
+            }
             let admission = try admissionAudit()
             _ = try store.beginInvocation(invocationID: pendingInvocationID, conversationID: activeChat.id, turnID: pendingTurnID,
                 humanEventID: pendingHumanID, assistantEventID: pendingAssistantID, providerIdentity: pendingProviderIdentity,
-                requestBody: body, admissionJSON: admission)
+                requestBody: body, admissionJSON: admission, episodeID: pendingEpisode?.episodeID, episodeWorkID: pendingAnswerWork?.id)
             pendingInvocationStarted = true
         } catch {
-            pendingCaptureFailure = true
-            completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: "capture_failure", stopped: false))
+            pendingCaptureFailure = !(error is EpisodeBudgetError)
+            completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: (error as? EpisodeBudgetError)?.failureCode ?? "capture_failure", stopped: false))
             return
         }
         let invocationID = pendingInvocationID
-        runner.start(prompt: prompt, settings: settings, conversation: conversation, onText: { [weak self] text in
+        runner.start(prompt: prompt, settings: dispatchedSettings, conversation: conversation, onText: { [weak self] text in
             guard let self, self.pendingInvocationID == invocationID else { return }
             self.receiveGenerationText(text)
         }, onComplete: { [weak self] result in
@@ -817,10 +885,15 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private func receiveGenerationText(_ text: String) {
         guard generating, !pendingInvocationID.isEmpty, !pendingCaptureFailure, !text.isEmpty, let store else { return }
         do {
+            _ = try pendingEpisode?.checkActive()
             // A visible delta is acknowledged only after its durable journal
             // commit. Failed capture cannot leave unsaved text in the transcript.
             _ = try store.appendInvocationChunk(invocationID: pendingInvocationID, sequence: pendingChunkSequence, text: text)
             pendingChunkSequence += 1
+        } catch let error as EpisodeBudgetError {
+            endActiveEpisode(reason: error == .deadlineExceeded ? .deadlineExceeded : .failed,
+                failure: error.failureCode, stopped: false)
+            return
         } catch {
             pendingCaptureFailure = true
             status.stringValue = "Response capture failed. Stopping; committed output will be recovered on restart."
@@ -837,24 +910,40 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private func completeGeneration(_ result: GenerationResult) {
         guard !pendingAssistantID.isEmpty else { return }
         timer?.invalidate(); timer = nil
+        var resolved = result
+        if let lease = pendingEpisode {
+            let terminal: EpisodeState = result.stopped ? .cancelled
+                : result.failure == "episode_deadline_exceeded" ? .deadlineExceeded
+                : result.failure == "episode_budget_exceeded" ? .budgetExceeded
+                : result.failure != nil || pendingCaptureFailure || pendingResponse.isEmpty ? .failed : .completed
+            do { resolved = result.reconcilingEpisodeState(try lease.finish(reason: terminal).state) }
+            catch { memoryHealthy = false }
+        }
         let hasAnswer = !selectedProfile.finalAnswer(pendingResponse).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let captureStatus: CaptureStatus = pendingCaptureFailure ? (pendingResponse.isEmpty ? .failed : .partial)
-            : result.stopped ? (pendingResponse.isEmpty ? .cancelled : .partial)
-            : result.failure != nil || pendingResponse.isEmpty ? (pendingResponse.isEmpty ? .failed : .partial) : .complete
+            : resolved.stopped ? (pendingResponse.isEmpty ? .cancelled : .partial)
+            : resolved.failure != nil || pendingResponse.isEmpty ? (pendingResponse.isEmpty ? .failed : .partial) : .complete
         let reason: InvocationTerminalReason = pendingCaptureFailure ? .captureFailure
-            : result.stopped ? .cancelled : result.failure == "incomplete_result" ? .upstreamIncomplete
-            : !pendingInvocationStarted && result.failure != nil ? .admissionFailure
+            : resolved.stopped ? .cancelled : resolved.failure == "incomplete_result" ? .upstreamIncomplete
+            : !pendingInvocationStarted && resolved.failure != nil ? .admissionFailure
             : captureStatus == .complete ? .completed : .transportFailure
         if let store, !pendingInvocationID.isEmpty {
             do {
-                if !pendingInvocationStarted, let activeChat, let body = pendingRequestBody {
+                if pendingEpisode == nil, !pendingInvocationStarted, let activeChat, let body = pendingRequestBody {
                     _ = try store.beginInvocation(invocationID: pendingInvocationID, conversationID: activeChat.id, turnID: pendingTurnID,
                         humanEventID: pendingHumanID, assistantEventID: pendingAssistantID, providerIdentity: pendingProviderIdentity, requestBody: body,
                         admissionJSON: try admissionAudit())
                     pendingInvocationStarted = true
                 }
-                let usage = try result.providerUsage.map { try JSONEncoder().encode($0) }
-                _ = try store.finalizeInvocation(invocationID: pendingInvocationID, status: captureStatus, reason: reason, usageJSON: usage)
+                let usage = try resolved.providerUsage.map { try JSONEncoder().encode($0) }
+                if pendingInvocationStarted {
+                    _ = try store.finalizeInvocation(invocationID: pendingInvocationID, status: captureStatus, reason: reason, usageJSON: usage)
+                } else if let activeChat {
+                    // A preparation-only failure has an episode but no model
+                    // request snapshot. Preserve its empty terminal event.
+                    _ = try store.append(conversationID: activeChat.id, role: .assistant, text: pendingResponse,
+                        status: captureStatus, turnID: pendingTurnID, eventID: pendingAssistantID)
+                }
                 if !CommandLine.arguments.contains("--ui-self-test") { semanticIndex?.schedule(projectID: projectID) }
             } catch {
                 memoryHealthy = false
@@ -863,15 +952,15 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         }
         setGenerating(false)
         if memoryHealthy {
-            status.stringValue = (pendingCaptureFailure ? "Response capture failed." : result.message) + " Captured as " + captureStatus.rawValue + "."
+            status.stringValue = (pendingCaptureFailure ? "Response capture failed." : resolved.message) + " Captured as " + captureStatus.rawValue + "."
                 + (pendingContextSnapshot?.retrievalNotice.map { " " + $0 } ?? "")
         }
-        if !pendingCaptureFailure && (result.failure == nil || result.stopped) && hasAnswer && !pendingResponse.isEmpty {
+        if !pendingCaptureFailure && (resolved.failure == nil || resolved.stopped) && hasAnswer && !pendingResponse.isEmpty {
             conversation.append(user: pendingPrompt, assistant: pendingResponse)
         } else { replaceDraft(pendingPrompt) }
         persistDraft()
-        if result.failure != nil && (!result.stopped || result.failure == "incomplete_result") {
-            responseView.textStorage?.append(NSAttributedString(string: "\n\n" + result.message))
+        if resolved.failure != nil && (!resolved.stopped || resolved.failure == "incomplete_result") {
+            responseView.textStorage?.append(NSAttributedString(string: "\n\n" + resolved.message))
         }
         responseView.textStorage?.append(NSAttributedString(string: "\n\n", attributes: bodyAttributes))
         pendingPrompt = ""; pendingResponse = ""; pendingTurnID = ""; pendingHumanID = ""; pendingAssistantID = ""
@@ -881,6 +970,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         pendingContextSnapshot = nil
         pendingAdmissionAccounting = []; pendingAdmissionReceipt = nil
         pendingNativeConfiguration = nil
+        pendingEpisode = nil; pendingAnswerWork = nil; preparingContext = false
         window.makeFirstResponder(promptView)
         if quitting { NSApplication.shared.reply(toApplicationShouldTerminate: true) }
     }
@@ -898,14 +988,31 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         refreshReasoningControls()
     }
 
+    private func endActiveEpisode(reason: EpisodeState, failure: String?, stopped: Bool) {
+        guard generating else { return }
+        // Close further reservations/handoffs before signalling cancellation.
+        // Unknown server work remains held in the durable ledger.
+        do { _ = try pendingEpisode?.finish(reason: reason) }
+        catch { memoryHealthy = false }
+        if let admission = pendingAdmission {
+            pendingAdmission = nil
+            admission.cancel()
+            pendingAdmissionAccounting.append(admission.accounting)
+        }
+        let waitingForNativeCleanup = selectedProfile != .customLocal && pendingInvocationStarted && runner.isRunning
+        runner.cancel()
+        if waitingForNativeCleanup {
+            status.stringValue = "Stopping; waiting for the local model process to close…"
+            return
+        }
+        completeGeneration(GenerationResult(elapsed: Date().timeIntervalSince(started),
+            tokensPerSecond: nil, failure: failure, stopped: stopped))
+    }
+
     @objc private func stopGeneration() {
         if generating {
             status.stringValue = "Stopping…"
-            if let admission = pendingAdmission {
-                pendingAdmission = nil; admission.cancel()
-                pendingAdmissionAccounting.append(admission.accounting)
-                completeGeneration(GenerationResult(elapsed: Date().timeIntervalSince(started), tokensPerSecond: nil, failure: nil, stopped: true))
-            } else { runner.cancel() }
+            endActiveEpisode(reason: .cancelled, failure: nil, stopped: true)
         }
     }
 
@@ -1026,6 +1133,136 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         checks["send_repeated_query_terms_are_bounded"] = repeatedSnapshot.messages.last?.content == repeatedPrompt
             && repeatedSnapshot.evidence.map(\.eventID) == [old.id]
         return checks
+    }
+
+    private func coordinatorStopChecks(store: MemoryStore) throws -> [String: Bool] {
+        let priorChat = activeChat
+        let priorDraft = promptView.string
+        let priorAddress = endpointField.stringValue
+        let priorTranscript = NSAttributedString(attributedString: responseView.attributedString())
+        defer {
+            activeChat = priorChat
+            endpointField.stringValue = priorAddress; reloadCredential()
+            replaceDraft(priorDraft)
+            responseView.textStorage?.setAttributedString(priorTranscript)
+        }
+        let chat = try store.createConversation(projectID: projectID, title: "Synthetic preparation Stop")
+        activeChat = chat
+        endpointField.stringValue = "http://127.0.0.1:1/v1/"; reloadCredential()
+        replaceDraft("Synthetic context preparation cancellation")
+        sendPrompt()
+        guard let lease = pendingEpisode else { return ["gui_submission_creates_durable_episode": false] }
+        let submitted = generating && preparingContext && stop.isEnabled
+        stopGeneration()
+        let receipt = try store.episodeReceipt(id: lease.episodeID, clock: SystemEpisodeClock().now())
+        let events = try store.events(conversationID: chat.id)
+        // Wait for only this bounded local preparation queue, then let its
+        // stale main callback run. The test endpoint cannot reach a model.
+        preparationQueue.sync {}
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        let after = try store.episodeReceipt(id: lease.episodeID, clock: SystemEpisodeClock().now())
+        return [
+            "gui_submission_creates_durable_episode": submitted,
+            "gui_stop_during_preparation_closes_episode": receipt.state == .cancelled && !generating,
+            "gui_stop_preserves_accepted_human_and_cancelled_result": events.count == 2
+                && events.first?.role == .human && events.first?.status == .complete
+                && events.last?.role == .assistant && events.last?.status == .cancelled,
+            "gui_stale_preparation_cannot_dispatch": after.charged.modelCalls == 0 && after.charged.httpAttempts == 0
+                && pendingInvocationID.isEmpty && !generating && memoryHealthy
+        ]
+    }
+
+    private final class FinalizationClockForChecks: EpisodeClockSource {
+        var ticks: UInt64 = 1_000_000
+        func now() throws -> EpisodeClockSnapshot {
+            EpisodeClockSnapshot(domain: "synthetic-finalization-clock", continuousNanoseconds: ticks, utc: Date())
+        }
+    }
+
+    private func finalizationDeadlineChecks(store: MemoryStore) throws -> [String: Bool] {
+        let priorChat = activeChat, priorDraft = promptView.string
+        let transcript = NSAttributedString(attributedString: responseView.attributedString())
+        defer { activeChat = priorChat; replaceDraft(priorDraft); responseView.textStorage?.setAttributedString(transcript) }
+        let chat = try store.createConversation(projectID: projectID, title: "Synthetic finalization deadline")
+        let clock = FinalizationClockForChecks()
+        let episodeID = UUID().uuidString, turn = UUID().uuidString, human = UUID().uuidString
+        var limits = EpisodeLimits(); limits.deadlineMilliseconds = 1
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: turn, humanEventID: human,
+            episodeID: episodeID, text: "Synthetic finalization request", limits: limits, clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
+        let body = Data(#"{"messages":[],"stream":true}"#.utf8)
+        let work = try lease.prepare(kind: .answer, resources: EpisodeResources(inputTokens: 4, outputTokens: 8, modelCalls: 1, httpAttempts: 1),
+            adapterIdentity: "synthetic-finalization-adapter", snapshot: body)
+        activeChat = chat
+        pendingPrompt = "Synthetic finalization request"; pendingResponse = ""
+        pendingTurnID = turn; pendingHumanID = human; pendingAssistantID = UUID().uuidString
+        pendingInvocationID = UUID().uuidString; pendingChunkSequence = 0; pendingCaptureFailure = false
+        pendingRequestBody = body; pendingProviderIdentity = "native:synthetic"
+        pendingEpisode = lease; pendingAnswerWork = work
+        _ = try store.beginInvocation(invocationID: pendingInvocationID, conversationID: chat.id, turnID: turn,
+            humanEventID: human, assistantEventID: pendingAssistantID, providerIdentity: pendingProviderIdentity,
+            requestBody: body, episodeID: episodeID, episodeWorkID: work.id)
+        pendingInvocationStarted = true
+        _ = try lease.dispatch(work, start: {})
+        setGenerating(true)
+        receiveGenerationText("Synthetic committed finalization prefix")
+        let invocation = pendingInvocationID
+        clock.ticks = 2_000_000
+        completeGeneration(GenerationResult(elapsed: 0.001, tokensPerSecond: nil, failure: nil, stopped: false))
+        let stored = try store.invocation(id: invocation)!
+        let receipt = try store.episodeReceipt(id: episodeID, clock: clock.now())
+        return [
+            "gui_deadline_at_finalization_keeps_store_healthy": memoryHealthy && !generating,
+            "gui_deadline_at_finalization_publishes_partial_prefix": stored.finalStatus == .partial
+                && stored.terminalReason == .transportFailure && receipt.state == .deadlineExceeded,
+            "gui_deadline_at_finalization_preserves_unknown_output": receipt.held.outputTokens == 8
+                && receipt.charged.inputTokens == 4 && status.stringValue.contains("time limit")
+        ]
+    }
+
+    private func nativeCleanupChecks(store: MemoryStore) throws -> [String: Bool] {
+        let priorChat = activeChat, priorDraft = promptView.string
+        let oldModel = modelField.stringValue, oldRuntime = runtimeField.stringValue
+        let oldProfile = selectedProfile
+        let transcript = NSAttributedString(attributedString: responseView.attributedString())
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("boros-native-cleanup-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: false)
+        defer {
+            try? FileManager.default.removeItem(at: scratch)
+            modelSelector.selectItem(at: ModelProfile.selectableProfiles.firstIndex(of: oldProfile)!); selectModel()
+            modelField.stringValue = oldModel; runtimeField.stringValue = oldRuntime
+            activeChat = priorChat; replaceDraft(priorDraft); responseView.textStorage?.setAttributedString(transcript)
+        }
+        let runtime = scratch.appendingPathComponent("synthetic-runtime")
+        let model = scratch.appendingPathComponent("synthetic-model")
+        try Data("Synthetic placeholder, never loaded by a model.".utf8).write(to: model)
+        // A short flushed prefix must arrive before EOF or a full read buffer.
+        let script = "#!/usr/bin/python3\nimport signal,time,sys\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nsys.stdout.write('Synthetic native prefix ' * 20); sys.stdout.flush()\nwhile True: time.sleep(0.05)\n"
+        try Data(script.utf8).write(to: runtime)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: runtime.path)
+        activeChat = try store.createConversation(projectID: projectID, title: "Synthetic native cleanup")
+        modelSelector.selectItem(at: ModelProfile.selectableProfiles.firstIndex(of: .bonsai)!); selectModel()
+        modelField.stringValue = model.path; runtimeField.stringValue = runtime.path
+        replaceDraft("Synthetic native cancellation request")
+        sendPrompt()
+        let startupLimit = Date().addingTimeInterval(10)
+        while Date() < startupLimit && (!pendingInvocationStarted || pendingResponse.isEmpty) {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        let started = pendingInvocationStarted && runner.isRunning && !pendingResponse.isEmpty
+        stopGeneration()
+        let gated = generating && !send.isEnabled && runner.isRunning
+        let cleanupLimit = Date().addingTimeInterval(6)
+        while Date() < cleanupLimit && (generating || runner.isRunning) {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        if generating { runner.cancel() }
+        return [
+            "native_cleanup_fixture_starts_owned_synthetic_process": started,
+            "native_stop_keeps_send_disabled_until_cleanup": gated,
+            "native_cleanup_callback_releases_send_without_busy_retry": !generating && !runner.isRunning && send.isEnabled && memoryHealthy,
+            "native_stop_late_content_is_not_capture_failure": !status.stringValue.contains("capture failed")
+        ]
     }
 
     // Exercise the actual controls in an undisplayed window. No system input,
@@ -1177,6 +1414,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 preferences.conversationID = activeChat.id; savePreferences()
                 self.activeChat = activeChat; restoreActiveConversation()
                 checks["conversation_reload_restores_full_history"] = responseView.string.contains(human.text) && responseView.string.contains(partial.text)
+                checks.merge(try coordinatorStopChecks(store: store)) { _, new in new }
+                checks.merge(try finalizationDeadlineChecks(store: store)) { _, new in new }
+                checks.merge(try nativeCleanupChecks(store: store)) { _, new in new }
                 let cases: [(String, String?, Bool, CaptureStatus)] = [
                     ("Synthetic truncated bytes", "io_failed", false, .partial),
                     ("", "http_failed", false, .failed),
@@ -1314,6 +1554,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
 }
 
 private enum SmokeTest {
+    private struct SmokeAdmissionAudit: Codable {
+        let receipt: EndpointAdmissionReceipt?
+        let context: Data?
+    }
     static func run() -> Never {
         var settings = GenerationSettings()
         settings.temperature = 0
@@ -1350,21 +1594,56 @@ private enum SmokeTest {
             }
         }
         let runner = ModelRunner()
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("boros-smoke-" + UUID().uuidString, isDirectory: true)
+        let owner: MemoryStore
+        let chat: StoredConversation
+        do {
+            owner = try MemoryStore(directory: scratch)
+            chat = try owner.createConversation(projectID: "synthetic-smoke", title: "Synthetic smoke")
+        } catch { print("{\"pass\":false,\"failure\":\"capture_failure\"}"); exit(1) }
         var answer = ""
         var conversation = Conversation()
         var turn = 0
+        var admissionOperation: ProviderAdmissionOperation?
         func runTurn() {
             let prompt = greetingOnly ? "hi" : turn == 0 ? "Compute 17 + 25. Reply with only the integer."
                 : "Add one to your last answer. Reply with only the integer."
             answer = ""
-            runner.start(prompt: prompt, settings: settings, conversation: conversation,
-                         onText: { answer += $0 }, onComplete: { result in
+            let turnID = UUID().uuidString, humanID = UUID().uuidString, assistantID = UUID().uuidString
+            let invocationID = UUID().uuidString, episodeID = UUID().uuidString
+            let clock = SystemEpisodeClock()
+            let lease = EpisodeLease(ledger: owner, episodeID: episodeID, clock: clock)
+            var frozenSettings = settings
+            frozenSettings.episodeLease = lease
+            var invocationStarted = false
+            var chunkSequence = 0
+            var captureFailed = false
+            var snapshot: ContextSnapshot?
+            func complete(_ result: GenerationResult) {
                 let finalAnswer = settings.profile.finalAnswer(answer)
                 let trimmed = finalAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
                 let expected = greetingOnly
                     ? trimmed.count < 500 && trimmed.range(of: "\\b(?:hello|hi|hey)\\b", options: [.regularExpression, .caseInsensitive]) != nil
                     : trimmed == (turn == 0 ? "42" : "43")
-                let passed = result.failure == nil && !result.stopped && expected
+                var passed = result.failure == nil && !result.stopped && !captureFailed && expected
+                let terminal: EpisodeState = result.failure == "episode_deadline_exceeded" ? .deadlineExceeded
+                    : result.failure == "episode_budget_exceeded" ? .budgetExceeded
+                    : result.stopped ? .cancelled : passed ? .completed : .failed
+                var resolved = result
+                do { resolved = result.reconcilingEpisodeState(try lease.finish(reason: terminal).state) }
+                catch { passed = false }
+                passed = passed && resolved.failure == nil && !resolved.stopped
+                let capture: CaptureStatus = passed ? .complete : answer.isEmpty ? (resolved.stopped ? .cancelled : .failed) : .partial
+                do {
+                    if invocationStarted {
+                        _ = try owner.finalizeInvocation(invocationID: invocationID, status: capture,
+                            reason: passed ? .completed : resolved.stopped ? .cancelled : captureFailed ? .captureFailure : .transportFailure,
+                            usageJSON: try result.providerUsage.map { try JSONEncoder().encode($0) })
+                    } else {
+                        _ = try owner.append(conversationID: chat.id, role: .assistant, text: "", status: capture,
+                            turnID: turnID, eventID: assistantID)
+                    }
+                } catch { passed = false }
                 if passed && turn == 0 && !greetingOnly {
                     conversation.append(user: prompt, assistant: answer)
                     turn = 1
@@ -1374,21 +1653,100 @@ private enum SmokeTest {
                 var metadata: [String: Any] = ["pass": passed, "turns_checked": turn + 1,
                     "test": greetingOnly ? "greeting" : "multi_turn_arithmetic",
                     "elapsed_seconds": result.elapsed,
-                    "failure": result.failure ?? (passed ? "none" : "answer_mismatch")]
+                    "failure": resolved.failure ?? (captureFailed ? "capture_failure" : passed ? "none" : "answer_mismatch")]
+                if let receipt = try? owner.episodeReceipt(id: episodeID, clock: clock.now()) {
+                    metadata["episode_state"] = receipt.state.rawValue
+                    metadata["charged_input_tokens"] = receipt.charged.inputTokens
+                    metadata["charged_output_tokens"] = receipt.charged.outputTokens
+                    metadata["held_output_tokens"] = receipt.held.outputTokens
+                    metadata["model_calls"] = receipt.charged.modelCalls
+                    metadata["http_attempts"] = receipt.charged.httpAttempts
+                    metadata["raw_source_bytes"] = receipt.charged.rawSourceBytes
+                    metadata["unknown_input_operations"] = receipt.unknownInputOperations
+                }
                 if settings.profile != .bonsai {
                     metadata["thinking_enabled"] = settings.thinkingEnabled
                     metadata["thinking_closed"] = !settings.thinkingEnabled || answer.contains("</think>")
                     metadata["response_characters"] = answer.count
                     if !greetingOnly {
                         metadata["expected_integer_present"] = answer.contains(turn == 0 ? "42" : "43")
-                        metadata["final_is_integer"] = Int(finalAnswer.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+                        metadata["final_is_integer"] = Int(trimmed) != nil
                     }
                 }
                 if let speed = result.tokensPerSecond { metadata["tokens_per_second"] = speed }
-                if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]),
-                   let text = String(data: data, encoding: .utf8) { print(text) }
+                if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]) {
+                    print(String(decoding: data, as: UTF8.self))
+                }
+                try? FileManager.default.removeItem(at: scratch)
                 exit(passed ? 0 : 1)
-            })
+            }
+            func dispatch(_ admitted: GenerationSettings, body: Data) {
+                var ready = admitted
+                do {
+                    let work = try lease.prepare(kind: admitted.profile == .customLocal ? .answer : .nativeInference,
+                        resources: EpisodeResources(inputTokens: admitted.endpointAdmission?.promptTokens ?? 0,
+                            outputTokens: admitted.maximumOutput, modelCalls: 1, httpAttempts: admitted.profile == .customLocal ? 1 : 0),
+                        adapterIdentity: admitted.endpointAdmission?.answerAdapterIdentity ?? ("native:" + admitted.profile.rawValue),
+                        snapshot: body, inputTokensKnown: admitted.profile == .customLocal)
+                    ready.preparedAnswerWork = work
+                    let audit = try JSONEncoder().encode(SmokeAdmissionAudit(receipt: admitted.endpointAdmission,
+                        context: try snapshot?.deliveryAudit()))
+                    _ = try owner.beginInvocation(invocationID: invocationID, conversationID: chat.id, turnID: turnID,
+                        humanEventID: humanID, assistantEventID: assistantID,
+                        providerIdentity: admitted.profile == .customLocal ? LocalEndpoint.chatURL(admitted.endpointURL)!.absoluteString : "native:" + admitted.profile.rawValue,
+                        requestBody: body, admissionJSON: audit, episodeID: episodeID, episodeWorkID: work.id)
+                    invocationStarted = true
+                } catch {
+                    complete(GenerationResult(elapsed: 0, tokensPerSecond: nil,
+                        failure: (error as? EpisodeBudgetError)?.failureCode ?? "capture_failure", stopped: false))
+                    return
+                }
+                runner.start(prompt: prompt, settings: ready, conversation: conversation, onText: { text in
+                    do {
+                        _ = try lease.checkActive()
+                        _ = try owner.appendInvocationChunk(invocationID: invocationID, sequence: chunkSequence, text: text)
+                        chunkSequence += 1
+                        answer += text
+                    } catch { captureFailed = true; runner.cancel() }
+                }, onComplete: complete)
+            }
+            do {
+                _ = try owner.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: turnID, humanEventID: humanID,
+                    episodeID: episodeID, text: prompt, limits: EpisodeLimits(), clock: clock.now())
+                let context = try ChatContextPreparation.prepare(store: owner, conversationID: chat.id, projectID: chat.projectID,
+                    prompt: prompt, system: frozenSettings.system, excludingEventID: humanID, episodeLease: lease)
+                snapshot = context
+                frozenSettings.messagesOverride = context.messages.map { ["role": $0.role, "content": $0.content] }
+                if frozenSettings.profile == .customLocal {
+                    let body = try EndpointRequest.build(prompt: prompt, settings: frozenSettings, conversation: conversation)
+                    frozenSettings.preparedEndpointBody = body
+                    admissionOperation = ProviderAdmission.prepare(requestBody: body, address: frozenSettings.endpointURL,
+                        apiKey: frozenSettings.endpointAPIKey, contextLimit: frozenSettings.endpointContextLimit,
+                        safetyTokens: frozenSettings.endpointSafetyTokens, episodeLease: lease) { outcome in
+                        DispatchQueue.main.async {
+                            // Retain the operation through the completion
+                            // handoff; it owns the in-flight admission state.
+                            withExtendedLifetime(admissionOperation) { admissionOperation = nil }
+                            switch outcome {
+                            case .success(let receipt):
+                                var admitted = frozenSettings; admitted.endpointAdmission = receipt
+                                dispatch(admitted, body: body)
+                            case .failure(let error):
+                                complete(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: error.failureCode, stopped: false))
+                            }
+                        }
+                    }
+                } else {
+                    let body = frozenSettings.profile == .bonsai
+                        ? try NativeRequest.completionEvidence(prompt: prompt, settings: frozenSettings, conversation: conversation)
+                        : try NativeRequest.reasoningBody(prompt: prompt, settings: frozenSettings, conversation: conversation)
+                    if frozenSettings.profile != .bonsai { frozenSettings.preparedNativeBody = body }
+                    dispatch(frozenSettings, body: body)
+                }
+            } catch {
+                complete(GenerationResult(elapsed: 0, tokensPerSecond: nil,
+                    failure: (error as? EpisodeBudgetError)?.failureCode ?? "capture_failure", stopped: false))
+            }
         }
         runTurn()
         dispatchMain()
@@ -1414,6 +1772,13 @@ private enum BonsaiPlayground {
                 print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
                 exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"semantic_self_test\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--episode-self-test") {
+            do {
+                let checks = try EpisodeChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"episode_self_test\":false}"); exit(1) }
         }
         if CommandLine.arguments.contains("--memory-self-test") {
             do {
