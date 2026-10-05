@@ -59,6 +59,13 @@ def main():
         total += importer_report["checks"]
         if importer.returncode or importer_report["failed"] or importer_report["skipped"]:
             return 1
+        imported_evaluation = subprocess.run([sys.executable, str(ROOT / "scripts/test_imported_chat_evaluation.py")],
+                                             capture_output=True, text=True, env=env, timeout=180)
+        evaluation_report = json.loads(imported_evaluation.stdout)
+        print(json.dumps({"suite": "imported-chat-evaluation", **evaluation_report}))
+        total += evaluation_report["checks"]
+        if imported_evaluation.returncode or evaluation_report["failed"] or evaluation_report["errors"] or evaluation_report["skipped"]:
+            return 1
     print(json.dumps({"total_checks": total, "passed": True}))
     return 0
 

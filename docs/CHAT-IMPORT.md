@@ -87,6 +87,8 @@ BOROS_IMPORT_BINARY="$PWD/.build/boros/Boros.app/Contents/MacOS/Boros" \
 
 Checks use synthetic fixtures and temporary stores. Official benchmark questions, gold answers, scoring, provider token feasibility, repeated history comparisons, and registered benchmark reports require a separate answering harness and the original benchmark protocol.
 
+With the answering server stopped, use the [offline imported-chat diagnostic](IMPORTED-CHAT-EVALUATION.md) to compare recent-only, lexical, hybrid, and exact-page source recovery. It reads this import into a disposable store and produces content-free coverage/accounting reports; it does not generate answers or apply the official BEAM protocol.
+
 ## October 5, 2026 development evidence
 
 The native application built successfully. The existing 1,673 application checks passed, and the final focused importer suite passed 12 tests with no skips. Importer checks include Python-to-native JSONL selection, exact Unicode/whitespace and role/status preservation, duplicate keys including escaped spellings, unsupported roles/fields, oversized messages, invalid later messages during prefix selection, source hash mismatch, refused destinations, source provenance, reopened SQLite readback, and a real SIGKILL during unpublished staging.

@@ -36,11 +36,14 @@ python3 scripts/test_semantic_recovery.py
 python3 scripts/test_backup.py
 python3 scripts/test_evaluation.py
 BOROS_IMPORT_BINARY="$PWD/.build/boros/Boros.app/Contents/MacOS/Boros" python3 scripts/test_chat_import.py
+python3 scripts/test_imported_chat_evaluation.py
 ```
 
 Use New Chat to start another retained conversation, the chat picker to reopen one, and Search Memory to inspect source events. The initial UI uses the `default` project. Chats and drafts are saved under `~/Library/Application Support/Boros`; `BOROS_DATA_DIR` selects an isolated store for development.
 
 For long public histories, [the chat importer](docs/CHAT-IMPORT.md) loads BEAM, DevGPT, ShareGPT, or role-message JSON into a new private test store. It preserves exact source text and roles, verifies complete readback before publication, and can open the imported chat for normal follow-up questions.
+
+With the answering model stopped, [the offline imported-chat runner](docs/IMPORTED-CHAT-EVALUATION.md) compares recent-only, lexical, hybrid, and exact-page source recovery in disposable stores. It reports source coverage, read-episode resources, semantic holes and timing without printing chat text or generating answers.
 
 Accepted messages persist before dispatch; received answer chunks commit before display and interrupted attempts recover with an explicit incomplete status. Ordinary Send includes recent history and scoped lexical/semantic archive excerpts, excluding recent sources before candidate limits. Semantic retrieval uses an installed Apple English sentence encoder; unavailable or unsupported inputs retain lexical retrieval. Coverage gaps are recorded and surfaced. Search Memory provides scoped literal/lexical search and exact source pages.
 
