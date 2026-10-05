@@ -184,6 +184,9 @@ def delivered_coverage(history, probe, ranges, recent_ids):
         coverage.append(cursor >= end)
     return {"required_span_count": len(coverage), "covered_span_count": sum(coverage),
             "all_required_spans_delivered": all(coverage) if coverage else None,
+            "covered_required_source_ids": sorted({span["eventID"] for span in probe["goldSpans"]
+                if all(covered for gold, covered in zip(probe["goldSpans"], coverage)
+                       if gold["eventID"] == span["eventID"])}),
             "citation_correctness": None, "sufficient_evidence_token_feasibility": None}
 
 
@@ -191,7 +194,9 @@ def compile_driver(scratch: Path):
     """Compile an immutable copied source snapshot, binding the binary to it."""
     files = sorted(ROOT.glob("Sources/**/*.swift")) + sorted((ROOT / "Sources/CSQLite").glob("*"))
     files += [ROOT / "scripts/evaluate_answers.py", ROOT / "scripts/test_answer_evaluation.py",
-              ROOT / "scripts/evaluation_fixtures.py"]
+              ROOT / "scripts/evaluation_fixtures.py", ROOT / "scripts/devgpt_answer_cases.py",
+              ROOT / "scripts/evaluate_developer_answers.py", ROOT / "scripts/answer_rubrics.py",
+              ROOT / "scripts/test_answer_rubrics.py", ROOT / "scripts/test_developer_answer_evaluation.py"]
     hashes = {}
     captured = scratch / "captured-source"
     for path in files:
@@ -388,7 +393,7 @@ def native_metadata(native):
     return content_free_metadata({key: value for key, value in native.items() if key != "attempts"})
 
 
-def score_driver_report(native, directory, history, requested):
+def score_driver_report(native, directory, history, requested, task_scorer=None):
     if not isinstance(native, dict) or type(native.get("version")) is not int or native["version"] != 1:
         raise EvaluationError("invalid driver report version")
     raw = native.get("attempts")
@@ -417,7 +422,8 @@ def score_driver_report(native, directory, history, requested):
                 probe = probe_map[request["probe_id"]]
                 results.append({"ordinal": ordinal, "probe_id": request["probe_id"], "strategy": request["strategy"],
                                 "replicate": request["replicate"], "category": probe["category"],
-                                "operational_complete": False, "task_score": factual_score(history, probe, "", False),
+                                "operational_complete": False, "task_score": (task_scorer(history, probe, "", False, coverage)
+                                    if task_scorer else factual_score(history, probe, "", False)),
                                 "answer_bytes": None, "answer_sha256": None, "delivered_coverage": coverage,
                                 "oracle_scoring_milliseconds": (time.monotonic() - started) * 1000, "metadata": metadata})
                 continue
@@ -442,7 +448,8 @@ def score_driver_report(native, directory, history, requested):
                         "resources": None, "capture_status": None}
         started = time.monotonic()
         probe = probe_map[request["probe_id"]]
-        task_score = factual_score(history, probe, answer, operational)
+        task_score = (task_scorer(history, probe, answer, operational, coverage)
+                      if task_scorer else factual_score(history, probe, answer, operational))
         results.append({"ordinal": ordinal, "probe_id": request["probe_id"], "strategy": request["strategy"],
                         "replicate": request["replicate"], "category": probe["category"],
                         "operational_complete": operational, "task_score": task_score,

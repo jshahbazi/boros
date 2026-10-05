@@ -14,17 +14,17 @@ The design goal is evidence-backed continuity within bounded context and resourc
 
 | Snapshot | Status |
 |---|---|
-| Latest verified code wave | Shared selected-Qwen GUI/diagnostic coordinator, explicit retrieval strategies and pinned public answering driver; exact source hashes in the verification record |
+| Latest verified code wave | Three additional pinned public developer histories, strict exact-answer/citation/abstention scorer and native projection allowlist; shared selected-Qwen GUI/diagnostic coordinator retained |
 | Latest preceding evidence documentation | `9ea5c90`: traced failures and controlled long-chat results |
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
-| Latest recorded application verification | **2,162 checks passed** on a copied source snapshot matching the current Swift sources; strict deep development signature verification passed |
+| Latest recorded application verification | **2,218 checks passed** on a copied source snapshot matching the current Swift sources; five additional native public-case checks passed; strict deep development signature verification passed |
 | Latest imported-chat result | Lexical, hybrid, and exact-page paths each recovered 12/12 selected answerable probes in warm and process-restart profiles |
 | Answering model | Configured Qwen completed the public paired diagnostic on October 5; one initial admission failure and two partial outputs retained |
-| Running GUI/build freshness | `.build/boros/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
+| Running GUI/build freshness | `.build/boros-n3/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
 | Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
-**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **Next:** N3 independent developer-history cases and frozen correction/cross-message/abstention/citation rubrics, then N4 failure-driven improvements and N5 workload scaling. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
+**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3 progress:** three fixed DevGPT histories and exact-answer/cross-message/citation/abstention contracts now pass controlled native checks; live execution, natural questions, actual correction cases and sufficient-evidence feasibility remain pending. **Next:** execute this frozen amendment, then N4 failure-driven improvements and N5 workload scaling. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
 
 ### Status labels
 
@@ -146,7 +146,7 @@ Ordinary selected-Qwen Send and the diagnostic use `AnswerAttemptCoordinator`. A
 |---|---|---|
 | `ContextRetrievalStrategy` and preparation | Explicit recent-only avoids historical payload, metadata/vector and query-encoder work; hybrid retains the current scoped selector | Recent-only still reads bounded recent messages; nil semantic index remains lexical retrieval |
 | Shared coordinator and GUI | Controlled success, incomplete/cancelled output, stale callbacks, runner ownership, post-acceptance host-save failure and Stop after the first durable visible chunk | Client cancellation cannot prove immediate server compute cancellation |
-| `AnswerEvaluationCommand` and Python scorer | Exact pinned public corpus, all 18 paired attempts, restored overlays, per-hybrid Apple construction, quiescent measurement, oracle separation and content-free reports | One development history; literal factual-marker rubric; broader categories and representative quality gates remain unfinished |
+| `AnswerEvaluationCommand` and Python scorer | Original 18-attempt pilot plus three fixed public DevGPT projections; restored overlays, per-hybrid Apple construction, quiescent measurement, oracle separation and content-free reports | New 24-attempt amendment passes controlled transport; live run pending; targeted reproduction and partial category coverage leave representative gates unfinished |
 
 The contract and invocation are in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md). The first paired Qwen diagnostic completed; controlled transport is verified. A wrong task answer remains an operationally complete captured invocation. Fatal/missing/timeout attempts retain their declared denominators with explicit unknown accounting.
 
@@ -158,7 +158,8 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 
 | Surface | Recorded result | Evidence boundary |
 |---|---|---|
-| Shared answering source wave | **2,162 application checks passed**; strict deep signature verification | Copied source matches current Swift files; includes 517 preparation/strategy/coordinator checks, 93 GUI self-checks and 20 answering contracts |
+| Shared answering source wave | **2,162 application checks passed**; strict deep signature verification | Preceding answering-wave source snapshot; includes 517 preparation/strategy/coordinator checks, 93 GUI self-checks and 20 answering contracts |
+| Public developer-history amendment | **2,218 application checks passed**; strict deep signature verification; five additional native checks | Copied Swift source matches amendment; 29 rubric and 27 developer contracts included; separate 32-check public suite overlaps those 27, runs all 24 native attempts against controlled Qwen and verifies killed-child cleanup ownership |
 | Earlier intended import/retrieval source snapshot | **1,700 application checks passed**; strict deep signature verification | Tracked-source closure plus intended changes; unrelated answering edits excluded |
 | Public-chat importer | **12 focused tests passed**, no skips | Strict formats, bytes/roles/statuses, provenance, refused replacement and staging SIGKILL |
 | Imported-chat runner after fixes | **10 focused tests passed**, no skips | Source-bound scoring, isolation, budgets, restart and excerpt/page regression fixtures |
@@ -169,7 +170,15 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 | Historical live Qwen smoke | Two public arithmetic turns passed at `b006b6a` | Connectivity, admission, capture/accounting; no long-history quality evidence |
 | Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
 
-Latest verification record: `.build/evaluation/answer-wave-verification-20261005.json`. Verified bundle: `.build/boros/Boros.app`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+Latest verification record: `.build/evaluation/devgpt-wave-verification-20261005.json`. Verified bundle: `.build/boros-n3/Boros.app`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+
+### Public developer-history amendment
+
+Three source-pinned DevGPT PR-linked histories contain 138 serialized events and 75,221 text bytes. The native allowlist accepts their exact oracle-free projections; scorer oracles have separate frozen hashes. Duplicate messages and sharing identities are rejected. Original generation completion, code-block reconstruction and original timestamp indexing remain unknown/unsupported. Distinct sharing identities do not establish independent authors or representative histories.
+
+Each history declares historical, ordered cross-message and later-line reproduction plus a corpus-verified absent identifier, paired across both strategies: 24 attempts. The frozen exact JSON rubric separates answer, citation and abstention correctness, and requires validated delivered gold ranges for citation support. Correction scoring passes synthetic contracts; no public correction cases are frozen. Source-derived anchors and constrained reproduction questions do not establish natural developer reasoning.
+
+All 24 native attempts completed against controlled Qwen transport with intentionally incorrect output and zero task credit. Overlays remained isolated, actual projection digests matched, per-hybrid background construction and foreground accounting were retained, and reports contained no chat text. Live Qwen answering is pending. The amendment reserves 2,048 output tokens before any model results; its spend/latency must not be pooled with the 128-token pilot. Provider-rendered sufficient-gold-evidence feasibility remains unmeasured. See [the source amendment](DEVELOPER-ANSWER-EVALUATION.md) and [rubric contract](ANSWER-RUBRICS.md).
 
 ### First paired production answering diagnostic
 
@@ -249,7 +258,7 @@ The user authorized completion of the full planned architecture on October 5, 20
 |---|---|---|---|
 | N1 | Shared Qwen coordinator and retrieval strategies integrated | Prerequisite for production-path comparison implemented | 2,162 passing checks and rebuilt matching-source app; original lease, controlled GUI/runner parity, durable delivery, Stop/late callbacks and ownership verified |
 | N2 | First paired answering driver/scorer implemented and executed | N1 verified; all 18 attempts from the pinned public development history | 15/18 operational completions; hybrid 6/6 and recent-only 1/6 literal factual successes; every failure retained; complete quality gate inconclusive |
-| N3 | Add independent developer-history/imported-chat answering cases | Current probes targeted and mixed-domain; N2 initially uses public synthetic fixtures | Provenance, timestamp treatment, isolated questions, source/answer rubrics and sufficient-evidence feasibility; factual, temporal, follow-up, cross-message and absence cases supported by current contracts |
+| N3 | Add independent developer-history/imported-chat answering cases — partial | Three pinned DevGPT histories, source-anchored questions and strict rubrics now pass controlled native checks | Live run, natural-question annotations, actual corrections, immediate follow-ups, chronology and sufficient-evidence provider feasibility remain; no representative claim |
 | N4 | Improve baseline where N2/N3 expose failures | Semantic exclusions and query/excerpt limits are concrete risks | Distinguish retrieval/preparation/answerer/budget failures; independent confirmation after fixes; lexical/hybrid support comparison; preserve metering |
 | N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
 | N6 | Implement standing-policy/task lifecycle | Required for scoped-instruction category and durable correction semantics | Authenticated scope/conflict/expiry/reopen operations; control epoch and stale handoff/output fences |
@@ -326,8 +335,8 @@ All confidence bounds above are the specified 95% bounds. Replicates and tree bu
 |---|---|---|
 | Immediate milestone | N1–N2 first diagnostic complete; N3–N5 next | Independent histories/rubrics, admission reliability attribution and representative scaling; retain optional feature gates |
 | Answering runtime | Configured Qwen executed the first paired diagnostic | Retain initial admission failure and unknown output hold; establish startup/warm reliability before representative measurements |
-| Representative histories | Generated mixed-domain import and synthetic fixtures | Public/sanitized developer histories, provenance/times and independent questions |
-| Rubrics | Factual contract exists; other dimensions incomplete | Correction, cross-message, citation and abstention scoring before claiming results |
+| Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories | Live diagnostic pending; independent authors, natural questions, original times and representative workload unestablished |
+| Rubrics | Literal factual pilot and frozen strict exact-answer/cross-message/citation/abstention contracts; synthetic correction checks | Actual public correction cases, semantic reasoning and scoped lifecycle remain unmeasured/unimplemented |
 | Semantic direction | Narrow Apple support on import | Measure code/paraphrase needs before choosing new encoder, lexical chunks or reranker |
 | Caps/machine envelope | Development defaults exist | Archive/capture/query frequency, backlog, contention and hardware measurements |
 | Client/authority scope | One native owner | Decide when another client or durable policy state warrants service/gate contracts |
@@ -348,6 +357,8 @@ Hidden reasoning capture, unrestricted orchestration, universal exactly-once act
 | [Chat import](CHAT-IMPORT.md) | Formats, publication/provenance and limits |
 | [Imported-chat evaluation](IMPORTED-CHAT-EVALUATION.md) | Offline protocol, traces and results |
 | [Answering diagnostic](ANSWER-EVALUATION.md) | Shared path, isolated pilot and runner/scorer contract |
+| [Developer answering amendment](DEVELOPER-ANSWER-EVALUATION.md) | Pinned public histories, exact quotes/citations/absence and remaining N3 limits |
+| [Exact-answer rubrics](ANSWER-RUBRICS.md) | Strict response, source/citation support and correction/abstention scoring contracts |
 | [Evaluation](EVALUATION.md) | Pins/statistics and remaining quality/economics |
 | [Context components](CONTEXT-COMPONENTS.md) | Qwen caps/reductions/proofs |
 | [Provider admission](PROVIDER-ADMISSION.md) | Compatibility/rendering/counts |

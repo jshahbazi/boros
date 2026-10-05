@@ -59,6 +59,15 @@ def main():
         total += answering_report["checks"]
         if answering.returncode or answering_report["failed"] or answering_report["errors"] or answering_report["skipped"]:
             return 1
+        for name, script in (("answer-rubrics", "test_answer_rubrics.py"),
+                             ("developer-answer-evaluation", "test_developer_answer_evaluation.py")):
+            checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
+                                     capture_output=True, text=True, env=env, timeout=60)
+            report = json.loads(checked.stdout)
+            print(json.dumps({"suite": name, **report}))
+            total += report["checks"]
+            if checked.returncode or report["failed"] or report["errors"] or report["skipped"]:
+                return 1
         importer = subprocess.run([sys.executable, str(ROOT / "scripts/test_chat_import.py"),
                                    "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=90)
         importer_report = json.loads(importer.stdout)

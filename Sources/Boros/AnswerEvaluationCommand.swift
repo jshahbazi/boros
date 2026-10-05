@@ -10,6 +10,13 @@ enum AnswerEvaluationCommand {
     /// "development", history_count=1) through evaluate_answers.runner_input.
     /// Updating this pin requires an explicit diagnostic source amendment.
     static let publicCorpusProjectionSHA256 = "6ca035c6bb87f23b75c59c8529a0181667e8ece0cc838056139d009f0c501bb4"
+    /// N3 source amendment: three exact oracle-free DevGPT projections. This
+    /// remains an allowlist, never a general arbitrary-history interface.
+    static let developerCorpusProjectionSHA256: Set<String> = [
+        "3ce6a107744a380f2b1f047bbfcacae380bb396cc14cc23c8108d8c240d1d091",
+        "9d2a765385191a91562e52312ad906338aba99c7cf46aa144497e7b7047fff41",
+        "0ac2f9963c690db4365792fbd2f0f82dfc0929baf15df535caa41f29bef9bd38"
+    ]
     private enum Failure: Error { case arguments, invalid, io }
     private struct Event: Decodable {
         let id: String
@@ -70,7 +77,8 @@ enum AnswerEvaluationCommand {
             let bytes = try readPrivateInput(input)
             let document = try decode(bytes)
             try createNewDirectory(output)
-            let session = try Session(document: document, inputDigest: digest(bytes), output: output)
+            let session = try Session(document: document, inputDigest: digest(bytes),
+                projectionDigest: projectionSHA256(bytes), output: output)
             DispatchQueue.global(qos: .userInitiated).async { session.begin() }
             dispatchMain()
         } catch Failure.arguments {
@@ -94,8 +102,10 @@ enum AnswerEvaluationCommand {
               Set(configuration.keys) == ["endpoint", "model", "system", "temperature", "seed", "thinking", "maximum_output", "context_limit", "safety_tokens"] else { throw Failure.invalid }
         var publicProjection = root
         publicProjection.removeValue(forKey: "configuration")
-        guard digest(try JSONSerialization.data(withJSONObject: publicProjection,
-            options: [.sortedKeys, .withoutEscapingSlashes])) == publicCorpusProjectionSHA256 else { throw Failure.invalid }
+        let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
+            options: [.sortedKeys, .withoutEscapingSlashes]))
+        guard projectionDigest == publicCorpusProjectionSHA256 ||
+            developerCorpusProjectionSHA256.contains(projectionDigest) else { throw Failure.invalid }
         let value = try JSONDecoder().decode(Document.self, from: bytes)
         guard value.version == 1, value.split == "development", identifier(value.history_id),
               !value.events.isEmpty, value.events.count <= 100_000,
@@ -124,9 +134,16 @@ enum AnswerEvaluationCommand {
         return value
     }
 
+    private static func projectionSHA256(_ bytes: Data) throws -> String {
+        guard var projection = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.invalid }
+        projection.removeValue(forKey: "configuration")
+        return digest(try JSONSerialization.data(withJSONObject: projection, options: [.sortedKeys, .withoutEscapingSlashes]))
+    }
+
     private final class Session {
         let document: Document
         let inputDigest: String
+        let projectionDigest: String
         let output: URL
         let runtime: URL
         let archive: URL
@@ -135,15 +152,13 @@ enum AnswerEvaluationCommand {
         var baseline: [String: Any] = [:]
         var ordinal = 0
         var coordinator: AnswerAttemptCoordinator?
-        init(document: Document, inputDigest: String, output: URL) throws {
-            self.document = document; self.inputDigest = inputDigest; self.output = output
-            // Foundation can normalize /private/var back to the /var symlink.
-            // The native realpath witness preserves the physical ancestors
-            // required by the no-symlink diagnostic destination contract.
-            guard let temporaryPath = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.io }
-            defer { free(temporaryPath) }
-            runtime = URL(fileURLWithPath: String(cString: temporaryPath), isDirectory: true)
-                .appendingPathComponent("boros-answer-evaluation-" + UUID().uuidString, isDirectory: true)
+        init(document: Document, inputDigest: String, projectionDigest: String, output: URL) throws {
+            self.document = document; self.inputDigest = inputDigest; self.projectionDigest = projectionDigest; self.output = output
+            // Keep every store inside the checked private output owner. The
+            // Python supervisor can remove this subtree even if this process
+            // dies before native finalization. Direct CLI owners retain it on
+            // death until they remove their explicitly chosen output directory.
+            runtime = output.appendingPathComponent(".runtime-" + UUID().uuidString, isDirectory: true)
             archive = runtime.appendingPathComponent("checkpoint", isDirectory: true)
             try createNewDirectory(runtime)
         }
@@ -347,7 +362,7 @@ enum AnswerEvaluationCommand {
                 let c = document.configuration
                 let value: [String: Any] = ["version": 1, "diagnostic": "production-answer-development-v1",
                     "split": "development", "history_id": document.history_id, "input_sha256": inputDigest,
-                    "public_projection_sha256": publicCorpusProjectionSHA256,
+                    "public_projection_sha256": projectionDigest,
                     "fatal_failure": fatal as Any? ?? NSNull(), "declared_attempts": document.attempts.count,
                     "completed_attempts": report.filter { $0["terminalized"] as? Bool == true }.count, "baseline": baseline, "attempts": report,
                     "configuration": ["endpoint": c.endpoint, "model": c.model,

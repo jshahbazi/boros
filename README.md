@@ -38,6 +38,8 @@ python3 scripts/test_evaluation.py
 BOROS_IMPORT_BINARY="$PWD/.build/boros/Boros.app/Contents/MacOS/Boros" python3 scripts/test_chat_import.py
 python3 scripts/test_imported_chat_evaluation.py
 python3 scripts/test_answer_evaluation.py --binary "$PWD/.build/boros/Boros.app/Contents/MacOS/Boros"
+python3 scripts/test_answer_rubrics.py
+python3 scripts/test_developer_answer_evaluation.py
 ```
 
 Use New Chat to start another retained conversation, the chat picker to reopen one, and Search Memory to inspect source events. The initial UI uses the `default` project. Chats and drafts are saved under `~/Library/Application Support/Boros`; `BOROS_DATA_DIR` selects an isolated store for development.
@@ -53,6 +55,8 @@ python3 scripts/evaluate_answers.py --output .build/evaluation/public-answer-pil
 ```
 
 The output must be new. Validation/held-out data, arbitrary corpus/store paths and oracle fields are refused. The diagnostic does not establish representative quality, semantic correctness of prose, provider feasibility, or the full five-category evaluation gate.
+
+The [public developer-history amendment](docs/DEVELOPER-ANSWER-EVALUATION.md) adds three pinned DevGPT histories and 24 paired attempts, with frozen exact-quote, cross-message, citation and abstention scoring. It requires the exact pinned public source file and uses separate oracle-free native projections. Its source-derived questions, chronology and code-placeholder limits remain explicit; representative reasoning and provider-feasibility evidence are pending.
 
 Accepted messages persist before dispatch; received answer chunks commit before display and interrupted attempts recover with an explicit incomplete status. Ordinary Send includes recent history and scoped lexical/semantic archive excerpts, excluding recent sources before candidate limits. Semantic retrieval uses an installed Apple English sentence encoder; unavailable or unsupported inputs retain lexical retrieval. Coverage gaps are recorded and surfaced. Search Memory provides scoped literal/lexical search and exact source pages.
 
