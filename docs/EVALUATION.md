@@ -2,6 +2,8 @@
 
 Updated October 5, 2026. This is executable groundwork for the read-only baseline in [the plan](../tracechat-plan.md#13-evaluation-that-decides-the-design). Full Arm B, provider-answer evaluation, production economics, and held-out confirmation remain incomplete.
 
+The next [production-path answering diagnostic](ANSWER-EVALUATION.md) is under implementation. Retrieval-strategy focused checks pass; shared coordinator review and app integration remain in progress. No answer-quality comparison has run.
+
 ## Available evaluation
 
 `scripts/evaluate_retrieval.py` compiles a standalone Swift harness against copied store, context, semantic and episode dependencies. It writes public synthetic histories into isolated temporary stores, executes declared retrieval protocols, verifies original byte pages and gold spans, and removes those stores. Each protocol attempt creates a durable schema 5 `localRead` episode with a `syntheticEvaluation` binding and supplies its lease through context selection, search and paging. Attempts create no chat input or invocations. The JSON report contains source IDs, digests, terminal receipts, coverage and timings. It contains no prompts, answers, source text, credentials or private history. It contacts no model server.

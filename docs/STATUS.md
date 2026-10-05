@@ -2,7 +2,9 @@
 
 Updated October 5, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`.
 
-The current implementation checkpoint is **`b006b6a`**, committed and pushed. It integrates schema-5 background-index accounting with the native app and archives. Final verification passed **1,673 whole-app checks**, **455 background/full-source/process checks**, **183 backup checks**, **225 episode checks**, strict signature verification and two public live Qwen turns. Counts overlap. The complete [plan](../tracechat-plan.md) remains unfinished; current answer quality and economics remain unmeasured.
+The current implementation checkpoint is **`b006b6a`**, committed and pushed; its verification documentation was pushed at **`9757f75`**. It integrates schema-5 background-index accounting with the native app and archives. Final verification passed **1,673 whole-app checks**, **455 background/full-source/process checks**, **183 backup checks**, **225 episode checks**, strict signature verification and two public live Qwen turns. Counts overlap. The complete [plan](../tracechat-plan.md) remains unfinished; current answer quality and economics remain unmeasured.
+
+The working tree now contains the next answering-evaluation wave. Its retrieval strategy has focused checks passing. Coordinator lifecycle fixes and independent review are in progress; the new path has not been integrated into the GUI or evaluated against Qwen. These changes are excluded from the pushed checkpoint's verification totals.
 
 ## Work status
 
@@ -26,6 +28,9 @@ The current implementation checkpoint is **`b006b6a`**, committed and pushed. It
 | Semantic retrieval | Core protocol implemented | Installed Apple English encoder, derived sidecar, resumable jobs, coverage holes and replayable manifests; durable background budgets integrated | Whole-corpus coverage, installed-encoder quality and stronger validation against temporary source corruption |
 | Backup and restore | Schemas 1–5 verified and pushed | Frozen schemas 1–4; schema-5 inventory retains charges/unknowns and releases prepared holds on restore; 183 final standalone checks pass | Deletion-aware restore and retention/purge |
 | Evaluation accounting | Implemented; quality protocol pending | Isolated per-protocol read episodes, authoritative totals/time/outcome, structured coverage and capped attempts retained in denominators | Freeze a new development protocol after integration; run comparative answering measurements |
+| Evaluation retrieval controls | Working-tree implementation; focused checks passed | Explicit recent-only and hybrid strategies; recent-only avoids historical source work and query encoding | Integrate into the app and shared answer path; verify preparation parity |
+| Shared answer coordinator | Working-tree implementation; review in progress | Shared acceptance, original lease, preparation proofs, durable streaming and terminal accounting | Complete cancellation-drain and runner-ownership fixes; verify lifecycle and integrate into the GUI |
+| Answering diagnostic | Contract written; execution pending | Public development fixtures, isolated attempts, runner/scorer separation and content-free reports specified in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md) | Implement the driver and scoring, verify controlled transport, then run the first paired diagnostic |
 | Service, MCP and imports | Deferred | Native app owns the store in one process | Multi-client boundary when justified, read-only MCP and authenticated imports |
 | Policy and task lifecycle | Not started | Authorship and capture status retained | Authenticated lifecycle changes, expiry/reopen, grants and dependencies |
 | Revocation and deletion | Not started | Policy mutation and deletion features unavailable | Control epoch, output fencing, suppression, purge and deletion-aware restore |
@@ -41,11 +46,11 @@ Agents share the checkout and own distinct implementation surfaces. Component co
 | Owner | Owned surface | Current state | Evidence |
 |---|---|---|---|
 | Budget contract agent | Pure resource/window rules and checks; peer review of other owners | Implementation and peer review finished | 167 pure checks; publication, reboot and forged-anchor rechecks |
-| Ledger agent | Main-store schema, background journal and owner checks; historical fixtures | Integrated; answering-evaluation path report complete | 108 owner checks, 172 episode component checks and process recovery controls |
-| Worker agent | Semantic-index integration, worker, fixtures and component docs | Integrated and documented | 80 short checks; seven full 4 MiB checks across two windows |
-| Coordinating agent | Archives, wrappers, GUI integration, combined checks and status | Integrated and pushed | 1,673 app, 455 background/full-source/process, 225 episode and 183 backup checks; strict signature and live smoke |
+| Ledger agent | Shared selected-Qwen answer coordinator and focused checks | Lifecycle fixes in progress | Cancellation drain, concurrent Stop during acceptance and runner ownership under review |
+| Worker agent | Explicit recent-only/hybrid strategies; independent coordinator review | Strategy files frozen; app integration pending | Focused strategy checks pass; controlled preparation checks reported; coordinator review active |
+| Coordinating agent | GUI/diagnostic integration, runner/scorer separation and status | Evaluation integration in progress | Schema-5 checkpoint pushed; [answering diagnostic contract](ANSWER-EVALUATION.md) recorded |
 
-Peer review reproduced publication after a concurrent quarantine and a runtime/archive inconsistency in original window clock-anchor validation. The integrated fixes serialize the short sidecar publication commit with the owner eligibility gate and share intrinsic anchor validation. Actual contention checks prove concurrent owner mutation remains blocked through commit. Historical schema-1/2/3 fixtures were corrected to remove empty schema-5 tables before constructing older schemas; store validation remains strict. No material open defect remains in the reviewed paths.
+Peer review reproduced publication after a concurrent quarantine and a runtime/archive inconsistency in original window clock-anchor validation. The integrated fixes serialize the short sidecar publication commit with the owner eligibility gate and share intrinsic anchor validation. Actual contention checks prove concurrent owner mutation remains blocked through commit. Historical schema-1/2/3 fixtures were corrected to remove empty schema-5 tables before constructing older schemas; store validation remains strict. No material open defect remains in those reviewed background-indexing paths. Review of the new answer coordinator remains open.
 
 Temporary source corruption followed by restoration remains a known limitation: initial and final whole-source hashes do not prove every intervening embedding used the original bytes. Exact excerpt digests still gate delivery. Schema-5 restore preserves archived accounting, with no merge of post-backup charges or external budget antirollback authority. Global limits cover work in one owner store. The full 4 MiB fixture uses a deterministic test encoder and establishes scheduling/accounting behavior; it does not measure Apple's encoder quality.
 
@@ -73,6 +78,7 @@ Results apply to their stated checkpoint or source capture. Older evaluation sou
 | Current semantic recovery wrapper | **6 passed on each of two reopens** | Actual SIGKILL, cursor/source integrity, completion and frozen replay |
 | Current development app signature | Passed | Strict deep verification of rebuilt development bundle |
 | Current live mlx-serve | Two public turns passed | Thinking off; final foreground turn completed with 218 input tokens, three output tokens, zero held output, two model calls, 12 HTTP attempts, 208 logical raw bytes and zero unknown input operations; counters are not two-turn totals |
+| Working-tree retrieval strategy | Focused checks passed | Public synthetic fixtures; separate from the pushed app totals; app and shared-answer integration pending |
 | Final GUI visual check | Pending | Mac locked at last attempt; use isolated synthetic data |
 | Historical lexical-only development v4 | 224/224 eligible probes | Frozen synthetic lexical helper; no answerer or current hybrid quality evidence |
 
@@ -85,7 +91,9 @@ Apple/native input-token counts and provider load-instance continuity remain uno
 | Priority | Work | Owner | Completion evidence |
 |---|---|---|---|
 | Complete | Schema-5 background-indexing checkpoint | Contract, ledger, worker and coordinating agents | Verified and pushed at `b006b6a`; explicit token, restore and source-integrity limits retained |
-| 1 | Implement and freeze hybrid-answering development protocol | Evaluation implementation and review agents; path contract reviewed | Registered protocol, representative workload and comparative quality/resource results; held-out confirmation afterward |
+| 1 | Finish and integrate the shared answer lifecycle and retrieval strategies | Ledger, worker and coordinating agents | Cancellation/ownership regressions, controlled transport and rebuilt app checks pass |
+| 2 | Implement and run the first paired answering diagnostic | Coordinating agent, with independent review; [diagnostic contract](ANSWER-EVALUATION.md) recorded | One public development history, all probes, both strategies; retained outcomes and authoritative resource reports |
+| 3 | Freeze and execute a representative quality protocol | Evaluation implementation and review agents | Registered workload, feasibility and power design, comparative quality/resources; held-out confirmation afterward |
 | Before external clients | Tighten continuation and client ownership contracts | Retrieval/service agents | Ranking/scanner versioning, resume policy and disclosure grants |
 | Before release | Verify native GUI visually | Coordinating agent | Unlocked desktop; rebuilt app with isolated synthetic data |
 | Later phases | Implement policy/task, deletion and release contracts | Assign after baseline acceptance | Phase-specific exit criteria below |
