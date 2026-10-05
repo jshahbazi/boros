@@ -1,6 +1,6 @@
 # Durable episode budgets and preflight accounting
 
-Status: GUI/CLI answering, metered core retrieval and schema-3 backup integration verified, October 4, 2026. The complete phase 0/2 contract remains partial: manual source browsing, evaluation ledger adoption, background-index budgets and matched recent/evidence token allocations remain pending. Service, policy mutation, deletion, external actions and the optional summary tree remain separate work.
+Status: GUI/CLI answering, standalone source browsing, synthetic evaluation reads, metered core retrieval and schema-4 backup integration are implemented, October 4, 2026. Final verification is recorded in [STATUS.md](STATUS.md). The complete phase 0/2 contract remains partial: daily background-index budgets, exact opaque-adapter token accounting and matched recent/evidence token allocations remain pending. Service, policy mutation, deletion, external actions and the optional summary tree remain separate work.
 
 ## Gaps motivating this wave
 
@@ -8,11 +8,11 @@ At checkpoint `38675c5`, the selected Qwen adapter admitted an exact request aga
 
 Context overflow could initiate another admission operation with another 45-second preflight bound; the answer transport had its own timeout. Those attempts lacked a shared durable deadline and aggregate work allowance. Stop could cancel the client transport without proving that an already submitted calibration or answer stopped computing on the server.
 
-The current answering implementation persists one episode per accepted top-level request, containing preflight, retrieval and answering work. It reserves capacity before execution and durably arms handoffs. Restart preserves spent and uncertain capacity, terminalizes interrupted episodes and never resumes requests automatically. GUI and CLI answering share this counter model. Extending it to evaluation and standalone source-browser reads remains required.
+The current answering implementation persists one episode per accepted top-level request, containing preflight, retrieval and answering work. Standalone browser actions and each declared synthetic evaluation protocol attempt create read episodes without accepting chat input. Both origins reserve capacity before execution and durably arm handoffs. Restart preserves spent and uncertain capacity, terminalizes interrupted episodes and never resumes requests automatically. GUI and CLI answering, the source browser and evaluation reads share this counter model.
 
 ## Development resource contract
 
-An episode begins at human submission, before context preparation or model discovery, and ends at a final answer, terminal error, Stop, interruption or its deadline. Automatic context reductions, reformulations, fallbacks and retries retain the same episode ID. An explicit new human submission creates a new episode; an implementation must not disguise an automatic retry as a fresh episode to replenish quotas.
+An answering episode begins at human submission, before context preparation or model discovery, and ends at a final answer, terminal error, Stop, interruption or its deadline. A browser read begins at the human action, before durable initiation and worker queue wait, and ends at its delivery gate or terminal outcome. An evaluation read begins before its protocol attempt and ends before oracle scoring. Automatic context reductions, reformulations, fallbacks and retries retain the same episode ID. An explicit new human action creates a new episode; an implementation must not disguise an automatic retry as a fresh episode to replenish quotas.
 
 The plan and `preregistration-v1.json` already propose these aggregate limits:
 
@@ -43,28 +43,31 @@ Background index construction is a maintenance job with its own limits and cost 
 
 ## Persisted schema and API
 
-Use a schema 3 migration in the existing owner-controlled SQLite database. Keep accepted events and invocation chunks unchanged. The new records are private runtime evidence and belong in verified archives. Update backup recognition/inventory/schema handling in the same implementation wave; a schema 3 store must not become unbackable or fall through schema 2 validation.
+The owner-controlled SQLite database uses schema 4. Accepted events and invocation chunks remain unchanged. Schema 3 migration preserves exact stored chat identifiers and existing journal bytes, charges and holds, then adds canonical chat origins. Genuine schema 1 and 2 stores also upgrade to schema 4 without invented historical episodes. The journal is private runtime evidence and belongs in verified archives. [Backup recognition and restore](BACKUP-RESTORE.md) use separate historical schema contracts and validate current read origins.
 
 | Record | Required fields and constraints |
 |---|---|
-| `episodes` | Stable ID, conversation/project/turn/human-event IDs, creation time, deadline clock domain and ticks, display-only UTC deadline, frozen limit JSON plus digest/version, state, terminal reason, budget revision. States: `active`, `completed`, `failed`, `cancelled`, `interrupted`, `deadline_exceeded`, `budget_exceeded`. |
-| `episode_work` | Stable operation ID, episode FK, parent operation ID, kind, attempt number, state, body/source-selection digest, destination/adapter identity where applicable, request-snapshot reference, reserved resource vector, charged resource vector, nullable observed usage, receipt digest, start/end/arming timestamps. Unique stable IDs make identical replay safe and changed replay a conflict. |
+| `episodes` | Stable ID, project ID, canonical `origin_json` plus project-bound `origin_digest`, creation time, deadline clock domain and ticks, display-only UTC creation time, frozen limit JSON plus digest/version, state, terminal reason, budget revision. Chat origins retain conversation/turn/human-event IDs; read origins require all three links to be null. Stored states: `active`, `completed`, `failed`, `cancelled`, `interrupted`, `deadlineExceeded`, `budgetExceeded`. |
+| `episode_work` | Stable operation ID, episode FK, parent operation ID, kind, adapter identity, request JSON plus digest, request-snapshot reference, frozen reservation, charged/held resource vectors, nullable observed usage, receipt ID/JSON/digest, lifecycle revision, start/end/arming ticks and recovery/adapter-violation flags. Unique stable IDs make identical replay safe and changed replay a conflict. |
 | `episode_resource_totals` | Episode/resource key, charged units, held units and cap. Integers are nonnegative and checked for overflow. A transaction updates every requested resource together; no partial reservation. |
 | `episode_request_snapshots` | Canonical credential-free candidate/calibration body, SHA-256, renderer version and bytes. Reuse one snapshot for repeated counts of the identical body. Tokenizer attempts can reference that body/render digest rather than duplicate the rendered prompt. |
-| Invocation linkage | Add `episode_id` and answering-work ID to invocations. The existing request body/usage APIs remain compatible during the first migration. Retain old schema 2 records as explicitly unmetered historical invocations. |
+| Invocation linkage | `episode_id` and answering-work ID link chat invocations. Read origins cannot link invocations. Old schema 2 records remain explicitly unmetered historical invocations. |
+
+`EpisodeOrigin` distinguishes versioned chat and `localRead` origins. A read binding contains the initiator (`humanBrowser`, `localReadCLI` or `syntheticEvaluation`), purpose, stable request ID, descriptor version and descriptor SHA-256. Strict decoding rejects unknown keys, kinds, versions and malformed bindings; canonical re-encoding rejects duplicate keys and altered byte representation. Equality preserves exact UTF-8 identifiers, including Unicode normalization distinctions. An indexed unique initiator/request-ID pair identifies one allowance across projects and episode IDs. Identical replay of an existing episode returns its receipt; changed scope, binding or limits conflicts. Read episodes admit only retrieval, source reads and query embedding with zero output reservation, and create no conversations, events or invocations.
 
 Do not pack the complete episode journal into every invocation's bounded admission JSON. Store compact episode/work/snapshot references and the admitted request receipt there. Keep complete accounting in the episode tables. Request bodies remain private evidence; credentials and HTTP authorization headers remain outside SQLite.
 
-Proposed typed interfaces are:
+The owner implements these typed ledger interfaces; `EpisodeLease` wraps them for adapters:
 
 ```swift
-acceptRequestAndBeginEpisode(request, limits, clock) -> AcceptedEpisode
-reserveWork(episodeID, operationID, kind, resources, requestSnapshot) -> WorkReservation
-armWork(reservation, expectedBudgetRevision) -> DispatchTicket
-recordWorkReceipt(operationID, receiptID, observedUsage, outcome) -> WorkSettlement
-cancelUnarmedWork(operationID, proofNoHandoff) -> WorkSettlement
-finishEpisode(episodeID, reason) -> EpisodeReceipt
-episodeReceipt(episodeID) -> EpisodeReceipt
+acceptRequestAndBeginEpisode(conversationID, turnID, humanEventID, episodeID, text, limits, clock) -> EpisodeReceipt
+beginLocalReadEpisode(episodeID, projectID, binding, limits, clock) -> EpisodeReceipt
+reserveEpisodeWork(episodeID, request, clock) -> EpisodeWorkRecord
+armEpisodeWork(episodeID, operationID, expectedRevision, clock) -> EpisodeWorkRecord
+performEpisodeHandoff(episodeID, operationID, expectedRevision, clock, start) -> EpisodeWorkRecord
+settleEpisodeWork(episodeID, operationID, settlement, clock) -> EpisodeWorkRecord
+finishEpisode(episodeID, reason, clock) -> EpisodeReceipt
+episodeReceipt(id, clock) -> EpisodeReceipt
 ```
 
 `acceptRequestAndBeginEpisode` commits complete accepted human content and the episode together before context preparation. A mandatory context overflow retains that input and terminalizes the episode. The storage limit remains a separate explicit acceptance limit. Every resource mutation runs under the existing serialized owner transaction. An idempotent receipt does not charge twice; a conflicting receipt or operation replay fails.
@@ -95,7 +98,7 @@ Default generative calibration retries should be zero. A transport error without
 
 ## Raw source work and bounded retrieval
 
-The legacy unmetered candidate count is not a byte budget. `MemoryStore.search` selects complete payload BLOBs, decodes and verifies each event, and only then computes a clipped `MemoryHit`. A 100-candidate branch can materialize 400 MiB at the 4 MiB/event limit. The current lease-aware assembler and semantic search use the metadata-first path below. Legacy/manual nil-lease APIs remain available and cannot support an episode-budget claim.
+The legacy unmetered candidate count is not a byte budget. `MemoryStore.search` selects complete payload BLOBs, decodes and verifies each event, and only then computes a clipped `MemoryHit`. A 100-candidate branch can materialize 400 MiB at the 4 MiB/event limit. The current lease-aware assembler, semantic search, source browser and evaluation harness use the metadata-first path below. Legacy nil-lease APIs remain available and cannot support an episode-budget claim.
 
 Legacy `literalSearch` uses SQLite `instr(payload, ...)`; its hit limit does not bound inspected nonmatching rows or bytes. The metered literal API instead uses bounded host reads and a byte matcher. Recent preparation, full-source sealing, query-time validation, continuation replay and source paging are charged when a lease is supplied, including repeated passes.
 
@@ -106,15 +109,15 @@ Freeze `raw_work_v1` as a conservative logical work measure, not physical disk I
 - Count distinct passes again. Returning a small excerpt does not undo loading, matching or validation work. Do not count Swift allocation copies as independently known disk reads; record peak/materialized bytes and derived-vector work separately.
 - Keep metadata-only lookups and FTS index scoring outside the raw-payload byte metric, but bound their rows/candidates and interrupt their SQL work at cancellation/deadline checks. Their latency stays inside the episode.
 
-The exact minimal retrieval change is a metadata-first lexical candidate API. It returns scoped IDs, rank, sequence, byte count and source digest without selecting `payload`. Inspect at most the frozen candidate limit. Process candidates individually after reserving enough raw work for that candidate's full load, integrity validation and the declared preview-matching algorithm. Retain bounded excerpts and metadata, then discard the full payload before the next candidate. This removes the current 400 MiB aggregate materialization. A conservative preview bound must depend on the actual term count and algorithm; simply reserving `byte_count` while scanning that text repeatedly is insufficient.
+The metered lexical candidate API returns scoped IDs, rank, sequence, byte count and source digest without selecting `payload`. It inspects at most the frozen candidate limit and processes candidates individually after reserving enough raw work for the full load, integrity validation and declared preview-matching passes. It retains bounded excerpts and metadata, then discards the full payload before the next candidate. The preview bound depends on the actual term count and algorithm. Page reads resolve the authoritative scoped source metadata before any payload access, including when a supplied reference has another project's correct digest.
 
 Do not call the old BLOB-selecting search from a budgeted episode. If remaining work cannot inspect another candidate, return an explicit incomplete result and a continuation tied to query digest, source frontier, scope, ranking version and episode ID. Do not skip an unaffordable highest-ranked candidate silently and claim exhaustive recall. Chunk-level lexical indexing or a streaming Unicode matcher can improve the conservative bound later; they are not prerequisites for enforcing it.
 
-Replace interactive literal `instr` scans with a host-controlled source sequence walk. Reserve each bounded read/match chunk before access, retain overlap required for the literal query across page boundaries, preserve exact UTF-8 byte offsets, and count overlapping work each time. Return searched scope/frontier, bytes examined, incomplete status and a stable continuation when the quota expires. A matching source's returned evidence still needs the supported integrity check under its own work reservation. An explicitly larger manual search is a new declared operation, not an automatic episode quota reset.
+Metered interactive literal search uses a host-controlled source sequence walk. It reserves each bounded read/match chunk before access, retains matching state across page boundaries, preserves exact UTF-8 byte offsets and charges overlapping work each time. It returns the searched scope/frontier, conservative raw work, incomplete status and a stable continuation when a bound is reached. A matching source's returned evidence also needs its supported integrity check under its own reservation. An explicitly larger manual search is a new human action; it cannot automatically reset a search allowance.
 
-Semantic search must use the metadata-first lexical path, reserve query-encoder inference, bound vector bytes/rows including its look-ahead row, and charge every raw page it verifies or returns. A semantic failure's lexical fallback uses the remaining episode budget. It cannot restart with fresh allowances. Metadata validation failures remain integrity errors. Budget/deadline errors must not be swallowed by the current broad catch and retried as a new lexical fallback.
+Semantic search uses the metadata-first lexical path, reserves query-encoder inference, bounds vector bytes/rows including its look-ahead row, and charges every raw page it verifies or returns. A semantic failure's lexical fallback uses the remaining episode budget. Metadata validation failures remain integrity errors, and budget/deadline errors propagate. Read-only context or semantic selection stops at resource-limited raw coverage before implicit validation rereads or query encoding. Browser search may deliver explicitly limited hits under a terminal budget receipt; it suppresses the implicit first page at that boundary. Candidate/result/source windows remain explicit coverage limits.
 
-Define memory-operation slots at the host boundary: one composite context preparation, search or retrieval replay consumes a slot, and every host-requested page read/neighbor expansion consumes its own slot. Internal source-reference checks belong to their parent operation rather than consuming dozens of hidden service slots, while all underlying bytes/work remain charged. Keep this operation definition versioned. The future read-only client interface and evaluation harness must expose the same definition, so a client cannot package an unlimited scan into one apparent call.
+Memory-operation slots are defined at the host boundary: one composite context preparation, search or retrieval replay consumes a slot, and every host-requested page read/neighbor expansion consumes its own slot. Internal source-reference checks belong to their parent operation while all underlying bytes/work remain charged. The current read and evaluation paths use `memory_operations_v1`; a future external client contract must preserve that definition and the scanner/ranking version identities.
 
 ## Deadline, Stop and restart
 
@@ -122,20 +125,22 @@ Start a continuous monotonic deadline before capture/context preparation, includ
 
 Move context/retrieval preparation onto the episode coordinator so the main thread can request Stop while work is running. Stop closes further reservations and transport handoffs, increments the budget revision, cancels active transport/SQL work, and terminalizes the episode. Do not hold a SQLite transaction across network calls or slow source scanning. Use short reservations and bounded primitives; a SQL progress callback checks a cancellation token without recursively entering the owner database lock.
 
+`LocalReadCoordinator` performs source-browser search and paging on a serial worker queue. Search and its implicit first page share one lease; selecting a hit or requesting Next is a new explicit human action. A descriptor digest freezes the query or selected source identity and range. Supersession, mode changes, Stop, window close and store replacement signal local interruption immediately, then queue durable cancellation independently. Queued delivery checks the current generation and original continuous deadline before exposing content; failed, cancelled or expired delivery exposes no source bytes. Queue and finalization time stay inside the read deadline. [READ-EPISODES.md](READ-EPISODES.md) describes the integration in detail.
+
 Durably received visible chunks remain available as partial evidence. Late content callbacks cannot append or display new chunks through a terminal episode's lease. A later authoritative usage receipt may settle accounting by its original work ID without reopening the episode or publishing late answer content. Cancellation cannot establish that the server immediately stopped; unknown output reserves stay retained. A provider receipt exceeding its output reservation or disagreeing with exact prompt admission is an explicit adapter violation, preserving the receipt and blocking new work through that adapter until reverified.
 
 Startup recovery reads every active work record before new episode admission. Prepared-but-unarmed records cancel without handoff; armed/submitted records recover unknown; valid terminal receipts are replayed idempotently. The invocation journal independently recovers committed answer fragments. Episode and invocation terminal states must agree on interruption/Stop/error attribution. A process-kill fixture must distinguish preflight-only episodes from answer invocations; preflight should no longer disappear merely because the answer invocation had not started.
 
-## Implementation sequence and ownership
+## Implementation ownership
 
 | Workstream | Minimal deliverable | Integration dependency |
 |---|---|---|
-| Ledger | Schema 3, atomic accepted-input/episode creation, reservations, receipts, recovery and content-free diagnostics | Frozen resource/counter semantics |
+| Ledger | Schema 4, atomic accepted-input/episode creation, standalone-read origins, reservations, receipts, recovery and content-free diagnostics | Frozen resource/counter semantics |
 | Provider bridge | Lease-aware discovery/tokenization/calibration/answer dispatch, snapshot IDs and durable arming before every network start | Ledger APIs; preserve exact canonical body |
 | Retrieval primitives | Metadata-first lexical candidates, bounded literal continuation, charged recent/source reads, semantic/fallback lease propagation | Ledger APIs and raw-work definition |
-| Coordinator and evaluation | One submission/deadline/Stop lifecycle, GUI/CLI adoption, aggregate reports and development protocol amendment | All three adapters; explicit unsupported-token paths |
+| Coordinator and evaluation | Shared submission/read deadlines, browser delivery fencing, GUI/CLI adoption and per-protocol synthetic read receipts | Explicit unsupported-token paths; a new amendment before registered measurement |
 
-These streams can proceed in parallel after the interfaces and fixtures are frozen. One owner integrates shared `MemoryStore`, GUI, schema/backup and main-entry edits. The first executable checkpoint is durable preflight plus one answered GUI episode with enforced limits. The full checkpoint also requires every enabled retrieval branch to use the same lease and all automatic reductions/fallbacks to preserve its allowance; a provider-only ledger is insufficient.
+These responsibilities share the owner-controlled ledger, lease and frozen counter semantics. The integrated answering and read paths use the same allowance through automatic reductions and fallback. Background maintenance still needs its own daily contract, and external read clients need a frozen continuation compatibility contract.
 
 ## Required failure fixtures and completion evidence
 
@@ -156,15 +161,17 @@ These streams can proceed in parallel after the interfaces and fixtures are froz
 | Recent, replay and validation rereads | Charged totals include real repeated payload work, not only the final evidence bytes. |
 | Deadline during lookup/answer; clock rollback; sleep | New work/output is fenced, durable partial output remains, elapsed time cannot reset; unknown remote computation is stated. |
 | Crash followed by repeated application restart | Episodes remain terminal; call/input/unknown-output charges are stable and recovery publishes no duplicate answer. |
-| Schema 2 to 3 and backup/restore | Old invocations remain labeled unmetered; new budget records/held unknown outcomes survive a verified restore; unsupported source schemas fail before mutation. |
+| Schema 1–3 to 4 and backup/restore | Exact source/chat identity bytes and historical accounting survive migration; read origins and unknown outcomes survive restore; unsupported source schemas fail before original mutation. |
+| Standalone-read crash and invalid origin | No chat capture or invocation is invented; unarmed work releases, armed encoder work retains unknown input, malformed origin/linkage/work fails. |
+| Partial raw coverage and delayed browser delivery | Read context/semantic paths stop before extra rereads/encoding; browser limited hits omit an implicit page; superseded or expired callbacks expose no content. |
 | Evaluation cap/deadline exhaustion | Episode scores failure at the recorded terminal/deadline; the arm gets no hidden retry, extra time, or omitted denominator entry. |
 
-Completion requires shared GUI/CLI/evaluation execution against this ledger, real kill/reopen tests at preflight boundaries, provider-fixture reservation/usage checks, and retrieval stress fixtures covering bytes loaded behind small excerpts. Report observed usage, conservative bound charges, remaining reservations, terminal reason, coverage limitations, memory-path time and total episode time independently. Missing exact encoder usage and production cost remain explicit limits.
+The integration exercises shared GUI/CLI/browser/evaluation accounting, real kill/reopen boundaries, provider-fixture reservation/usage and retrieval stress behind small excerpts. Evaluation records authoritative charged and held vectors, the terminal reason, structured coverage limits and full read-episode time before oracle scoring. Budget failures remain failed attempts in every protocol denominator. These contracts provide no new registered quality or cost measurement. Missing exact encoder usage and production cost remain explicit limits.
 
 ## Recorded integration evidence
 
-The assembled application passed 793 checks: 67 episode, 51 conversation/profile, 89 GUI, 9 native parser, 100 memory, 49 endpoint/admission, 64 context, 76 semantic, 99 backup/CLI and 189 HTTP integration checks. Separate suites passed 86 episode checks with actual SIGKILL/reopen, 110 backup checks with corruption/compatibility/process recovery, and six semantic process-kill checks. Counts overlap. Independent review reproduced and closed missing-usage calibration quarantine and complete-capture/episode-state disagreement. Recovered empty/partial Stop cancellations now remain backable and recognizable by the CLI; inconsistent cancellation archives are rejected. Regression fixtures exercise these triggers.
+Final verification and suite totals are recorded in [STATUS.md](STATUS.md); component and process suites overlap. The checks include exact Unicode identity replay, indexed read-request uniqueness, schema migration rollback under SIGKILL, read-origin archive corruption, scoped metadata before payload, partial coverage before rereads/encoding, and browser cancellation/deadline delivery. Independent review also closed missing-usage calibration quarantine and complete-capture/episode-state disagreement. Recovered empty/partial Stop cancellations remain backable and recognizable by the CLI; inconsistent cancellation archives are rejected.
 
 GUI fixtures exercise Stop during preparation, deadline expiry during final publication, a short live native pipe prefix and native cleanup that ignores SIGTERM until the owned SIGKILL fallback. The built bundle passed strict deep signature verification. The running mlx-serve passed two synthetic arithmetic turns through the shared CLI episode path. These results establish integration and failure handling, not general retrieval quality or model competence.
 
-The immediate engineering work needs no new user permission. Development mode records opaque encoder/native input tokens as unknown; strict known-input mode rejects or skips those inference paths. The still-null matched recent-context token allocation and evaluation adoption must be frozen before claiming a complete phase 0 budget contract or running a matched held-out comparison. The proposed component defaults above are starting configuration choices, not measured optimal settings. External continuation ingestion also needs explicit ranking/scanner version identities; the current continuations are internal to this executable.
+Development mode records opaque encoder/native input tokens as unknown; strict known-input mode rejects or skips those inference paths. The still-null matched recent-context token allocation, exact evidence-token enforcement and daily background allowance must be frozen before claiming a complete phase 0 budget contract or running a matched held-out comparison. Current synthetic evaluation adoption is an unregistered contract check; the next measurement needs a new development amendment. The proposed component defaults above are starting configuration choices, not measured optimal settings. External continuation ingestion also needs explicit ranking/scanner version identities; the current continuations are internal to this executable.
