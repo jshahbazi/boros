@@ -1,8 +1,8 @@
 # Boros project status
 
-Updated October 5, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Last pushed implementation checkpoint: `1f8e0a6`; subsequent status checkpoint: `4fedf06`. The complete [plan](../tracechat-plan.md) remains in progress. The component-token wave is verified in the working tree and ready to commit: combined checks, live mlx-serve dispatch, archive validation and independent review pass.
+Updated October 5, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Current implementation checkpoint: **`9cf4d11`**, committed and pushed. The complete [plan](../tracechat-plan.md) remains in progress. The component-token wave is integrated, with passing combined checks, live mlx-serve dispatch, archive validation and independent review.
 
-The native prototype now combines durable text capture, selected-provider admission, independent context-component counts, hybrid source retrieval, shared answering/read accounting and verified backup/restore. The current working tree passed **1,297 whole-app checks**. The prior pushed implementation passed 1,016. Model-instance continuity remains unobservable; receipts state that limitation and pin verified metadata/count observations. Installed hybrid answer quality, production latency and comparative economics remain unmeasured. No completion percentages or delivery dates are assigned.
+The native prototype now combines durable text capture, selected-provider admission, independent context-component counts, hybrid source retrieval, shared answering/read accounting and verified backup/restore. The current implementation checkpoint passed **1,297 whole-app checks**. The preceding standalone-read checkpoint passed 1,016. Model-instance continuity remains unobservable; receipts state that limitation and pin verified metadata/count observations. Installed hybrid answer quality, production latency and comparative economics remain unmeasured. No completion percentages or delivery dates are assigned.
 
 ## Work status
 
@@ -17,8 +17,8 @@ The native prototype now combines durable text capture, selected-provider admiss
 | Standalone read episodes | Implemented and verified | Schema-4 chat/read origins; immutable scope and descriptor; indexed initiation replay; shared allowance, continuous deadline and recovery | Future read CLI/MCP adapters need explicit ownership and disclosure contracts |
 | Source-browser accounting | Implemented and verified | Search plus initial page share a lease; explicit paging is bounded; worker queue, Stop/supersession/close/deadline fences and incomplete results | Visual verification; explicit continuation UX only after its compatibility contract |
 | Evaluation accounting | Implemented; contracts verified | Isolated read episode per fixture/protocol; authoritative charges/holds/time/outcome; capped attempts retained in denominators; structured coverage | New registered development amendment after component-budget freeze |
-| Context assembly | Selected-Qwen component contract verified | Preserves mandatory content and output reserve; independently counts recent/evidence tokens; applies bounded reductions; records and validates durable proofs | Publish [component-token checkpoint](CONTEXT-COMPONENTS.md); more verified adapters and registered measurement amendment |
-| Episode accounting | Answering and foreground reads verified | Durable reservations/receipts, shared deadline, unknown outcomes retained, migration and kill/reopen checks; component proof linkage verified in working tree | [Daily background-index ledger](BACKGROUND-INDEX-BUDGET.md) implementation; opaque Apple/native token usage remains explicit |
+| Context assembly | Implemented, verified and pushed | Preserves mandatory content and output reserve; independently counts recent/evidence tokens; applies bounded reductions; records and validates durable proofs | More verified adapters and registered [component-budget measurement](CONTEXT-COMPONENTS.md) amendment |
+| Episode accounting | Answering and foreground reads verified | Durable reservations/receipts, shared deadline, unknown outcomes retained, migration and kill/reopen checks; component proof linkage verified at `9cf4d11` | [Daily background-index ledger](BACKGROUND-INDEX-BUDGET.md) implementation; opaque Apple/native token usage remains explicit |
 | Semantic retrieval | Core protocol verified | Installed Apple English encoder; sealed sources, durable jobs, coverage holes, frozen continuations and manifests | Whole-corpus coverage, installed-encoder quality and daily budget |
 | Backup and restore | Schema-4 compatibility verified | Explicit schema 1–4 recognition; chat/read inventories, no-clobber restore, exact-byte identity and unknown-bound preservation | Deletion-aware restore, retention/purge and polished restored-store opening |
 | Service, MCP and imports | Deferred | Single-process native app owns the store | Multi-client service when justified, read-only MCP interface and authenticated imports |
@@ -31,7 +31,7 @@ The native prototype now combines durable text capture, selected-provider admiss
 
 ## Parallel implementation assignments
 
-The component wave is verified and frozen for publication. The background ledger is the next integration wave; its isolated drafts are preparatory evidence, with no runtime enforcement yet.
+The component wave is committed and pushed at `9cf4d11`. No implementation agent is currently assigned to that completed wave. The background ledger is the next integration wave; its isolated drafts are preparatory evidence, with no runtime enforcement yet.
 
 | Owner | Surface | State and evidence |
 |---|---|---|
@@ -39,7 +39,7 @@ The component wave is verified and frozen for publication. The background ledger
 | Provider agent | Verified counting session, attributed renderer, immutable count proof and continuous-clock freshness | Integrated: 105 pure and 254 HTTP checks passed; independent rendering oracle passed 30 checks. Response-time `created` excluded; fresh calibration per independent session |
 | Coordinating agent | Frozen component policy, GUI/CLI handoff, durable proof and quarantine validation | 1,297 combined checks, 225 standalone episode checks, strict signature and two live turns passed |
 | Independent review agent | Observation compatibility and quarantine continuity | 19 isolated rechecks passed after closing capacity/capability/legacy-key and previously reserved handoff bypasses; schema remains 4 |
-| Provider agent draft; integration next | Daily background-index ledger | Isolated pure-type draft passed 95 checks. Schema migration, owner transactions, worker adoption, recovery and archive verification remain |
+| Provider agent draft; integration next | Daily background-index ledger | Isolated pure-type draft passed 95 checks. Freeze schema-4 archive recognition before schema-5 migration; owner transactions, worker adoption, recovery and archive verification remain |
 
 The combined results above were observed by the coordinating agent. Targeted suites overlap and must not be added to the whole-app count. The context review reproduced Unicode source-ID collapse that could hide older evidence behind recent candidates; the integrated fix preserves exact UTF-8 identities through selection, metering and semantic replay. Component journal review findings concerning source linkage, clock stamps, receipt scope and clock failure handling were reproduced and closed.
 
@@ -59,12 +59,12 @@ Independent review reproduced three material issues: canonical-equivalent Unicod
 
 ## Verification
 
-Counts overlap across scripts and must not be added together. The first two rows distinguish the current working tree from the pushed schema-4 checkpoint. Older measurements retain their original source pins.
+Counts overlap across scripts and must not be added together. These are recorded verification results for their stated checkpoints; this documentation update does not rerun them. The first two rows distinguish the current component checkpoint from the preceding standalone-read checkpoint. Older measurements retain their original source pins.
 
 | Check | Recorded result | Evidence boundary |
 |---|---|---|
-| Current whole-app integration, `scripts/check.py --app .build/boros/Boros.app` | **1,297 passed** | 172 episode, 56 local-read, 51 conversation/profile, 89 GUI, 9 native parser, 100 memory, 105 endpoint/admission, 143 context, 76 semantic, 145 backup/CLI, 254 HTTP, 97 component preparation/proof checks |
-| Pushed whole-app integration at `1f8e0a6` | **1,016 passed** | 156 episode, 56 local-read, 51 conversation/profile, 89 GUI, 9 native parser, 100 memory, 49 endpoint/admission, 96 context, 76 semantic, 145 backup/CLI, 189 HTTP |
+| Whole-app integration at `9cf4d11`, `scripts/check.py --app .build/boros/Boros.app` | **1,297 passed** | 172 episode, 56 local-read, 51 conversation/profile, 89 GUI, 9 native parser, 100 memory, 105 endpoint/admission, 143 context, 76 semantic, 145 backup/CLI, 254 HTTP, 97 component preparation/proof checks |
+| Preceding whole-app integration at `1f8e0a6` | **1,016 passed** | 156 episode, 56 local-read, 51 conversation/profile, 89 GUI, 9 native parser, 100 memory, 49 endpoint/admission, 96 context, 76 semantic, 145 backup/CLI, 189 HTTP |
 | Component preparation/proof fixtures | **97 passed** | Actual coordinator limits, scope rejection, cancellation, deadline, fresh calibration, metadata drift, durable invocation, backup/restore and journal corruption checks; included in 1,297 |
 | Independent Qwen rendering oracle | **30 passed** | 24 template renderings and six rejection cases; shared renderer verified against Jinja |
 | Ledger, `scripts/test_episode.py` | **225 passed** | 172 component and 53 process/recovery checks; includes durable family quarantine, reserved/armed handoff fencing, migration rollback and actual SIGKILL/reopen |
@@ -73,7 +73,7 @@ Counts overlap across scripts and must not be added together. The first two rows
 | Evaluation, `scripts/test_evaluation.py` | **49 passed** | Immutable v4 refusal, current-source unregistered execution, per-protocol receipts, zero-budget denominators, unknown timings and structured coverage |
 | Development app signature | Strict deep verification passed | Final frozen `.build/boros/Boros.app`; development ad hoc signature |
 | Current live mlx-serve CLI | Two synthetic arithmetic turns passed | Final turn completed: 218 input tokens, 3 output tokens, zero held output, 2 model calls, 12 HTTP attempts, 208 logical raw-work bytes and zero unknown inputs; counters are not two-turn totals |
-| Pushed schema-4 live mlx-serve CLI | Two synthetic arithmetic turns passed | Historical baseline: final turn completed with 218 input tokens, 3 output tokens, zero held output, 2 model calls, 7 HTTP attempts, 94 logical raw-work bytes, zero unknown inputs; counters are not two-turn totals |
+| Preceding schema-4 live mlx-serve CLI at `1f8e0a6` | Two synthetic arithmetic turns passed | Historical baseline: final turn completed with 218 input tokens, 3 output tokens, zero held output, 2 model calls, 7 HTTP attempts, 94 logical raw-work bytes, zero unknown inputs; counters are not two-turn totals |
 | Final visual GUI check | Pending; Mac locked at last attempt | Requires an unlocked desktop and an isolated synthetic store |
 | Previous schema-3 integration | 793 passed at `22c3402` | Historical answering/core-retrieval checkpoint |
 | Earlier hybrid/backup integration | 478 passed at `38675c5` | Historical pre-episode checkpoint |
@@ -83,13 +83,13 @@ The live smoke establishes dispatch and history forwarding through the component
 
 ## Next checkpoint
 
-Publish the verified component-token checkpoint, then integrate the daily background-index ledger. Its pure draft and bounded-worker design are prepared. Freeze a new development measurement amendment only after both implementations and their shared baseline stabilize. Apple encoder input tokens remain opaque; development mode records the uncertainty and strict known-input mode skips the encoder.
+Integrate the daily background-index ledger. Its pure draft and bounded-worker design are prepared. Preserve genuine schema-4 archive recognition before introducing schema 5, then integrate durable admission, bounded indexing work and recovery. Freeze a new development measurement amendment after the shared baseline stabilizes. Apple encoder input tokens remain opaque; development mode records the uncertainty and strict known-input mode skips the encoder.
 
 | Priority | Next work | Status | Required completion evidence |
 |---|---|---|---|
-| 1 | Exact recent/evidence token allocations | Verified; publication pending | Commit and push frozen implementation; retain conditional observation/instance-identity limits |
-| 2 | Background indexing budgets | [Contract recorded](BACKGROUND-INDEX-BUDGET.md); isolated draft underway; runtime enforcement absent | Durable global daily limits, preflight, unknown outcomes, migration, backup/restore and crash recovery verified |
-| 3 | Hybrid answering quality and economics | Unmeasured | Frozen development protocol, representative workloads, answerer and comparative results before held-out confirmation |
+| Complete | Exact recent/evidence token allocations | Verified and pushed at `9cf4d11` | 1,297 combined checks, live Qwen dispatch, durable proof/archive checks and independent review passed; instance-identity limitation remains explicit |
+| 1 | Background indexing budgets | Next; [contract recorded](BACKGROUND-INDEX-BUDGET.md), isolated draft prepared; runtime enforcement absent | Frozen schema-4 recognition; durable global daily limits, preflight, unknown outcomes, schema-5 migration, backup/restore and crash recovery verified |
+| 2 | Hybrid answering quality and economics | Unmeasured | Frozen development protocol, representative workloads, answerer and comparative results before held-out confirmation |
 | Before external clients | External continuation compatibility | Partial internal contract | Explicit ranking/scanner identities and resume policy before client ingestion |
 | Before release | Final GUI visual recheck | Pending Mac unlock | Inspect rebuilt app using isolated synthetic data |
 
