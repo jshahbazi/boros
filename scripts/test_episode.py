@@ -216,7 +216,7 @@ def main():
         harness.write_text(HARNESS)
         binary = scratch / "episode-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "EpisodeChecks.swift")]
+            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "EpisodeChecks.swift")]
         subprocess.run(["swiftc", "-I", str(ROOT / "Sources/CSQLite"), "-o", str(binary),
                         *map(str, sources), str(harness)], check=True)
         checks = parsed(subprocess.run([str(binary)], capture_output=True, text=True, timeout=90))
@@ -243,8 +243,8 @@ def main():
             checks.update({stage + "_" + key: value for key, value in recovered.items()})
             checks["sigkill_migration_" + stage + "_repeat_reopen_stable"] = recovered == repeated
             with sqlite3.connect(migration / "memory.sqlite3") as connection:
-                if connection.execute("PRAGMA user_version").fetchone()[0] != 4 or connection.execute("PRAGMA foreign_key_check").fetchall():
-                    raise RuntimeError("Recovered migration did not publish a complete schema four")
+                if connection.execute("PRAGMA user_version").fetchone()[0] != 5 or connection.execute("PRAGMA foreign_key_check").fetchall():
+                    raise RuntimeError("Recovered migration did not publish a complete schema five")
             checks["sigkill_migration_" + stage + "_reopens_schema_four_foreign_keys_intact"] = True
         print(json.dumps({"checks": len(checks), "failed": [], "passed": True}, sort_keys=True))
 

@@ -152,6 +152,10 @@ final class MemoryStore: @unchecked Sendable {
     static let maximumPageBytes = 4096
     static let maximumStreamChunks = 65536
     static let maximumEpisodeWorkRecords = 100000
+    // Every strict background recipe inspects >=1 metadata row, except the
+    // fixed two-call probe. The six resource caps imply this row ceiling.
+    static let maximumBackgroundWorkRecords = BackgroundIndexResources.developmentCaps.metadataRows
+        + BackgroundIndexResources.developmentCaps.encoderCalls / 2
     static let maximumEpisodeSnapshotBytes = 64 * 1024 * 1024
     let directory: URL
     private var database: OpaquePointer?
@@ -159,6 +163,12 @@ final class MemoryStore: @unchecked Sendable {
     private let mutex = NSRecursiveLock()
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private var activeSQLFence: EpisodeSQLFence?
+    private var claimedBackgroundReaders = Set<Data>()
+    private var completedBackgroundSeals = Set<Data>()
+    private var completedBackgroundChunkReads = Set<Data>()
+    private let backgroundDiagnosticsLock = NSLock()
+    private var backgroundPayloadPages = 0
+    private var backgroundMaterializedBytes = 0
 
     init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil) throws {
         self.directory = directory.standardizedFileURL
@@ -180,7 +190,14 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard (0...4).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            guard (0...5).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            if version == 5 {
+                guard let database else { throw MemoryError.database("closed owner") }
+                try BackgroundIndexJournal.validate(database: database)
+            } else {
+                let existingBackground = try query("SELECT name FROM sqlite_master WHERE name IN ('background_index_windows','background_index_work','background_index_active_window','background_index_work_window','background_index_adapter_violation')") { string($0, 0) }
+                guard existingBackground.isEmpty else { throw MemoryError.database("historical schema contains a background inventory") }
+            }
             // Foreign keys must be disabled outside the replacement transaction.
             // Children retain REFERENCES episodes while that parent is rebuilt.
             if version == 3 {
@@ -241,9 +258,10 @@ final class MemoryStore: @unchecked Sendable {
                     """)
                 if version == 3 { try migrateEpisodeSchemaThree(checkpoint: episodeMigrationCheckpoint) }
                 try createEpisodeSchema()
+                try createBackgroundIndexSchema()
                 let violations = try query("PRAGMA foreign_key_check") { string($0, 0) }
                 guard violations.isEmpty else { throw MemoryError.database("episode migration foreign-key failure") }
-                try execute("PRAGMA user_version=4")
+                try execute("PRAGMA user_version=5")
                 if version == 3 { try episodeMigrationCheckpoint?("beforeCommit") }
             }
             try execute("PRAGMA foreign_keys=ON")
@@ -251,6 +269,7 @@ final class MemoryStore: @unchecked Sendable {
             // attempts before any caller can read history or start a request.
             try recoverInterruptedEpisodes()
             try recoverInterruptedInvocations()
+            try recoverInterruptedBackgroundWork()
             try secureSidecars()
         } catch {
             if let database { sqlite3_close(database); self.database = nil }
@@ -914,7 +933,7 @@ final class MemoryStore: @unchecked Sendable {
         }.first
     }
 
-    private enum Value { case text(String), integer(Int), blob(Data) }
+    private enum Value { case text(String), integer(Int), blob(Data), null }
 
     private func prepare(_ sql: String, _ bindings: [Value]) throws -> OpaquePointer {
         var statement: OpaquePointer?
@@ -924,6 +943,7 @@ final class MemoryStore: @unchecked Sendable {
                 let index = Int32(offset + 1)
                 let result: Int32
                 switch binding {
+                case .null: result = sqlite3_bind_null(statement, index)
                 case .text(let value):
                     result = value.withCString { sqlite3_bind_text(statement, index, $0, Int32(value.utf8.count), transient) }
                 case .integer(let value): result = sqlite3_bind_int64(statement, index, Int64(value))
@@ -1658,14 +1678,14 @@ extension MemoryStore: EpisodeLedger {
         }
         guard Set(snapshots).count == snapshots.count else { throw MemoryError.database("duplicate episode archive snapshots") }
         let schemaVersion = try rows("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
-        guard schemaVersion == 3 || schemaVersion == 4 else { throw MemoryError.database("unsupported episode archive schema") }
+        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 else { throw MemoryError.database("unsupported episode archive schema") }
         struct CheckEpisode { let id: String; let origin: EpisodeOrigin; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
-        let originColumns = schemaVersion == 4 ? ",origin_json,origin_digest" : ""
+        let originColumns = schemaVersion >= 4 ? ",origin_json,origin_digest" : ""
         var localReadRequestIDs = Set<Data>()
         let episodes = try rows("SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,created_ticks,deadline_ticks,last_ticks,created_utc,terminal_reason" + originColumns + " FROM episodes") { row -> CheckEpisode in
             for index: Int32 in [0,2,9] { try identifier(text(row, index)) }
             let origin: EpisodeOrigin
-            if schemaVersion == 4 {
+            if schemaVersion >= 4 {
                 let originBytes = data(row, 15)
                 guard try Self.episodeOriginDigest(projectID: text(row, 2), originJSON: originBytes) == text(row, 16) else { throw MemoryError.database("episode archive origin integrity failure") }
                 origin = try decode(EpisodeOrigin.self, originBytes)
@@ -1840,4 +1860,440 @@ extension MemoryStore: EpisodeLedger {
         try ContextComponentJournal.validate(database: database)
     }
 
+}
+// Durable optional maintenance shares a single global allowance in the main
+// store. Every clock sample below occurs after acquiring the owner mutex.
+final class SystemBackgroundIndexClock: BackgroundIndexClockSource {
+    private let clock = SystemEpisodeClock()
+    func now() throws -> BackgroundIndexClockSnapshot {
+        let value = try clock.now()
+        return try BackgroundIndexClockSnapshot(domain: value.domain, continuousNanoseconds: value.continuousNanoseconds, utc: value.utc)
+    }
+}
+
+extension MemoryStore {
+    private func createBackgroundIndexSchema() throws {
+        try execute("""
+            CREATE TABLE IF NOT EXISTS background_index_windows (
+              sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+              id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('active','closed')),
+              revision INTEGER NOT NULL CHECK(revision>=0),
+              limits_json BLOB NOT NULL CHECK(length(limits_json)>0 AND length(limits_json)<=65536), limits_digest TEXT NOT NULL,
+              started_clock_json BLOB NOT NULL CHECK(length(started_clock_json)>0 AND length(started_clock_json)<=65536), started_clock_digest TEXT NOT NULL,
+              window_json BLOB NOT NULL CHECK(length(window_json)>0 AND length(window_json)<=262144),
+              window_digest TEXT NOT NULL
+            )
+            """)
+        try execute("CREATE UNIQUE INDEX IF NOT EXISTS background_index_active_window ON background_index_windows(state) WHERE state='active'")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS background_index_work (
+              id TEXT PRIMARY KEY, window_id TEXT NOT NULL REFERENCES background_index_windows(id),
+              state TEXT NOT NULL CHECK(state IN ('prepared','armed','submitted','completed','failedConfirmed','outcomeUnknown','cancelledBeforeDispatch')),
+              adapter_identity TEXT NOT NULL, binding_digest TEXT NOT NULL, request_digest TEXT NOT NULL,
+              record_json BLOB NOT NULL CHECK(length(record_json)>0 AND length(record_json)<=262144),
+              record_digest TEXT NOT NULL, receipt_id TEXT UNIQUE,
+              adapter_violation INTEGER NOT NULL DEFAULT 0 CHECK(adapter_violation IN (0,1))
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS background_index_work_window ON background_index_work(window_id,id)")
+        try execute("CREATE INDEX IF NOT EXISTS background_index_adapter_violation ON background_index_work(adapter_identity) WHERE adapter_violation=1")
+    }
+
+    private func backgroundWindow(_ id: String? = nil) throws -> BackgroundIndexWindow? {
+        let sql = "SELECT id,state,revision,window_json,window_digest,limits_json,limits_digest,started_clock_json,started_clock_digest FROM background_index_windows " + (id == nil ? "WHERE state='active'" : "WHERE id=?")
+        return try query(sql, id.map { [.text($0)] } ?? []) { row in
+            let payload = blob(row, 3)
+            guard Self.digest(payload) == string(row, 4) else { throw BackgroundIndexBudgetError.invalid }
+            let window = try BackgroundIndexCanonical.decode(BackgroundIndexWindow.self, bytes: payload)
+            let limitsBytes = blob(row, 5), clockBytes = blob(row, 7)
+            guard backgroundIndexIdentifierEqual(window.id, string(row, 0)), window.state.rawValue == string(row, 1),
+                  window.revision == Int(sqlite3_column_int64(row, 2)), Self.digest(limitsBytes) == string(row, 6),
+                  Self.digest(clockBytes) == string(row, 8),
+                  try BackgroundIndexCanonical.decode(BackgroundIndexLimits.self, bytes: limitsBytes) == window.limits,
+                  try BackgroundIndexCanonical.decode(BackgroundIndexClockSnapshot.self, bytes: clockBytes) == window.startedClock else { throw BackgroundIndexBudgetError.invalid }
+            return window
+        }.first
+    }
+    private func saveBackgroundWindow(_ window: BackgroundIndexWindow) throws {
+        try window.validate()
+        let payload = try BackgroundIndexCanonical.data(window)
+        let limits = try BackgroundIndexCanonical.data(window.limits), clock = try BackgroundIndexCanonical.data(window.startedClock)
+        try execute("INSERT INTO background_index_windows(id,state,revision,window_json,window_digest,limits_json,limits_digest,started_clock_json,started_clock_digest) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,revision=excluded.revision,window_json=excluded.window_json,window_digest=excluded.window_digest",
+            [.text(window.id), .text(window.state.rawValue), .integer(window.revision), .blob(payload), .text(Self.digest(payload)), .blob(limits), .text(Self.digest(limits)), .blob(clock), .text(Self.digest(clock))])
+    }
+    private func findBackgroundWork(_ id: String) throws -> BackgroundIndexWorkRecord? {
+        try query("SELECT id,window_id,state,adapter_identity,binding_digest,request_digest,record_json,record_digest,receipt_id,adapter_violation FROM background_index_work WHERE id=?", [.text(id)]) { row in
+            let payload = blob(row, 6)
+            guard Self.digest(payload) == string(row, 7) else { throw BackgroundIndexBudgetError.invalid }
+            let work = try BackgroundIndexCanonical.decode(BackgroundIndexWorkRecord.self, bytes: payload)
+            guard backgroundIndexIdentifierEqual(work.request.id, string(row, 0)), backgroundIndexIdentifierEqual(work.windowID, string(row, 1)),
+                  work.state.rawValue == string(row, 2), backgroundIndexIdentifierEqual(work.request.binding.adapterIdentity, string(row, 3)),
+                  work.bindingDigest == string(row, 4), work.requestDigest == string(row, 5),
+                  Int(sqlite3_column_int64(row, 9)) == (work.settlement?.adapterViolation == true ? 1 : 0),
+                  backgroundIndexIdentifierEqual(work.settlement?.receiptID, sqlite3_column_type(row, 8) == SQLITE_NULL ? nil : string(row, 8)) else {
+                throw BackgroundIndexBudgetError.invalid
+            }
+            return work
+        }.first
+    }
+    private func saveBackgroundWork(_ work: BackgroundIndexWorkRecord) throws {
+        try work.validate()
+        let payload = try BackgroundIndexCanonical.data(work)
+        guard payload.count <= BackgroundIndexCanonical.maximumCanonicalRecordBytes else { throw BackgroundIndexBudgetError.invalid }
+        let receipt: Value = work.settlement.map { .text($0.receiptID) } ?? .null
+        try execute("INSERT INTO background_index_work(id,window_id,state,adapter_identity,binding_digest,request_digest,record_json,record_digest,receipt_id,adapter_violation) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,record_json=excluded.record_json,record_digest=excluded.record_digest,receipt_id=excluded.receipt_id,adapter_violation=excluded.adapter_violation",
+            [.text(work.request.id), .text(work.windowID), .text(work.state.rawValue), .text(work.request.binding.adapterIdentity), .text(work.bindingDigest), .text(work.requestDigest), .blob(payload), .text(Self.digest(payload)), receipt, .integer(work.settlement?.adapterViolation == true ? 1 : 0)])
+    }
+    private func backgroundAdapterQuarantined(_ adapter: String) throws -> Bool {
+        try !query("SELECT id FROM background_index_work WHERE adapter_identity=? AND adapter_violation=1 LIMIT 1", [.text(adapter)]) { string($0, 0) }.isEmpty
+    }
+    private func backgroundValidateSource(_ binding: BackgroundIndexBinding) throws {
+        guard case .source(_, let descriptor) = binding.descriptor else { return }
+        let source = descriptor.source
+        guard let reference = try sourceReference(eventID: source.eventID, projectID: source.projectID),
+              reference.sequence == source.sequence, backgroundIndexIdentifierEqual(reference.conversationID, source.conversationID),
+              reference.role.rawValue == source.role, reference.status.rawValue == source.status,
+              backgroundIndexIdentifierEqual(reference.createdAt, source.createdAt), reference.digest == source.digest,
+              reference.byteCount == source.byteCount else { throw BackgroundIndexBudgetError.scopeMismatch }
+    }
+    private func observeBackgroundWindow(_ window: BackgroundIndexWindow, clock: BackgroundIndexClockSnapshot) throws -> BackgroundIndexWindowDecision {
+        let decision = try window.observed(at: clock)
+        try saveBackgroundWindow(decision.window)
+        return decision
+    }
+    func reserveBackgroundWork(request: BackgroundIndexWorkRequest, clockSource: BackgroundIndexClockSource = SystemBackgroundIndexClock(),
+                               limits: BackgroundIndexLimits = .development) throws -> BackgroundIndexWorkRecord {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate(); try request.validate(); try limits.validate()
+            var failure: Error?
+            var result: BackgroundIndexWorkRecord?
+            try transaction {
+                if let existing = try findBackgroundWork(request.id) {
+                    guard existing.request == request else { throw BackgroundIndexBudgetError.conflict }
+                    result = existing; return
+                }
+                guard !(try backgroundAdapterQuarantined(request.binding.adapterIdentity)) else { throw BackgroundIndexBudgetError.adapterViolation }
+                let previous = try backgroundWindow()
+                if let previous, previous.limits != limits { throw BackgroundIndexBudgetError.conflict }
+                let decision = try previous.map { try observeBackgroundWindow($0, clock: clock) }
+                if decision?.pauseReason == .clockUnavailable { failure = BackgroundIndexBudgetError.clockUnavailable; return }
+                let rotating = decision?.rolloverEligible == true
+                let candidate = try previous == nil || rotating
+                    ? BackgroundIndexWindow.begin(id: UUID().uuidString, limits: previous?.limits ?? limits, clock: clock,
+                        previousUTCHighWaterMilliseconds: previous?.utcHighWaterMilliseconds)
+                    : decision!.window
+                let count = try query("SELECT count(*) FROM background_index_work WHERE window_id=?", [.text(candidate.id)]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
+                guard count < Self.maximumBackgroundWorkRecords else { throw BackgroundIndexBudgetError.invalid }
+                let reserved: BackgroundIndexWindow
+                do { reserved = try candidate.reserving(request) }
+                catch BackgroundIndexBudgetError.exhausted { failure = BackgroundIndexBudgetError.exhausted; return }
+                if rotating, var old = decision?.window {
+                    let prepared = try query("SELECT id FROM background_index_work WHERE window_id=? AND state='prepared' ORDER BY id", [.text(old.id)]) { string($0, 0) }
+                    for id in prepared {
+                        guard let work = try findBackgroundWork(id) else { throw BackgroundIndexBudgetError.invalid }
+                        old = try old.releasingPrepared(work.request)
+                        try saveBackgroundWork(work.settled(BackgroundIndexWorkSettlement(receiptID: UUID().uuidString, outcome: .cancelledBeforeDispatch)))
+                    }
+                    try saveBackgroundWindow(old.closing(at: clock))
+                }
+                try saveBackgroundWindow(reserved)
+                let work = try BackgroundIndexWorkRecord.prepared(windowID: reserved.id, request: request, clock: clock)
+                try saveBackgroundWork(work); result = work
+            }
+            if let failure { throw failure }
+            guard let result else { throw BackgroundIndexBudgetError.invalid }; return result
+        }
+    }
+    func armBackgroundWork(workID: String, bindingDigest: String, clockSource: BackgroundIndexClockSource = SystemBackgroundIndexClock()) throws -> BackgroundIndexWorkRecord {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate(); try BackgroundIndexCanonical.identifier(workID)
+            return try transaction {
+                guard let work = try findBackgroundWork(workID) else { throw BackgroundIndexBudgetError.inactive }
+                try work.accepts(bindingDigest: bindingDigest)
+                guard !(try backgroundAdapterQuarantined(work.request.binding.adapterIdentity)) else { throw BackgroundIndexBudgetError.adapterViolation }
+                guard work.state == .prepared else { throw BackgroundIndexBudgetError.inactive }
+                guard let window = try backgroundWindow(work.windowID), window.state == .active else { throw BackgroundIndexBudgetError.inactive }
+                let decision = try observeBackgroundWindow(window, clock: clock)
+                guard !decision.rolloverEligible, decision.pauseReason != .clockUnavailable else { throw BackgroundIndexBudgetError.inactive }
+                let armed = try work.armed(at: clock)
+                try saveBackgroundWindow(decision.window.arming(work.request)); try saveBackgroundWork(armed)
+                return armed
+            }
+        }
+    }
+    private func backgroundLiveWork(workID: String, bindingDigest: String, clock: BackgroundIndexClockSnapshot) throws -> BackgroundIndexWorkRecord {
+        guard let work = try findBackgroundWork(workID), [.armed, .submitted].contains(work.state) else { throw BackgroundIndexBudgetError.inactive }
+        try work.accepts(bindingDigest: bindingDigest)
+        guard let armedClock = work.armedClock, backgroundIndexIdentifierEqual(armedClock.domain, clock.domain),
+              clock.continuousNanoseconds >= armedClock.continuousNanoseconds else { throw BackgroundIndexBudgetError.clockUnavailable }
+        guard !(try backgroundAdapterQuarantined(work.request.binding.adapterIdentity)) else { throw BackgroundIndexBudgetError.adapterViolation }
+        return work
+    }
+    func checkBackgroundPublication(workID: String, bindingDigest: String, clockSource: BackgroundIndexClockSource = SystemBackgroundIndexClock()) throws -> BackgroundIndexWorkRecord {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate()
+            return try prepareBackgroundPublicationLocked(workID: workID, bindingDigest: bindingDigest, clock: clock)
+        }
+    }
+    private func prepareBackgroundPublicationLocked(workID: String, bindingDigest: String, clock: BackgroundIndexClockSnapshot) throws -> BackgroundIndexWorkRecord {
+        try transaction {
+            let work = try backgroundLiveWork(workID: workID, bindingDigest: bindingDigest, clock: clock)
+            try backgroundValidateSource(work.request.binding)
+            try backgroundSourceExecutionComplete(work)
+            if let window = try backgroundWindow(work.windowID), window.state == .active {
+                _ = try observeBackgroundWindow(window, clock: clock)
+            }
+            let submitted = work.state == .armed ? try work.submitted() : work
+            try saveBackgroundWork(submitted); return submitted
+        }
+    }
+    /// Caller already holds its sidecar mutex. The operation may perform only
+    /// bounded SQL/commit on that already-held sidecar, with no new sidecar
+    /// lock, source read, hashing, encoder or blocking observer. This preserves
+    /// sidecar -> main lock order through the final publication boundary.
+    func withBackgroundPublication<T>(workID: String, bindingDigest: String,
+                                      clockSource: BackgroundIndexClockSource = SystemBackgroundIndexClock(),
+                                      operation: () throws -> T) throws -> T {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate()
+            _ = try prepareBackgroundPublicationLocked(workID: workID, bindingDigest: bindingDigest, clock: clock)
+            // The main journal transaction committed before sidecar SQL. If
+            // the process dies after sidecar commit, submitted work retains
+            // its maximum charge and recovers unknown without encoder replay.
+            return try operation()
+        }
+    }
+    func settleBackgroundWork(workID: String, settlement: BackgroundIndexWorkSettlement, clockSource: BackgroundIndexClockSource = SystemBackgroundIndexClock()) throws -> BackgroundIndexWorkRecord {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate(); try settlement.validate()
+            let result = try transaction {
+                guard let work = try findBackgroundWork(workID), let window = try backgroundWindow(work.windowID) else { throw BackgroundIndexBudgetError.inactive }
+                if let existing = work.settlement {
+                    guard existing == settlement else { throw BackgroundIndexBudgetError.conflict }; return work
+                }
+                if settlement.outcome == .completed { try backgroundSourceExecutionComplete(work) }
+                let updated = try work.settled(settlement)
+                var observedWindow = window
+                if window.state == .active { observedWindow = try observeBackgroundWindow(window, clock: clock).window }
+                if work.state == .prepared { observedWindow = try observedWindow.releasingPrepared(work.request) }
+                try saveBackgroundWindow(observedWindow); try saveBackgroundWork(updated); return updated
+            }
+            let id = Data(workID.utf8)
+            claimedBackgroundReaders.remove(id); completedBackgroundSeals.remove(id); completedBackgroundChunkReads.remove(id)
+            return result
+        }
+    }
+    func backgroundWork(workID: String) throws -> BackgroundIndexWorkRecord? {
+        try locked { try BackgroundIndexCanonical.identifier(workID); return try findBackgroundWork(workID) }
+    }
+    func backgroundBudgetSnapshot(clockSource: BackgroundIndexClockSource = SystemBackgroundIndexClock()) throws -> BackgroundIndexBudgetSnapshot {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate()
+            return try transaction {
+                guard let window = try backgroundWindow() else { return try BackgroundIndexBudgetSnapshot(window: nil) }
+                let decision = try observeBackgroundWindow(window, clock: clock)
+                let remaining = try decision.window.remaining()
+                let exhausted = remaining.isZero || BackgroundIndexResource.allCases.contains { remaining[$0] == 0 }
+                return try BackgroundIndexBudgetSnapshot(window: decision.window, rolloverEligible: decision.rolloverEligible,
+                    pauseReason: decision.pauseReason ?? (exhausted && !decision.rolloverEligible ? .exhausted : nil))
+            }
+        }
+    }
+    private func recoverInterruptedBackgroundWork() throws {
+        guard let database else { throw BackgroundIndexBudgetError.invalid }
+        try BackgroundIndexJournal.validate(database: database)
+        try transaction {
+            let ids = try query("SELECT id FROM background_index_work WHERE state IN ('prepared','armed','submitted') ORDER BY id") { string($0, 0) }
+            for id in ids {
+                guard let work = try findBackgroundWork(id), var window = try backgroundWindow(work.windowID) else { throw BackgroundIndexBudgetError.invalid }
+                if work.state == .prepared { window = try window.releasingPrepared(work.request) }
+                let recovered = try work.recovered(receiptID: UUID().uuidString)
+                try saveBackgroundWindow(window); try saveBackgroundWork(recovered)
+            }
+        }
+        try BackgroundIndexJournal.validate(database: database)
+    }
+    func makeBackgroundSourceReader(for supplied: BackgroundIndexWorkRecord, clockSource: BackgroundIndexClockSource = SystemBackgroundIndexClock()) throws -> BackgroundSourceReader {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate()
+            let work = try backgroundLiveWork(workID: supplied.request.id, bindingDigest: supplied.bindingDigest, clock: clock)
+            guard work == supplied, case .source = work.request.binding.descriptor,
+                  claimedBackgroundReaders.insert(Data(work.request.id.utf8)).inserted else { throw BackgroundIndexBudgetError.conflict }
+            do { return try BackgroundSourceReader(owner: self, work: work, clockSource: clockSource) }
+            catch { claimedBackgroundReaders.remove(Data(work.request.id.utf8)); throw error }
+        }
+    }
+    fileprivate func backgroundReaderGate(work: BackgroundIndexWorkRecord, clockSource: BackgroundIndexClockSource) throws {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate()
+            _ = try backgroundLiveWork(workID: work.request.id, bindingDigest: work.bindingDigest, clock: clock)
+        }
+    }
+    private func backgroundSourceExecutionComplete(_ work: BackgroundIndexWorkRecord) throws {
+        guard case .source(let operation, let binding) = work.request.binding.descriptor else { return }
+        let id = Data(work.request.id.utf8)
+        if operation == .chunkAttempt {
+            guard completedBackgroundChunkReads.contains(id) else { throw BackgroundIndexBudgetError.inactive }
+        }
+        if operation == .initialSeal || operation == .emptySource || binding.requiresFinalSeal {
+            guard completedBackgroundSeals.contains(id) else { throw BackgroundIndexBudgetError.inactive }
+        }
+    }
+    fileprivate func backgroundReaderPerformed(work: BackgroundIndexWorkRecord, seal: Bool, clockSource: BackgroundIndexClockSource) throws {
+        try locked {
+            let clock = try clockSource.now(); try clock.validate()
+            _ = try backgroundLiveWork(workID: work.request.id, bindingDigest: work.bindingDigest, clock: clock)
+            if seal { completedBackgroundSeals.insert(Data(work.request.id.utf8)) }
+            else { completedBackgroundChunkReads.insert(Data(work.request.id.utf8)) }
+        }
+    }
+    func backgroundReaderDiagnostics() -> BackgroundReaderDiagnostics {
+        backgroundDiagnosticsLock.lock(); defer { backgroundDiagnosticsLock.unlock() }
+        return BackgroundReaderDiagnostics(payloadPages: backgroundPayloadPages, materializedBytes: backgroundMaterializedBytes)
+    }
+    fileprivate func backgroundReadPerformed(bytes: Int) {
+        backgroundDiagnosticsLock.lock(); defer { backgroundDiagnosticsLock.unlock() }
+        // Diagnostic-only saturating counters have no accounting authority.
+        let (pages, pagesOverflow) = backgroundPayloadPages.addingReportingOverflow(1)
+        let (total, bytesOverflow) = backgroundMaterializedBytes.addingReportingOverflow(bytes)
+        backgroundPayloadPages = pagesOverflow ? Int.max : pages
+        backgroundMaterializedBytes = bytesOverflow ? Int.max : total
+    }
+    static func validateBackgroundIndexJournal(database: OpaquePointer) throws { try BackgroundIndexJournal.validate(database: database) }
+}
+
+struct BackgroundReaderDiagnostics: Equatable {
+    let payloadPages: Int
+    let materializedBytes: Int
+}
+
+/// A private read-only SQLite connection owns no mutable main-store handle.
+/// It strongly retains the process owner, and spends only the source functions
+/// authorized by its one claimed, durably armed work descriptor.
+final class BackgroundSourceReader: @unchecked Sendable {
+    private let owner: MemoryStore
+    private let work: BackgroundIndexWorkRecord
+    private let clockSource: BackgroundIndexClockSource
+    private let source: BackgroundIndexSourceReference
+    private let operation: BackgroundIndexSourceOperation
+    private let binding: BackgroundIndexSourceBinding
+    private var database: OpaquePointer?
+    private let mutex = NSLock()
+    private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+    private var didChunk = false
+    private var didSeal = false
+    private var explicitVerifications = 0
+
+    fileprivate init(owner: MemoryStore, work: BackgroundIndexWorkRecord, clockSource: BackgroundIndexClockSource) throws {
+        guard case .source(let operation, let binding) = work.request.binding.descriptor else { throw BackgroundIndexBudgetError.invalid }
+        self.owner = owner; self.work = work; self.clockSource = clockSource
+        self.source = binding.source; self.operation = operation; self.binding = binding
+        let path = owner.directory.appendingPathComponent("memory.sqlite3").path
+        guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            if let database { sqlite3_close(database); self.database = nil }
+            throw MemoryError.database("background source reader could not open")
+        }
+        sqlite3_busy_timeout(database, 5000)
+    }
+    deinit { if let database { sqlite3_close(database) } }
+
+    private func assertSource(_ reference: MemorySourceReference) throws {
+        guard reference.sequence == source.sequence, backgroundIndexIdentifierEqual(reference.eventID, source.eventID),
+              backgroundIndexIdentifierEqual(reference.projectID, source.projectID), backgroundIndexIdentifierEqual(reference.conversationID, source.conversationID),
+              reference.role.rawValue == source.role, reference.status.rawValue == source.status,
+              backgroundIndexIdentifierEqual(reference.createdAt, source.createdAt), reference.digest == source.digest,
+              reference.byteCount == source.byteCount else { throw BackgroundIndexBudgetError.scopeMismatch }
+    }
+    private func statement(projection: String, offset: Int? = nil, length: Int? = nil) throws -> OpaquePointer {
+        var pointer: OpaquePointer?
+        let sql = "SELECT " + projection + " FROM events WHERE sequence=? AND id=? AND conversation_id=? AND project_id=? AND role=? AND status=? AND created_at=? AND digest=? AND byte_count=?"
+        guard sqlite3_prepare_v2(database, sql, -1, &pointer, nil) == SQLITE_OK, let prepared = pointer else { throw BackgroundIndexBudgetError.invalid }
+        do {
+            var index: Int32 = 1
+            if let offset, let length {
+                guard sqlite3_bind_int64(prepared, index, Int64(max(1, offset))) == SQLITE_OK else { throw BackgroundIndexBudgetError.invalid }; index += 1
+                guard sqlite3_bind_int64(prepared, index, Int64(length + 1)) == SQLITE_OK else { throw BackgroundIndexBudgetError.invalid }; index += 1
+            }
+            guard sqlite3_bind_int64(prepared, index, Int64(source.sequence)) == SQLITE_OK else { throw BackgroundIndexBudgetError.invalid }; index += 1
+            for value in [source.eventID, source.conversationID, source.projectID, source.role, source.status, source.createdAt, source.digest] {
+                let result = value.withCString { sqlite3_bind_text(prepared, index, $0, Int32(value.utf8.count), transient) }
+                guard result == SQLITE_OK else { throw BackgroundIndexBudgetError.invalid }; index += 1
+            }
+            guard sqlite3_bind_int64(prepared, index, Int64(source.byteCount)) == SQLITE_OK else { throw BackgroundIndexBudgetError.invalid }
+            return prepared
+        } catch { sqlite3_finalize(prepared); throw error }
+    }
+    private func verifyLocked() throws {
+        let row = try statement(projection: "1")
+        defer { sqlite3_finalize(row) }
+        guard sqlite3_step(row) == SQLITE_ROW, sqlite3_step(row) == SQLITE_DONE else { throw BackgroundIndexBudgetError.scopeMismatch }
+    }
+    func verify(source reference: MemorySourceReference) throws {
+        try owner.backgroundReaderGate(work: work, clockSource: clockSource)
+        mutex.lock(); defer { mutex.unlock() }
+        try assertSource(reference)
+        guard explicitVerifications < 2 else { throw BackgroundIndexBudgetError.inactive }
+        explicitVerifications += 1
+        try verifyLocked()
+    }
+    private func page(offset: Int, length: Int) throws -> PayloadPage {
+        guard offset >= 0, offset <= source.byteCount, length > 0, length <= MemoryStore.maximumPageBytes else { throw BackgroundIndexBudgetError.invalid }
+        let row = try statement(projection: "substr(payload,?,?)", offset: offset, length: length)
+        defer { sqlite3_finalize(row) }
+        guard sqlite3_step(row) == SQLITE_ROW else { throw BackgroundIndexBudgetError.scopeMismatch }
+        let bytes: Data
+        if let pointer = sqlite3_column_blob(row, 0) { bytes = Data(bytes: pointer, count: Int(sqlite3_column_bytes(row, 0))) }
+        else { bytes = Data() }
+        owner.backgroundReadPerformed(bytes: bytes.count)
+        guard sqlite3_step(row) == SQLITE_DONE, bytes.count <= length + 1 else { throw BackgroundIndexBudgetError.invalid }
+        let skip = offset == 0 ? 0 : 1
+        guard bytes.count >= skip else { throw BackgroundIndexBudgetError.invalid }
+        let requested = Data(bytes.dropFirst(skip).prefix(length))
+        if let first = requested.first, first & 0xc0 == 0x80 { throw BackgroundIndexBudgetError.invalid }
+        var end = requested.count
+        var text: String?
+        while end >= 0 {
+            text = String(data: requested.prefix(end), encoding: .utf8)
+            if text != nil { break }
+            end -= 1
+            guard requested.count - end <= 3 else { throw BackgroundIndexBudgetError.invalid }
+        }
+        guard let text, end > 0 || offset == source.byteCount else { throw BackgroundIndexBudgetError.invalid }
+        let next = offset + end
+        guard next <= source.byteCount else { throw BackgroundIndexBudgetError.invalid }
+        return PayloadPage(eventID: source.eventID, offset: offset, text: text, byteCount: end, totalBytes: source.byteCount,
+            nextOffset: next < source.byteCount ? next : nil, digest: source.digest, status: CaptureStatus(rawValue: source.status)!)
+    }
+    func readChunk(source reference: MemorySourceReference) throws -> PayloadPage {
+        try owner.backgroundReaderGate(work: work, clockSource: clockSource)
+        mutex.lock(); defer { mutex.unlock() }
+        try assertSource(reference)
+        guard operation == .chunkAttempt, !didChunk else { throw BackgroundIndexBudgetError.inactive }
+        didChunk = true
+        let value = try page(offset: binding.offset, length: binding.byteCount)
+        try owner.backgroundReaderPerformed(work: work, seal: false, clockSource: clockSource)
+        return value
+    }
+    func validateCompleteSource(source reference: MemorySourceReference) throws {
+        try owner.backgroundReaderGate(work: work, clockSource: clockSource)
+        mutex.lock(); defer { mutex.unlock() }
+        try assertSource(reference)
+        guard !didSeal, operation == .initialSeal || operation == .emptySource || (operation == .chunkAttempt && binding.requiresFinalSeal) else {
+            throw BackgroundIndexBudgetError.inactive
+        }
+        didSeal = true
+        try verifyLocked()
+        var digest = SHA256(), offset = 0, pages = 0
+        let maximumPages = source.byteCount / 4093 + 1
+        while offset < source.byteCount {
+            guard pages < maximumPages else { throw BackgroundIndexBudgetError.invalid }
+            let value = try page(offset: offset, length: min(4096, source.byteCount - offset))
+            let payload = Data(value.text.utf8)
+            guard value.offset == offset, value.byteCount > 0, payload.count == value.byteCount else { throw BackgroundIndexBudgetError.invalid }
+            digest.update(data: payload); offset += value.byteCount; pages += 1
+        }
+        guard offset == source.byteCount, digest.finalize().map({ String(format: "%02x", $0) }).joined() == source.digest else { throw BackgroundIndexBudgetError.invalid }
+        try verifyLocked()
+        try owner.backgroundReaderPerformed(work: work, seal: true, clockSource: clockSource)
+    }
 }

@@ -46,6 +46,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var credentialOrigin: String?
     private var store: MemoryStore?
     private var semanticIndex: SemanticIndex?
+    private var semanticInitializationBudgetFailure: BackgroundIndexBudgetError?
     private var archiveOperationInProgress = false
     private var storedChats: [StoredConversation] = []
     private var activeChat: StoredConversation?
@@ -451,8 +452,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         do {
             let memory = try MemoryStore(directory: dataDirectory)
             store = memory
-            semanticIndex = try? SemanticIndex(store: memory)
-            if !CommandLine.arguments.contains("--ui-self-test") { semanticIndex?.schedule(projectID: projectID) }
+            initializeSemanticIndex(memory: memory)
+            scheduleSemanticMaintenance()
             preferences = LocalSettings.load(in: memory.directory)
             selectedProfile = ModelProfile(rawValue: preferences.profile) ?? .customLocal
             storedChats = try memory.listConversations(projectID: projectID)
@@ -465,6 +466,60 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             memoryHealthy = false
             status.stringValue = "The local memory store could not be opened. Close other Boros processes and check its data directory."
         }
+    }
+
+    private func initializeSemanticIndex(memory: MemoryStore) {
+        guard semanticIndex == nil else { return }
+        do {
+            semanticIndex = try SemanticIndex(store: memory)
+            semanticInitializationBudgetFailure = nil
+        } catch let failure as BackgroundIndexBudgetError {
+            semanticInitializationBudgetFailure = failure
+        } catch {
+            // Optional semantic availability does not invalidate accepted
+            // text capture or the original-source search path.
+            semanticInitializationBudgetFailure = nil
+        }
+    }
+
+    private func scheduleSemanticMaintenance() {
+        guard !CommandLine.arguments.contains("--ui-self-test"), let store else { return }
+        if semanticIndex == nil, semanticInitializationBudgetFailure != nil,
+           let snapshot = try? store.backgroundBudgetSnapshot(), snapshot.pauseReason != .clockUnavailable,
+           snapshot.rolloverEligible || (snapshot.remaining.encoderCalls >= 2 && snapshot.remaining.encoderInputBytes >= 65) {
+            initializeSemanticIndex(memory: store)
+        }
+        semanticIndex?.schedule(projectID: projectID)
+    }
+
+    @objc private func showBackgroundIndexStatus() {
+        guard memoryHealthy, let store else { return }
+        let alert = NSAlert()
+        alert.messageText = "Background indexing"
+        do {
+            let snapshot = try store.backgroundBudgetSnapshot()
+            let reason = semanticIndex?.backgroundPauseReason ?? semanticInitializationBudgetFailure?.failureCode
+                ?? snapshot.pauseReason.map { $0 == .exhausted ? BackgroundIndexBudgetError.exhausted.failureCode : BackgroundIndexBudgetError.clockUnavailable.failureCode }
+            let state: String
+            if reason == BackgroundIndexBudgetError.adapterViolation.failureCode { state = "Indexing is paused because the semantic encoder failed a verification check." }
+            else if reason == BackgroundIndexBudgetError.clockUnavailable.failureCode { state = "Indexing is paused because the clock could not be verified." }
+            else if reason != nil && reason != BackgroundIndexBudgetError.exhausted.failureCode { state = "Indexing is paused because maintenance could not be verified." }
+            else if snapshot.window == nil { state = "No maintenance allowance has been started." }
+            else if snapshot.rolloverEligible { state = "A new allowance is available on the next maintenance trigger." }
+            else if reason == BackgroundIndexBudgetError.exhausted.failureCode { state = "Indexing is paused because a daily resource allowance cannot fit the next operation." }
+            else if semanticIndex == nil { state = "The semantic encoder is unavailable." }
+            else { state = "Indexing can continue within its current allowance." }
+            var details = [state]
+            if let window = snapshot.window {
+                details += ["Encoder calls charged: \(window.charged.encoderCalls) of \(window.limits.resources.encoderCalls).",
+                            "Encoder input bytes charged: \(window.charged.encoderInputBytes) of \(window.limits.resources.encoderInputBytes).",
+                            "Declared source work: \(window.charged.rawSourceBytes) bytes.",
+                            "Calls with unknown input-token usage: \(window.unknownEncoderCalls)."]
+            }
+            details.append("Semantic coverage may be incomplete. Original sources remain searchable.")
+            alert.informativeText = details.joined(separator: "\n\n")
+        } catch { alert.informativeText = "The maintenance budget could not be verified. Original-source search remains available." }
+        alert.beginSheetModal(for: window)
     }
 
     private func savePreferences() {
@@ -978,7 +1033,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     _ = try store.append(conversationID: activeChat.id, role: .assistant, text: pendingResponse,
                         status: captureStatus, turnID: pendingTurnID, eventID: pendingAssistantID)
                 }
-                if !CommandLine.arguments.contains("--ui-self-test") { semanticIndex?.schedule(projectID: projectID) }
+            scheduleSemanticMaintenance()
             } catch {
                 memoryHealthy = false
                 status.stringValue = "Response finalization failed. Restart Boros to recover its committed output."
@@ -1094,6 +1149,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     @objc private func redoEdit(_ sender: Any?) { activeUndoManager?.redo() }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(showBackgroundIndexStatus) { return memoryHealthy && !archiveOperationInProgress }
         if menuItem.action == #selector(createBackup) || menuItem.action == #selector(restoreBackup) {
             return memoryHealthy && !archiveOperationInProgress
         }
@@ -1566,6 +1622,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         backup.target = self
         let restore = fileMenu.addItem(withTitle: "Restore Backup to New Folder…", action: #selector(restoreBackup), keyEquivalent: "")
         restore.target = self
+        let background = fileMenu.addItem(withTitle: "Background Indexing Status…", action: #selector(showBackgroundIndexStatus), keyEquivalent: "")
+        background.target = self
         fileItem.title = "File"; fileItem.submenu = fileMenu; menu.addItem(fileItem)
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
@@ -1805,6 +1863,27 @@ private enum BonsaiPlayground {
         signal(SIGPIPE, SIG_IGN)
         _ = ReasoningSupervisor.runIfRequested()
         if let code = BackupCommand.run(arguments: CommandLine.arguments) { exit(code) }
+        if CommandLine.arguments.contains("--background-budget-self-test") {
+            do {
+                let checks = try BackgroundIndexBudgetChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"background_budget_self_test\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--background-ledger-self-test") {
+            do {
+                let checks = try BackgroundIndexLedgerChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"background_ledger_self_test\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--background-worker-self-test") {
+            do {
+                let checks = try BackgroundIndexWorkerChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"background_worker_self_test\":false}"); exit(1) }
+        }
         if CommandLine.arguments.contains("--local-read-self-test") {
             do {
                 let checks = try LocalReadChecks.run()

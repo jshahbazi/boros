@@ -60,6 +60,9 @@ struct BackupInventory: Codable, Equatable {
     var episodeUncertainWork: Int? = nil
     var episodeCharged: EpisodeResources? = nil
     var episodeHeld: EpisodeResources? = nil
+    // Only schema 5 has authoritative background maintenance accounting.
+    // Recognized schemas 1–4 establish that this inventory is absent.
+    var backgroundIndex: BackgroundIndexInventory? = nil
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Canonical bytes preserve SQLite's exact identifier semantics for
         // scopes, providers and model IDs, including equivalent-looking Unicode.
@@ -134,7 +137,7 @@ enum BackupArchive {
         let candidate = try Database(copied.appendingPathComponent("memory.sqlite3"), writable: true)
         defer { candidate.close() }
         let version = try candidate.integer("PRAGMA user_version")
-        guard (1...4).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
+        guard (1...5).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
         let actualSchema = try schemaObjects(candidate)
         candidate.close()
         guard actualSchema == (try recognizedSchemaObjects(version: version, at: reference)) else {
@@ -342,14 +345,20 @@ enum BackupArchive {
     }
 
     private static func recognizedSchemaObjects(version: Int, at directory: URL) throws -> [SchemaObject] {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        try writeNewFile(Data(), at: directory.appendingPathComponent("memory.sqlite3"))
-        let writable = try Database(directory.appendingPathComponent("memory.sqlite3"), writable: true)
-        let sql = try historicalSchemaSQL(version: version)
-        guard sqlite3_exec(writable.handle, sql, nil, nil, nil) == SQLITE_OK else {
-            writable.close(); throw BackupError.database
+        if version == 5 {
+            // Only the current contract derives from the current owner. All
+            // historical schemas, including 4, retain their frozen DDL.
+            do { let owner = try MemoryStore(directory: directory); withExtendedLifetime(owner) {} }
+        } else {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try writeNewFile(Data(), at: directory.appendingPathComponent("memory.sqlite3"))
+            let writable = try Database(directory.appendingPathComponent("memory.sqlite3"), writable: true)
+            let sql = try historicalSchemaSQL(version: version)
+            guard sqlite3_exec(writable.handle, sql, nil, nil, nil) == SQLITE_OK else {
+                writable.close(); throw BackupError.database
+            }
+            writable.close()
         }
-        writable.close()
         let reference = try Database(directory.appendingPathComponent("memory.sqlite3"), writable: false)
         defer { reference.close() }
         return try schemaObjects(reference)
@@ -389,7 +398,7 @@ enum BackupArchive {
             files.append(try fileRecord(staging.appendingPathComponent("settings.json"), name: "settings.json"))
             settingsCapture = "independent-atomic-file-point-capture"
         }
-        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 4, archiveID: UUID().uuidString,
+        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 5, archiveID: UUID().uuidString,
             createdAt: timestamp(), databaseCapture: databaseCapture, settingsCapture: settingsCapture,
             control: control, files: files, inventory: inventory, excluded: excluded)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -408,7 +417,7 @@ enum BackupArchive {
         let manifest: BackupManifest
         do { manifest = try JSONDecoder().decode(BackupManifest.self, from: manifestData) }
         catch { throw BackupError.invalid("missing or malformed archive manifest") }
-        guard manifest.archiveVersion == 1, (1...4).contains(manifest.databaseSchema),
+        guard manifest.archiveVersion == 1, (1...5).contains(manifest.databaseSchema),
               UUID(uuidString: manifest.archiveID) != nil, !manifest.createdAt.isEmpty,
               manifest.databaseCapture == databaseCapture, manifest.excluded == excluded,
               ["absent", "independent-atomic-file-point-capture"].contains(manifest.settingsCapture),
@@ -494,14 +503,33 @@ enum BackupArchive {
                   restored.episodeUncertainWork == manifest.inventory.episodeUncertainWork,
                   restored.episodeCharged == manifest.inventory.episodeCharged,
                   restored.episodeHeld == (try archivedHeld.subtracting(preparedHold)),
-                  restored.chatEpisodes == (manifest.databaseSchema == 4 ? manifest.inventory.chatEpisodes : manifest.inventory.episodes),
-                  restored.localReadEpisodes == (manifest.databaseSchema == 4 ? manifest.inventory.localReadEpisodes : 0) else {
+                  restored.chatEpisodes == (manifest.databaseSchema >= 4 ? manifest.inventory.chatEpisodes : manifest.inventory.episodes),
+                  restored.localReadEpisodes == (manifest.databaseSchema >= 4 ? manifest.inventory.localReadEpisodes : 0) else {
                 throw BackupError.invalid("restored episode recovery inventory mismatch")
             }
         }
         if manifest.databaseSchema < 3 {
             guard restored.episodes == 0, restored.chatEpisodes == 0, restored.localReadEpisodes == 0 else {
                 throw BackupError.invalid("legacy restore introduced episode records")
+            }
+        }
+        guard let background = restored.backgroundIndex else { throw BackupError.invalid("restored background inventory is missing") }
+        if manifest.databaseSchema == 5 {
+            guard let archived = manifest.inventory.backgroundIndex,
+                  background.windows == archived.windows, background.works == archived.works,
+                  background.prepared == 0, background.uncertain == archived.uncertain,
+                  background.charged == archived.charged,
+                  background.held == (try archived.held.subtracting(archived.preparedRelease)),
+                  background.unknownEncoderCalls == archived.unknownEncoderCalls,
+                  background.preparedRelease == .zero else {
+                throw BackupError.invalid("restored background recovery inventory mismatch")
+            }
+        } else {
+            guard manifest.inventory.backgroundIndex == nil,
+                  background.windows == 0, background.works == 0,
+                  background.charged == .zero, background.held == .zero,
+                  background.unknownEncoderCalls == 0 else {
+                throw BackupError.invalid("legacy restore introduced background work")
             }
         }
         // No stale archive manifest is placed alongside the recovered database.
@@ -576,7 +604,7 @@ enum BackupArchive {
         let db = try Database(url, writable: false)
         defer { db.close() }
         let schema = try db.integer("PRAGMA user_version")
-        guard (1...4).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
+        guard (1...5).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
         guard try db.texts("PRAGMA integrity_check") == ["ok"], try db.integer("SELECT count(*) FROM pragma_foreign_key_check") == 0 else {
             throw BackupError.invalid("SQLite integrity or foreign-key check failed")
         }
@@ -584,6 +612,7 @@ enum BackupArchive {
         var allowedTables = Set(["conversations", "events", "drafts", "settings", "sqlite_sequence", "event_fts", "event_fts_data", "event_fts_idx", "event_fts_docsize", "event_fts_config"])
         if schema >= 2 { allowedTables.formUnion(["invocations", "invocation_chunks"]) }
         if schema >= 3 { allowedTables.formUnion(["episodes", "episode_resource_totals", "episode_request_snapshots", "episode_work"]) }
+        if schema == 5 { allowedTables.formUnion(["background_index_windows", "background_index_work"]) }
         guard Set(try db.texts("SELECT name FROM sqlite_schema WHERE type='table'")) == allowedTables,
               try db.integer("SELECT count(*) FROM sqlite_schema WHERE type IN ('view','trigger')") == 0 else {
             throw BackupError.invalid("unsupported database object inventory")
@@ -602,7 +631,11 @@ enum BackupArchive {
             columns["episode_work"] = ["id", "episode_id", "parent_id", "kind", "adapter_identity", "request_json", "request_digest", "snapshot_digest", "revision", "state", "charged_json", "held_json", "observed_json", "receipt_id", "receipt_json", "receipt_digest", "created_ticks", "armed_ticks", "ended_ticks", "recovered", "adapter_violation"]
         }
         if schema == 1 { columns.removeValue(forKey: "invocations"); columns.removeValue(forKey: "invocation_chunks") }
-        if schema == 4 { columns["episodes"]! += ["origin_json", "origin_digest"] }
+        if schema >= 4 { columns["episodes"]! += ["origin_json", "origin_digest"] }
+        if schema == 5 {
+            columns["background_index_windows"] = ["sequence", "id", "state", "revision", "limits_json", "limits_digest", "started_clock_json", "started_clock_digest", "window_json", "window_digest"]
+            columns["background_index_work"] = ["id", "window_id", "state", "adapter_identity", "binding_digest", "request_digest", "record_json", "record_digest", "receipt_id", "adapter_violation"]
+        }
         for (table, expected) in columns {
             guard try db.texts("SELECT name FROM pragma_table_info('\(table)') ORDER BY cid") == expected else { throw BackupError.invalid("unsupported table contract") }
         }
@@ -681,13 +714,13 @@ enum BackupArchive {
                 }
             }
         }
-        if schema == 4 {
+        if schema >= 4 {
             guard try db.integer("SELECT count(*) FROM invocations i JOIN episodes ep ON ep.id=i.episode_id WHERE ep.conversation_id IS NULL OR ep.turn_id IS NULL OR ep.human_event_id IS NULL") == 0 else {
                 throw BackupError.invalid("local read episode cannot own an invocation")
             }
         }
         var scopes: [BackupScopeCount] = []
-        let scopeQuery = schema == 4
+        let scopeQuery = schema >= 4
             ? "SELECT project_id,(SELECT count(*) FROM conversations c WHERE c.project_id=p.project_id) FROM (SELECT project_id FROM conversations UNION SELECT project_id FROM episodes) p ORDER BY project_id"
             : "SELECT project_id,count(*) FROM conversations GROUP BY project_id ORDER BY project_id"
         try db.each(scopeQuery) { row in
@@ -719,7 +752,7 @@ enum BackupArchive {
             }
             inventory.episodeCharged = charged
             inventory.episodeHeld = held
-            if schema == 4 {
+            if schema >= 4 {
                 var chat = 0, localRead = 0
                 try db.each("SELECT origin_json FROM episodes") { row in
                     let origin = try JSONDecoder().decode(EpisodeOrigin.self, from: db.blob(row, 0))
@@ -728,6 +761,11 @@ enum BackupArchive {
                 guard chat + localRead == inventory.episodes else { throw BackupError.invalid("episode origin inventory mismatch") }
                 inventory.chatEpisodes = chat; inventory.localReadEpisodes = localRead
             }
+        }
+        if schema == 5 {
+            guard let handle = db.handle else { throw BackupError.database }
+            do { inventory.backgroundIndex = try BackgroundIndexJournal.inventory(database: handle) }
+            catch { throw BackupError.invalid("background index journal failed integrity verification") }
         }
         return inventory
     }

@@ -225,7 +225,13 @@ enum EpisodeChecks {
         store = nil
         var database: OpaquePointer?
         guard sqlite3_open(directory.appendingPathComponent("memory.sqlite3").path, &database) == SQLITE_OK, let handle = database else { throw MemoryError.database("could not prepare schema two fixture") }
-        let sql = "ALTER TABLE invocations DROP COLUMN episode_work_id; ALTER TABLE invocations DROP COLUMN episode_id; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=2;"
+        // This fixture starts in the current schema but represents a genuine
+        // schema-2 store. It contains no optional-maintenance work.
+        guard try scalar(handle, "SELECT count(*) FROM background_index_work") == "0",
+              try scalar(handle, "SELECT count(*) FROM background_index_windows") == "0" else {
+            sqlite3_close(handle); throw MemoryError.database("historical fixture contains background work")
+        }
+        let sql = "DROP TABLE background_index_work; DROP TABLE background_index_windows; ALTER TABLE invocations DROP COLUMN episode_work_id; ALTER TABLE invocations DROP COLUMN episode_id; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=2;"
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else { sqlite3_close(handle); throw MemoryError.database("could not construct schema two fixture") }
         sqlite3_close(handle)
         store = try MemoryStore(directory: directory)
@@ -577,9 +583,18 @@ enum EpisodeChecks {
     /// The schema-3 parent is deliberately frozen, independent of current SQL.
     static func downgradeSyntheticChatParentToThree(_ directory: URL) throws {
         try inspect(directory) { database in
+            let background = try scalar(database, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='background_index_work'")
+            if background == "1" {
+                guard try scalar(database, "SELECT count(*) FROM background_index_work") == "0",
+                      try scalar(database, "SELECT count(*) FROM background_index_windows") == "0" else {
+                    throw MemoryError.database("historical fixture contains background work")
+                }
+            }
             let sql = """
                 PRAGMA foreign_keys=OFF;
                 BEGIN IMMEDIATE;
+                DROP TABLE IF EXISTS background_index_work;
+                DROP TABLE IF EXISTS background_index_windows;
                 CREATE TABLE episodes_three (
                   id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
                   project_id TEXT NOT NULL, turn_id TEXT NOT NULL, human_event_id TEXT NOT NULL UNIQUE REFERENCES events(id),

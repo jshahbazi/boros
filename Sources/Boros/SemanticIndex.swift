@@ -31,18 +31,11 @@ final class AppleSentenceEmbeddingAdapter: SemanticEmbeddingAdapter {
         let supported = NLEmbedding.supportedSentenceEmbeddingRevisions(for: .english)
         let candidate = supported.contains(1) ? NLEmbedding.sentenceEmbedding(for: .english, revision: 1) : nil
         embedding = candidate?.revision == 1 && candidate?.dimension == 512 && candidate?.language == .english ? candidate : nil
-        let probes = ["The bicycle has two wheels.", "Clouds can bring rain to a dry garden."]
-        var probeData = Data()
-        for text in probes {
-            if let vector = embedding?.vector(for: text), let normalized = try? SemanticIndex.normalized(vector.map(Float.init), dimension: dimension) {
-                probeData.append(SemanticIndex.vectorData(normalized))
-            }
-        }
         metadata = ["provider": "apple.NaturalLanguage.NLEmbedding.sentence", "language": "en", "revision": "1",
             "dimension": "512", "os": ProcessInfo.processInfo.operatingSystemVersionString,
             "guard": "ascii-letters-sentence-en-confidence-0.90-code-markers-v1",
             "normalization": "finite-l2-float32-le-v1", "probe_version": "public-two-sentences-v1",
-            "probe_digest": probeData.count == probes.count * dimension * 4 ? SemanticIndex.digest(probeData) : "unavailable"]
+            "probe_digest": embedding == nil ? "unavailable" : "not-probed"]
     }
 
     func encode(_ text: String) throws -> SemanticEncoding {
@@ -194,6 +187,7 @@ struct SemanticWorkReceipt {
     let publishedChunks: Int
     let failedChunks: Int
     let schedulingFrontier: Int
+    var budgetPauseReason: String? = nil
 }
 
 enum SemanticError: LocalizedError {
@@ -220,9 +214,20 @@ final class SemanticIndex: @unchecked Sendable {
     let indexFingerprint: String
     let rankingFingerprint: String
     private let encoder: SemanticEmbeddingAdapter
+    private let encoderMetadata: [String: String]
+    private let backgroundClock: BackgroundIndexClockSource
+    private let workerObserver: BackgroundIndexWorkerObserver?
+    private let backgroundLimits: BackgroundIndexLimits
+    private let backgroundAdapterIdentity: String
+    // Serialize worker attempts without holding the sidecar mutex across bytes
+    // or inference. Searches can continue during a slow background encoder.
+    private let processMutex = NSLock()
+    private var initialSealToken: BackgroundInitialSealToken?
+    private let maintenanceStateMutex = NSLock()
+    private var maintenancePauseReason: String?
     private let mutex = NSRecursiveLock()
     private let worker = DispatchQueue(label: "dev.boros.semantic-index", qos: .utility)
-    private var scheduledProjects: Set<String> = []
+    private var scheduledProjects: Set<Data> = []
     private var database: OpaquePointer?
     private var ownerFD: Int32 = -1
     // Set only while holding the index mutex. It checks the authoritative
@@ -232,15 +237,29 @@ final class SemanticIndex: @unchecked Sendable {
     private var activeSearchFence: EpisodeSQLFence?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    init(store: MemoryStore, encoder: SemanticEmbeddingAdapter = AppleSentenceEmbeddingAdapter(), configuration: SemanticIndexConfiguration = .init()) throws {
+    init(store: MemoryStore, encoder: SemanticEmbeddingAdapter = AppleSentenceEmbeddingAdapter(), configuration: SemanticIndexConfiguration = .init(),
+         backgroundClock: BackgroundIndexClockSource = SystemBackgroundIndexClock(),
+         backgroundLimits: BackgroundIndexLimits = .development, workerObserver: BackgroundIndexWorkerObserver? = nil) throws {
         guard (64...4096).contains(configuration.chunkBytes), (1...1000).contains(configuration.maximumNewSourcesPerRun),
               (1...65536).contains(configuration.maximumChunksPerRun), (1...65536).contains(configuration.maximumCandidateChunks),
               (1...1000).contains(configuration.maximumManifestSources), (1...1000).contains(configuration.maximumReportedHoles),
               (1...10).contains(configuration.maximumFailureAttempts), (1...1000).contains(configuration.reciprocalRankConstant),
               (1...8192).contains(encoder.dimension) else { throw SemanticError.invalid }
         self.store = store; self.encoder = encoder; self.configuration = configuration
+        self.backgroundClock = backgroundClock; self.backgroundLimits = backgroundLimits; self.workerObserver = workerObserver
+        try backgroundLimits.validate()
+        backgroundAdapterIdentity = "semantic-encoder-observation-v1:" + Self.digest(try Self.canonical(encoder.metadata.filter { $0.key != "probe_digest" }))
+        if encoder is AppleSentenceEmbeddingAdapter {
+            encoderMetadata = try BackgroundWorkerAccounting.probe(store: store, encoder: encoder,
+                adapterIdentity: backgroundAdapterIdentity, clock: backgroundClock, limits: backgroundLimits)
+        } else {
+            // Injected adapters declare their identity and perform no hidden
+            // initialization inference. Any explicit test probe uses the same
+            // metered helper as the product adapter.
+            encoderMetadata = encoder.metadata
+        }
         directory = store.directory.appendingPathComponent("semantic", isDirectory: true)
-        encoderFingerprint = Self.digest(try Self.canonical(encoder.metadata.merging(["declared_dimension": String(encoder.dimension)]) { _, actual in actual }))
+        encoderFingerprint = Self.digest(try Self.canonical(encoderMetadata.merging(["declared_dimension": String(encoder.dimension)]) { _, actual in actual }))
         indexFingerprint = Self.digest(try Self.canonical(["encoder": encoderFingerprint, "chunker": "utf8-whitespace-v1", "chunk_bytes": String(configuration.chunkBytes), "schema": "2-source-seal"]))
         rankingFingerprint = Self.digest(try Self.canonical(["ranking": "literal-first-rrf-cosine-v1", "rrf_constant": String(configuration.reciprocalRankConstant),
             "candidate_cap": String(configuration.maximumCandidateChunks), "lexical": "caller-query-anyterm-prefiltered-exclusions-v2",
@@ -287,7 +306,7 @@ final class SemanticIndex: @unchecked Sendable {
                 try execute("CREATE INDEX IF NOT EXISTS chunk_scope ON chunks(index_id,project_id,source_sequence,offset)")
                 try execute("CREATE TABLE IF NOT EXISTS manifests (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload BLOB NOT NULL)")
                 try execute("CREATE TABLE IF NOT EXISTS raw_snapshots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, payload BLOB NOT NULL)")
-                let metadata = try Self.canonical(encoder.metadata)
+                let metadata = try Self.canonical(encoderMetadata)
                 try execute("INSERT OR IGNORE INTO versions VALUES (?,?,?)", [.text(indexFingerprint), .text(encoderFingerprint), .blob(metadata)])
                 guard try query("SELECT encoder,metadata FROM versions WHERE id=?", [.text(indexFingerprint)], { (string($0, 0), blob($0, 1)) }).first.map({ $0.0 == encoderFingerprint && $0.1 == metadata }) == true else { throw SemanticError.publicationConflict }
                 // A killed process can leave an armed calculation, never a
@@ -312,11 +331,12 @@ final class SemanticIndex: @unchecked Sendable {
     /// work resumes on another capture/open/search scheduling request.
     func schedule(projectID: String) {
         mutex.lock()
-        guard !scheduledProjects.contains(projectID) else { mutex.unlock(); return }
-        scheduledProjects.insert(projectID); mutex.unlock()
+        let projectKey = Data(projectID.utf8)
+        guard !scheduledProjects.contains(projectKey) else { mutex.unlock(); return }
+        scheduledProjects.insert(projectKey); mutex.unlock()
         worker.async { [weak self] in
             guard let self else { return }
-            defer { self.mutex.lock(); self.scheduledProjects.remove(projectID); self.mutex.unlock() }
+            defer { self.mutex.lock(); self.scheduledProjects.remove(projectKey); self.mutex.unlock() }
             // Jobs retain content-free failures. Index failure cannot fail Send.
             _ = try? self.process(projectID: projectID, maximumChunks: self.configuration.maximumChunksPerRun)
         }
@@ -327,33 +347,152 @@ final class SemanticIndex: @unchecked Sendable {
     func process(projectID: String, maximumChunks: Int? = nil) throws -> SemanticWorkReceipt {
         let maximum = maximumChunks ?? configuration.maximumChunksPerRun
         guard (0...65536).contains(maximum) else { throw SemanticError.invalid }
-        let frontier = try store.sourceFrontier(projectID: projectID)
-        let scheduled = try locked { try enqueue(projectID: projectID, frontier: frontier) }
-        var published = 0, failed = 0
-        for _ in 0..<maximum {
-            guard let job = try locked({ try claim(projectID: projectID, frontier: frontier) }) else { break }
-            do {
-                try verify(job.source)
-                if job.source.byteCount == 0 { try validateCompleteSource(job.source); try locked { try completeEmpty(job) }; continue }
-                let page = try store.read(eventID: job.source.eventID, offset: job.offset, length: configuration.chunkBytes)
-                guard page.digest == job.source.digest, page.totalBytes == job.source.byteCount, page.status == job.source.status else { throw SemanticError.sourceMismatch }
-                let text = Self.chunk(page.text, atEOF: page.nextOffset == nil)
-                guard !text.isEmpty, text.utf8.count <= configuration.chunkBytes else { throw SemanticError.sourceMismatch }
-                let encoding = try encoder.encode(text)
-                let vector: Data, reason: String
-                switch encoding {
-                case .vector(let values): vector = Self.vectorData(try Self.normalized(values, dimension: encoder.dimension)); reason = ""
-                case .unsupported(let value): vector = Data(); reason = value.rawValue
-                }
-                if job.offset + text.utf8.count == job.source.byteCount { try validateCompleteSource(job.source) }
-                try locked { try publish(job, text: text, vector: vector, reason: reason) }
-                published += 1
-            } catch {
-                try locked { try fail(job, reason: error is SemanticError ? "sourceOrVectorValidation" : "encoderFailure") }
-                failed += 1
+        processMutex.lock(); defer { processMutex.unlock() }
+        var frontier = 0, scheduled = 0, published = 0, failed = 0
+        setMaintenancePauseReason(nil)
+        do {
+            frontier = try backgroundMetadata(projectID: projectID, target: .captureSourceFrontier) {
+                try store.sourceFrontier(projectID: projectID)
             }
+            scheduled = try enqueueMetered(projectID: projectID, frontier: frontier)
+            for _ in 0..<maximum {
+                guard let job = try backgroundMetadata(projectID: projectID, target: .pendingJobPeek, throughSequence: frontier, {
+                    try locked { try peek(projectID: projectID, frontier: frontier) }
+                }) else { break }
+                do {
+                    let source = BackgroundWorkerAccounting.reference(job.source)
+                    let sourceDigest = try BackgroundIndexCanonical.digest(source)
+                    if job.source.byteCount > 0 && initialSealToken?.matches(sourceDigest: sourceDigest, indexFingerprint: indexFingerprint) != true {
+                        initialSealToken = nil
+                        let request = try BackgroundIndexWorkRequest.initialSeal(id: UUID().uuidString, source: source,
+                            indexFingerprint: indexFingerprint, adapterIdentity: backgroundAdapterIdentity)
+                        let work = try beginBackground(request)
+                        do {
+                            let reader = try store.makeBackgroundSourceReader(for: work, clockSource: backgroundClock)
+                            try reader.validateCompleteSource(source: job.source)
+                            let evidence = try BackgroundWorkerAccounting.sealEvidence(source: source)
+                            _ = try store.settleBackgroundWork(workID: work.request.id,
+                                settlement: .init(receiptID: UUID().uuidString, outcome: .completed, evidence: evidence), clockSource: backgroundClock)
+                            initialSealToken = .init(sourceDigest: sourceDigest, indexFingerprint: indexFingerprint,
+                                workID: work.request.id, bindingDigest: work.bindingDigest)
+                        } catch {
+                            try? settleBackgroundFailure(work, error: error)
+                            throw error
+                        }
+                    }
+                    let request = try job.source.byteCount == 0
+                        ? BackgroundIndexWorkRequest.emptySource(id: UUID().uuidString, source: source, indexFingerprint: indexFingerprint, adapterIdentity: backgroundAdapterIdentity)
+                        : BackgroundIndexWorkRequest.chunkAttempt(id: UUID().uuidString, source: source, offset: job.offset,
+                            chunkBytes: configuration.chunkBytes, dimension: encoder.dimension,
+                            indexFingerprint: indexFingerprint, adapterIdentity: backgroundAdapterIdentity)
+                    // Final page and its fresh complete-source seal are one
+                    // immutable request, admitted before claim or encoding.
+                    let work = try beginBackground(request)
+                    var didClaim = false, didPublish = false
+                    do {
+                        let reader = try store.makeBackgroundSourceReader(for: work, clockSource: backgroundClock)
+                        try locked { try claim(job) }; didClaim = true
+                        if job.source.byteCount == 0 {
+                            try reader.validateCompleteSource(source: job.source)
+                            try workerObserver?(.beforePublication, work)
+                            try locked {
+                                try store.withBackgroundPublication(workID: work.request.id, bindingDigest: work.bindingDigest, clockSource: backgroundClock) {
+                                    try completeEmpty(job)
+                                }
+                            }
+                            didPublish = true
+                            try workerObserver?(.publishedBeforeSettlement, work)
+                            _ = try store.settleBackgroundWork(workID: work.request.id, settlement: .init(receiptID: UUID().uuidString,
+                                outcome: .completed, evidence: try BackgroundWorkerAccounting.emptyEvidence(source: source)), clockSource: backgroundClock)
+                            initialSealToken = nil
+                            continue
+                        }
+                        let page = try reader.readChunk(source: job.source)
+                        guard page.digest == job.source.digest, page.totalBytes == job.source.byteCount,
+                              page.status == job.source.status, page.offset == job.offset else { throw SemanticError.sourceMismatch }
+                        let text = Self.chunk(page.text, atEOF: page.nextOffset == nil)
+                        guard !text.isEmpty, text.utf8.count <= configuration.chunkBytes else { throw SemanticError.sourceMismatch }
+                        let encoding = try encoder.encode(text)
+                        let vector: Data, reason: String
+                        switch encoding {
+                        case .vector(let values): vector = Self.vectorData(try Self.normalized(values, dimension: encoder.dimension)); reason = ""
+                        case .unsupported(let value): vector = Data(); reason = value.rawValue
+                        }
+                        let excerptBytes = Data(text.utf8)
+                        let excerptDigest = Self.digest(excerptBytes)
+                        let excerptCount = excerptBytes.count
+                        let isFinal = job.offset + excerptCount == job.source.byteCount
+                        if isFinal { try reader.validateCompleteSource(source: job.source) }
+                        try workerObserver?(.beforePublication, work)
+                        let publication = try locked {
+                            try store.withBackgroundPublication(workID: work.request.id, bindingDigest: work.bindingDigest, clockSource: backgroundClock) {
+                                try publish(job, byteCount: excerptCount, textDigest: excerptDigest, vector: vector, reason: reason)
+                            }
+                        }
+                        didPublish = true
+                        published += 1
+                        try workerObserver?(.publishedBeforeSettlement, work)
+                        _ = try store.settleBackgroundWork(workID: work.request.id, settlement: .init(receiptID: UUID().uuidString,
+                            outcome: .completed, evidence: try BackgroundWorkerAccounting.chunkEvidence(source: source, offset: job.offset,
+                                byteCount: excerptCount, textDigest: excerptDigest, vectorBytes: vector.count, publication: publication, isFinal: isFinal)), clockSource: backgroundClock)
+                        if isFinal { initialSealToken = nil }
+                    } catch {
+                        initialSealToken = nil
+                        // Publication and settlement cannot be atomic across
+                        // databases. Preserve the maximum armed charge after
+                        // the commit; never rewind or republish its cursor.
+                        if !didPublish {
+                            try? settleBackgroundFailure(work, error: error)
+                            if didClaim {
+                                if Self.backgroundPause(error) { try locked { try releaseClaim(job) } }
+                                else { try locked { try fail(job, reason: "sourceOrVectorValidation") } }
+                            }
+                        } else {
+                            // A committed cursor with an uncertain ledger
+                            // receipt retains its charge and stops this slice.
+                            throw BackgroundIndexBudgetError.inactive
+                        }
+                        throw error
+                    }
+                } catch let error as BackgroundIndexBudgetError {
+                    if Self.backgroundPause(error) { throw error }
+                    initialSealToken = nil
+                    try locked { try failUnclaimed(job, reason: "backgroundAccountingValidation") }
+                    failed += 1
+                } catch {
+                    initialSealToken = nil
+                    try locked { try failUnclaimed(job, reason: "sourceOrVectorValidation") }
+                    // A claimed failure was already recorded above. Count
+                    // attempted errors once in the content-free receipt.
+                    failed += 1
+                }
+            }
+        } catch let error as BackgroundIndexBudgetError {
+            initialSealToken = nil
+            setMaintenancePauseReason(error.failureCode)
         }
-        return SemanticWorkReceipt(scheduledSources: scheduled, publishedChunks: published, failedChunks: failed, schedulingFrontier: frontier)
+        return SemanticWorkReceipt(scheduledSources: scheduled, publishedChunks: published, failedChunks: failed,
+            schedulingFrontier: frontier, budgetPauseReason: backgroundPauseReason)
+    }
+
+    /// This snapshot contains counters and public reason codes only.
+    func backgroundBudgetSnapshot() throws -> BackgroundIndexBudgetSnapshot {
+        let snapshot = try store.backgroundBudgetSnapshot(clockSource: backgroundClock)
+        if backgroundPauseReason == BackgroundIndexBudgetError.exhausted.failureCode && !snapshot.rolloverEligible {
+            return try BackgroundIndexBudgetSnapshot(window: snapshot.window, rolloverEligible: false, pauseReason: .exhausted)
+        }
+        return snapshot
+    }
+    var backgroundPauseReason: String? {
+        maintenanceStateMutex.lock(); defer { maintenanceStateMutex.unlock() }
+        return maintenancePauseReason
+    }
+    private func setMaintenancePauseReason(_ value: String?) {
+        maintenanceStateMutex.lock(); maintenancePauseReason = value; maintenanceStateMutex.unlock()
+    }
+    private static func backgroundPause(_ error: Error) -> Bool {
+        guard let error = error as? BackgroundIndexBudgetError else { return false }
+        return [.exhausted, .clockUnavailable, .inactive, .adapterViolation].contains(error)
     }
 
     func search(query: String, lexicalQuery: String? = nil, projectID: String, limit: Int = 16,
@@ -600,7 +739,7 @@ final class SemanticIndex: @unchecked Sendable {
         }
     }
 
-    private struct Job { let source: MemorySourceReference; let offset: Int }
+    private struct Job { let source: MemorySourceReference; let offset: Int; let failureAttempts: Int; let state: String }
     private struct RawSnapshot: Codable {
         let projectID: String; let queryDigest: String; let lexicalQueryDigest: String
         let indexFingerprint: String; let rankingFingerprint: String; let configurationFingerprint: String; let exclusionsDigest: String
@@ -612,55 +751,135 @@ final class SemanticIndex: @unchecked Sendable {
     private struct ChunkRow { let source: MemorySourceReference; let offset: Int; let byteCount: Int; let textDigest: String; let vector: Data }
     private struct Candidate { let source: MemorySourceReference; let offset: Int; let byteCount: Int; let textDigest: String; var paths: Set<String>; var score: Double; var cosine: Double? }
 
-    private func enqueue(projectID: String, frontier: Int) throws -> Int {
-        let cursor = try integer("SELECT scheduled_sequence FROM scopes WHERE index_id=? AND project_id=?", [.text(indexFingerprint), .text(projectID)])
-        let sources = try store.sourceManifest(projectID: projectID, afterSequence: cursor, throughSequence: frontier, limit: configuration.maximumNewSourcesPerRun)
-        return try transaction {
-            try execute("INSERT OR IGNORE INTO scopes VALUES (?,?,0)", [.text(indexFingerprint), .text(projectID)])
-            for source in sources {
-                guard source.projectID == projectID, source.sequence > cursor, source.sequence <= frontier else { throw SemanticError.sourceMismatch }
-                let data = try Self.canonical(source)
-                try execute("INSERT OR IGNORE INTO jobs(index_id,event_id,project_id,source_sequence,source) VALUES (?,?,?,?,?)", [.text(indexFingerprint), .text(source.eventID), .text(projectID), .integer(source.sequence), .blob(data)])
-                guard try query("SELECT source FROM jobs WHERE index_id=? AND event_id=?", [.text(indexFingerprint), .text(source.eventID)], { blob($0, 0) }).first == data else { throw SemanticError.publicationConflict }
+    private func beginBackground(_ request: BackgroundIndexWorkRequest) throws -> BackgroundIndexWorkRecord {
+        let prepared = try store.reserveBackgroundWork(request: request, clockSource: backgroundClock, limits: backgroundLimits)
+        do {
+            let armed = try store.armBackgroundWork(workID: prepared.request.id, bindingDigest: prepared.bindingDigest, clockSource: backgroundClock)
+            do { try workerObserver?(.armed, armed) }
+            catch {
+                _ = try? store.settleBackgroundWork(workID: armed.request.id, settlement: .init(receiptID: UUID().uuidString, outcome: .outcomeUnknown), clockSource: backgroundClock)
+                throw error
             }
-            if let last = sources.last { try execute("UPDATE scopes SET scheduled_sequence=? WHERE index_id=? AND project_id=?", [.integer(last.sequence), .text(indexFingerprint), .text(projectID)]) }
-            return sources.count
+            return armed
+        } catch {
+            _ = try? store.settleBackgroundWork(workID: prepared.request.id,
+                settlement: .init(receiptID: UUID().uuidString, outcome: .cancelledBeforeDispatch), clockSource: backgroundClock)
+            throw error
         }
     }
 
-    private func claim(projectID: String, frontier: Int) throws -> Job? {
+    private func settleBackgroundFailure(_ work: BackgroundIndexWorkRecord, error: Error) throws {
+        let outcome: BackgroundIndexWorkOutcome = error is BackgroundIndexBudgetError ? .outcomeUnknown : .failedConfirmed
+        _ = try store.settleBackgroundWork(workID: work.request.id,
+            settlement: .init(receiptID: UUID().uuidString, outcome: outcome), clockSource: backgroundClock)
+    }
+
+    private func backgroundMetadata<T>(projectID: String, target: BackgroundIndexMetadataTarget,
+        afterSequence: Int = 0, throughSequence: Int? = nil, limit: Int = 1,
+        sourceReferences: [BackgroundIndexSourceReference]? = nil, _ operation: () throws -> T) throws -> T {
+        let descriptor = BackgroundIndexMetadataDescriptor(target: target, afterSequence: afterSequence,
+            throughSequence: throughSequence, limit: limit,
+            sourceReferencesSHA256: try sourceReferences.map { try BackgroundIndexCanonical.digest($0) })
+        let request = try BackgroundIndexWorkRequest.metadata(id: UUID().uuidString, projectID: projectID,
+            indexFingerprint: indexFingerprint, adapterIdentity: backgroundAdapterIdentity,
+            descriptor: descriptor, sourceReferences: sourceReferences)
+        let work = try beginBackground(request)
+        do {
+            let value = try operation()
+            _ = try store.settleBackgroundWork(workID: work.request.id,
+                settlement: .init(receiptID: UUID().uuidString, outcome: .completed), clockSource: backgroundClock)
+            return value
+        } catch {
+            try? settleBackgroundFailure(work, error: error)
+            throw error
+        }
+    }
+
+    private func enqueueMetered(projectID: String, frontier: Int) throws -> Int {
+        let cursor = try backgroundMetadata(projectID: projectID, target: .scopeCursor, throughSequence: frontier) {
+            try locked { try integer("SELECT scheduled_sequence FROM scopes WHERE index_id=? AND project_id=?", [.text(indexFingerprint), .text(projectID)]) }
+        }
+        guard cursor <= frontier else { throw SemanticError.sourceMismatch }
+        let candidates = try backgroundMetadata(projectID: projectID, target: .sourceManifest,
+            afterSequence: cursor, throughSequence: frontier, limit: configuration.maximumNewSourcesPerRun) {
+            try store.sourceManifest(projectID: projectID, afterSequence: cursor, throughSequence: frontier, limit: configuration.maximumNewSourcesPerRun)
+        }
+        // Large source IDs can make the canonical scheduling snapshot exceed
+        // its independent durable bound. Schedule an ordered prefix only;
+        // leave the remainder behind the unchanged cursor for a later trigger.
+        var sources = candidates
+        while !sources.isEmpty {
+            if try BackgroundIndexCanonical.data(sources.map(BackgroundWorkerAccounting.reference)).count <= BackgroundIndexCanonical.maximumSnapshotBytes { break }
+            sources.removeLast()
+        }
+        if sources.isEmpty { return 0 }
+        return try backgroundMetadata(projectID: projectID, target: .scheduleSources, afterSequence: cursor,
+            throughSequence: frontier, limit: sources.count, sourceReferences: sources.map(BackgroundWorkerAccounting.reference)) {
+            try locked {
+                try transaction {
+                    guard try integer("SELECT scheduled_sequence FROM scopes WHERE index_id=? AND project_id=?", [.text(indexFingerprint), .text(projectID)]) == cursor else { throw SemanticError.publicationConflict }
+                    try execute("INSERT OR IGNORE INTO scopes VALUES (?,?,0)", [.text(indexFingerprint), .text(projectID)])
+                    for source in sources {
+                        guard episodeIdentifierEqual(source.projectID, projectID), source.sequence > cursor, source.sequence <= frontier else { throw SemanticError.sourceMismatch }
+                        let data = try Self.canonical(source)
+                        try execute("INSERT OR IGNORE INTO jobs(index_id,event_id,project_id,source_sequence,source) VALUES (?,?,?,?,?)", [.text(indexFingerprint), .text(source.eventID), .text(projectID), .integer(source.sequence), .blob(data)])
+                        guard try query("SELECT source FROM jobs WHERE index_id=? AND event_id=?", [.text(indexFingerprint), .text(source.eventID)], { blob($0, 0) }).first == data else { throw SemanticError.publicationConflict }
+                    }
+                    if let last = sources.last { try execute("UPDATE scopes SET scheduled_sequence=? WHERE index_id=? AND project_id=?", [.integer(last.sequence), .text(indexFingerprint), .text(projectID)]) }
+                    return sources.count
+                }
+            }
+        }
+    }
+
+    private func peek(projectID: String, frontier: Int) throws -> Job? {
+        try query("SELECT source,next_offset,failure_attempts,state FROM jobs WHERE index_id=? AND project_id=? AND source_sequence<=? AND (state='pending' OR (state='failed' AND failure_attempts<?)) ORDER BY source_sequence LIMIT 1", [.text(indexFingerprint), .text(projectID), .integer(frontier), .integer(configuration.maximumFailureAttempts)]) { statement in
+            let source = try JSONDecoder().decode(MemorySourceReference.self, from: blob(statement, 0))
+            guard episodeIdentifierEqual(source.projectID, projectID) else { throw SemanticError.sourceMismatch }
+            return Job(source: source, offset: Int(sqlite3_column_int64(statement, 1)), failureAttempts: Int(sqlite3_column_int64(statement, 2)), state: string(statement, 3))
+        }.first
+    }
+
+    private func claim(_ job: Job) throws {
         try transaction {
-            let rows = try query("SELECT source,next_offset FROM jobs WHERE index_id=? AND project_id=? AND source_sequence<=? AND (state='pending' OR (state='failed' AND failure_attempts<?)) ORDER BY source_sequence LIMIT 1", [.text(indexFingerprint), .text(projectID), .integer(frontier), .integer(configuration.maximumFailureAttempts)]) { statement in
-                Job(source: try JSONDecoder().decode(MemorySourceReference.self, from: blob(statement, 0)), offset: Int(sqlite3_column_int64(statement, 1)))
-            }
-            guard let job = rows.first, job.source.projectID == projectID else { return nil }
-            try execute("UPDATE jobs SET state='processing' WHERE index_id=? AND event_id=?", [.text(indexFingerprint), .text(job.source.eventID)])
-            return job
+            try execute("UPDATE jobs SET state='processing' WHERE index_id=? AND event_id=? AND source=? AND next_offset=? AND state=? AND failure_attempts=?", [.text(indexFingerprint), .text(job.source.eventID), .blob(try Self.canonical(job.source)), .integer(job.offset), .text(job.state), .integer(job.failureAttempts)])
+            guard sqlite3_changes(database) == 1 else { throw SemanticError.publicationConflict }
         }
     }
 
-    private func publish(_ job: Job, text: String, vector: Data, reason: String) throws {
-        try verify(job.source)
-        let byteCount = text.utf8.count
+    private func releaseClaim(_ job: Job) throws {
+        try execute("UPDATE jobs SET state='pending' WHERE index_id=? AND event_id=? AND source=? AND next_offset=? AND state='processing'", [.text(indexFingerprint), .text(job.source.eventID), .blob(try Self.canonical(job.source)), .integer(job.offset)])
+    }
+
+    private func failUnclaimed(_ job: Job, reason: String) throws {
+        try execute("UPDATE jobs SET state='failed',failure_attempts=failure_attempts+1,failure_reason=? WHERE index_id=? AND event_id=? AND source=? AND next_offset=? AND state=? AND failure_attempts=?", [.text(reason), .text(indexFingerprint), .text(job.source.eventID), .blob(try Self.canonical(job.source)), .integer(job.offset), .text(job.state), .integer(job.failureAttempts)])
+    }
+
+    private func publish(_ job: Job, byteCount: Int, textDigest: String, vector: Data, reason: String) throws -> Int {
+        // The caller already holds sidecar -> main ownership. The final main
+        // gate verified the complete source and actual reader execution; this
+        // callback performs bounded sidecar SQL/commit only.
         guard job.offset >= 0, byteCount > 0, job.offset + byteCount <= job.source.byteCount else { throw SemanticError.sourceMismatch }
-        try transaction {
+        return try transaction {
             let current = try query("SELECT source,next_offset,state,unsupported_chunks FROM jobs WHERE index_id=? AND event_id=?", [.text(indexFingerprint), .text(job.source.eventID)]) { (blob($0, 0), Int(sqlite3_column_int64($0, 1)), string($0, 2), Int(sqlite3_column_int64($0, 3))) }.first
             guard let current, current.0 == (try Self.canonical(job.source)), current.1 == job.offset, current.2 == "processing" else { throw SemanticError.publicationConflict }
             try execute("INSERT INTO chunks(index_id,event_id,source_sequence,project_id,offset,byte_count,text_digest,vector,reason) VALUES (?,?,?,?,?,?,?,?,?)",
-                [.text(indexFingerprint), .text(job.source.eventID), .integer(job.source.sequence), .text(job.source.projectID), .integer(job.offset), .integer(byteCount), .text(Self.digest(Data(text.utf8))), .blob(vector), .text(reason)])
+                [.text(indexFingerprint), .text(job.source.eventID), .integer(job.source.sequence), .text(job.source.projectID), .integer(job.offset), .integer(byteCount), .text(textDigest), .blob(vector), .text(reason)])
+            let publication = Int(sqlite3_last_insert_rowid(database))
             let next = job.offset + byteCount
             let holes = current.3 + (reason.isEmpty ? 0 : 1)
             let state = next == job.source.byteCount ? (holes > 0 ? "unsupported" : "complete") : "pending"
             let readyPublication = next == job.source.byteCount ? Int(sqlite3_last_insert_rowid(database)) : 0
             try execute("UPDATE jobs SET next_offset=?,indexed_bytes=indexed_bytes+?,indexed_chunks=indexed_chunks+?,unsupported_chunks=unsupported_chunks+?,failure_reason='',ready_publication=?,state=? WHERE index_id=? AND event_id=?",
                 [.integer(next), .integer(reason.isEmpty ? byteCount : 0), .integer(reason.isEmpty ? 1 : 0), .integer(reason.isEmpty ? 0 : 1), .integer(readyPublication), .text(state), .text(indexFingerprint), .text(job.source.eventID)])
+            return publication
         }
     }
 
     private func completeEmpty(_ job: Job) throws {
-        try verify(job.source)
         guard job.source.byteCount == 0, job.offset == 0 else { throw SemanticError.sourceMismatch }
-        try execute("UPDATE jobs SET state='complete' WHERE index_id=? AND event_id=? AND next_offset=0 AND state='processing'", [.text(indexFingerprint), .text(job.source.eventID)])
+        try execute("UPDATE jobs SET state='complete' WHERE index_id=? AND event_id=? AND source=? AND next_offset=0 AND state='processing'", [.text(indexFingerprint), .text(job.source.eventID), .blob(try Self.canonical(job.source))])
+        guard sqlite3_changes(database) == 1 else { throw SemanticError.publicationConflict }
     }
 
     private func fail(_ job: Job, reason: String) throws {
@@ -674,24 +893,6 @@ final class SemanticIndex: @unchecked Sendable {
               try MeteredRetrieval.sourceMetadata(store: store, lease: lease, maximumRows: 1, {
                   try store.sourceManifest(projectID: source.projectID, afterSequence: source.sequence - 1, throughSequence: source.sequence, limit: 1).first
               }) == source else { throw SemanticError.sourceMismatch }
-    }
-
-    /// Reconstruct the accepted source digest through bounded original pages
-    /// before completion. Page metadata alone does not validate payload bytes.
-    private func validateCompleteSource(_ source: MemorySourceReference) throws {
-        var hasher = SHA256(), offset = 0
-        repeat {
-            let page = try store.read(eventID: source.eventID, offset: offset, length: MemoryStore.maximumPageBytes)
-            guard page.digest == source.digest, page.totalBytes == source.byteCount, page.status == source.status,
-                  page.offset == offset, page.byteCount > 0 || source.byteCount == 0 else { throw SemanticError.sourceMismatch }
-            hasher.update(data: Data(page.text.utf8)); offset += page.byteCount
-            guard offset <= source.byteCount else { throw SemanticError.sourceMismatch }
-            if page.nextOffset == nil { break }
-            guard page.nextOffset == offset else { throw SemanticError.sourceMismatch }
-        } while offset < source.byteCount
-        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        guard offset == source.byteCount, digest == source.digest else { throw SemanticError.sourceMismatch }
-        try verify(source)
     }
 
     private func coverage(projectID: String, frontier: Int, publishedFrontier: Int) throws -> SemanticCoverage {

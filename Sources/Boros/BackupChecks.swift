@@ -200,10 +200,158 @@ enum BackupChecks {
         checks.merge(try cancelledRecoveryChecks(in: scratch)) { _, new in new }
         checks.merge(try schemaTwoArchiveChecks(in: scratch, archive: archive)) { _, new in new }
         checks.merge(try schemaOneArchiveChecks(in: scratch, archive: archive)) { _, new in new }
+        checks.merge(try schemaFourArchiveChecks(in: scratch, archive: archive, recoveredSourceBytes: fragment.utf8.count)) { _, new in new }
         checks.merge(try localReadArchiveChecks(in: scratch)) { _, new in new }
         checks.merge(try ReadIdentityChecks.run()) { _, new in new }
         checks.merge(try closedWALRecognitionChecks(in: scratch)) { _, new in new }
+        checks.merge(try backgroundArchiveChecks(in: scratch)) { _, new in new }
         return checks
+    }
+
+    private final class BackgroundArchiveClock: BackgroundIndexClockSource {
+        func now() throws -> BackgroundIndexClockSnapshot {
+            BackgroundIndexClockSnapshot(domain: "public-background-archive-clock", continuousNanoseconds: 1_000_000_000,
+                utcMilliseconds: 1_700_000_000_000)
+        }
+    }
+
+    private static func backgroundArchiveChecks(in scratch: URL) throws -> [String: Bool] {
+        let directory = scratch.appendingPathComponent("background-archive-source", isDirectory: true)
+        let owner = try MemoryStore(directory: directory), clock = BackgroundArchiveClock()
+        let cap = BackgroundIndexResources.developmentCaps
+        let limits = BackgroundIndexLimits(resources: .init(rawSourceBytes: cap.rawSourceBytes, encoderCalls: 6,
+            encoderInputBytes: cap.encoderInputBytes, vectorBytes: cap.vectorBytes,
+            metadataRows: cap.metadataRows, sourceJobs: cap.sourceJobs))
+        func request(_ id: String) throws -> BackgroundIndexWorkRequest {
+            BackgroundIndexWorkRequest(id: id, binding: .init(projectID: nil, indexFingerprint: nil,
+                adapterIdentity: "public-background-archive-probe", descriptor: .publicEncoderProbe),
+                resources: .init(encoderCalls: 2, encoderInputBytes: 65), encoderInput: .unknown,
+                snapshot: .init(payload: try BackgroundIndexOperationDescriptor.publicProbeData))
+        }
+        let prepared = try owner.reserveBackgroundWork(request: request("archive-background-prepared"), clockSource: clock, limits: limits)
+        let reserveArmed = try owner.reserveBackgroundWork(request: request("archive-background-armed"), clockSource: clock, limits: limits)
+        let armed = try owner.armBackgroundWork(workID: reserveArmed.request.id, bindingDigest: reserveArmed.bindingDigest, clockSource: clock)
+        let reserveSubmitted = try owner.reserveBackgroundWork(request: request("archive-background-submitted"), clockSource: clock, limits: limits)
+        let submitted = try owner.armBackgroundWork(workID: reserveSubmitted.request.id, bindingDigest: reserveSubmitted.bindingDigest, clockSource: clock)
+        _ = try owner.checkBackgroundPublication(workID: submitted.request.id, bindingDigest: submitted.bindingDigest, clockSource: clock)
+        let before = try owner.backgroundBudgetSnapshot(clockSource: clock)
+        let archive = scratch.appendingPathComponent("background-archive", isDirectory: true)
+        let manifest = try BackupArchive.create(from: owner, at: archive)
+        let destination = scratch.appendingPathComponent("background-archive-restored", isDirectory: true)
+        _ = try BackupArchive.restore(from: archive, to: destination, authority: .unmanagedNoDeletion)
+        let restored = try MemoryStore(directory: destination)
+        let after = try restored.backgroundBudgetSnapshot(clockSource: clock)
+        let restoredPrepared = try restored.backgroundWork(workID: prepared.request.id)
+        let restoredArmed = try restored.backgroundWork(workID: armed.request.id)
+        let restoredSubmitted = try restored.backgroundWork(workID: submitted.request.id)
+        var checks: [String: Bool] = [
+            "backup_background_inventory_required_and_roundtrips": try BackupArchive.verify(at: archive) == manifest
+                && manifest.databaseSchema == 5 && manifest.inventory.backgroundIndex?.windows == 1
+                && manifest.inventory.backgroundIndex?.works == 3 && manifest.inventory.backgroundIndex?.prepared == 1,
+            "restore_background_original_window_limits_and_charges_retained": before.window?.id == after.window?.id
+                && after.window?.limits == limits && after.window?.charged == .init(encoderCalls: 4, encoderInputBytes: 130)
+                && after.window?.held == .zero && after.window?.unknownEncoderCalls == 4,
+            "restore_background_only_prepared_work_released": restoredPrepared?.state == .cancelledBeforeDispatch
+                && restoredPrepared?.charged == .zero && restoredPrepared?.held == .zero,
+            "restore_background_armed_and_submitted_stay_unknown": restoredArmed?.state == .outcomeUnknown
+                && restoredSubmitted?.state == .outcomeUnknown && restoredArmed?.recovered == true && restoredSubmitted?.recovered == true,
+        ]
+        let new = try restored.reserveBackgroundWork(request: request("archive-background-new-attempt"), clockSource: clock, limits: limits)
+        _ = try restored.armBackgroundWork(workID: new.request.id, bindingDigest: new.bindingDigest, clockSource: clock)
+        checks["restore_background_new_attempt_spends_remaining_original_allowance"] = try restored.backgroundBudgetSnapshot(clockSource: clock).window?.id == before.window?.id
+            && restored.backgroundBudgetSnapshot(clockSource: clock).window?.charged.encoderCalls == 6
+            && rejects { _ = try restored.reserveBackgroundWork(request: request("archive-background-over-cap"), clockSource: clock, limits: limits) }
+        checks["restore_background_original_archive_unchanged"] = try BackupArchive.verify(at: archive) == manifest
+
+        func copy(_ name: String, _ mutate: (URL) throws -> Void) throws -> URL {
+            let result = scratch.appendingPathComponent("background-corrupt-" + name, isDirectory: true)
+            try FileManager.default.copyItem(at: archive, to: result)
+            try mutate(result)
+            return result
+        }
+        let missingInventory = try copy("missing-inventory") { folder in
+            let file = folder.appendingPathComponent("manifest.json")
+            var object = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+            var inventory = object["inventory"] as! [String: Any]
+            inventory.removeValue(forKey: "backgroundIndex"); object["inventory"] = inventory
+            try privateWrite(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), at: file)
+        }
+        checks["backup_schema_five_requires_background_manifest_inventory"] = rejects { _ = try BackupArchive.verify(at: missingInventory) }
+        let missingTable = try copy("missing-table") { folder in
+            try sql(folder.appendingPathComponent("memory.sqlite3"), "DROP TABLE background_index_work")
+            try refreshDatabaseHash(folder)
+        }
+        checks["backup_background_missing_table_rejected_after_file_hash_refresh"] = rejects { _ = try BackupArchive.verify(at: missingTable) }
+        let badWork = try copy("work-digest") { folder in
+            try sql(folder.appendingPathComponent("memory.sqlite3"), "UPDATE background_index_work SET record_digest='altered'")
+            try refreshDatabaseHash(folder)
+        }
+        checks["backup_background_work_digest_rejected_after_file_hash_refresh"] = rejects { _ = try BackupArchive.verify(at: badWork) }
+        for kind in ["limits", "start", "totals"] {
+            let bad = try copy(kind) { folder in
+                let database = folder.appendingPathComponent("memory.sqlite3")
+                do {
+                    var handle: OpaquePointer?, statement: OpaquePointer?
+                    guard sqlite3_open_v2(database.path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+                          let handle else { throw BackupError.database }
+                    defer { sqlite3_close(handle) }
+                    guard sqlite3_prepare_v2(handle, "SELECT window_json FROM background_index_windows", -1, &statement, nil) == SQLITE_OK,
+                          let statement else { throw BackupError.database }
+                    defer { sqlite3_finalize(statement) }
+                    guard sqlite3_step(statement) == SQLITE_ROW, let pointer = sqlite3_column_blob(statement, 0) else { throw BackupError.database }
+                    var window = try JSONSerialization.jsonObject(with: Data(bytes: pointer, count: Int(sqlite3_column_bytes(statement, 0)))) as! [String: Any]
+                    if kind == "limits" {
+                        var encodedLimits = window["limits"] as! [String: Any], resources = encodedLimits["resources"] as! [String: Any]
+                        resources["encoderCalls"] = 7; encodedLimits["resources"] = resources; window["limits"] = encodedLimits
+                    } else if kind == "start" {
+                        var start = window["startedClock"] as! [String: Any]; start["domain"] = "altered-public-start-domain"; window["startedClock"] = start
+                    } else {
+                        var charged = window["charged"] as! [String: Any]; charged["encoderCalls"] = 0
+                        window["charged"] = charged; window["unknownEncoderCalls"] = 0
+                    }
+                    let bytes = try JSONSerialization.data(withJSONObject: window, options: [.sortedKeys])
+                    let hex = bytes.map { String(format: "%02x", $0) }.joined()
+                    let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                    guard sqlite3_exec(handle, "UPDATE background_index_windows SET window_json=X'\(hex)',window_digest='\(hash)'", nil, nil, nil) == SQLITE_OK else { throw BackupError.database }
+                }
+                try refreshDatabaseHash(folder)
+            }
+            checks["backup_background_\(kind)_rejected_with_refreshed_window_and_file_hashes"] = rejects { _ = try BackupArchive.verify(at: bad) }
+        }
+        let refused = scratch.appendingPathComponent("background-corrupt-unpublished", isDirectory: true)
+        checks["restore_background_corruption_rejected_before_publication"] = rejects { _ = try BackupArchive.restore(from: badWork, to: refused, authority: .unmanagedNoDeletion) }
+            && !FileManager.default.fileExists(atPath: refused.path)
+        return checks
+    }
+
+    private static func schemaFourArchiveChecks(in scratch: URL, archive: URL, recoveredSourceBytes: Int) throws -> [String: Bool] {
+        let legacy = scratch.appendingPathComponent("genuine-schema-four-archive", isDirectory: true)
+        try FileManager.default.copyItem(at: archive, to: legacy)
+        try downgrade(legacy.appendingPathComponent("memory.sqlite3"), to: 4)
+        try relabelLegacyManifest(legacy, version: 4)
+        let verified = try BackupArchive.verify(at: legacy)
+        let original = try Data(contentsOf: legacy.appendingPathComponent("memory.sqlite3"))
+        try BackupArchive.recognizeExistingSource(at: legacy)
+        let destination = scratch.appendingPathComponent("genuine-schema-four-restored", isDirectory: true)
+        _ = try BackupArchive.restore(from: legacy, to: destination, authority: .unmanagedNoDeletion)
+        let owner = try MemoryStore(directory: destination)
+        let upgraded = try BackupArchive.create(from: owner, at: scratch.appendingPathComponent("genuine-schema-four-upgraded", isDirectory: true))
+        let forged = scratch.appendingPathComponent("genuine-four-forged-five", isDirectory: true)
+        try FileManager.default.copyItem(at: legacy, to: forged)
+        try sql(forged.appendingPathComponent("memory.sqlite3"), "PRAGMA user_version=5")
+        try relabelLegacyManifest(forged, version: 5)
+        return [
+            "backup_genuine_four_has_no_background_inventory": verified.databaseSchema == 4 && verified.inventory.backgroundIndex == nil,
+            "backup_genuine_four_recognition_preserves_original": try Data(contentsOf: legacy.appendingPathComponent("memory.sqlite3")) == original,
+            "restore_genuine_four_migrates_to_five_without_background_work": upgraded.databaseSchema == 5
+                && upgraded.inventory.backgroundIndex?.windows == 0 && upgraded.inventory.backgroundIndex?.works == 0
+                && upgraded.inventory.backgroundIndex?.charged == .zero && upgraded.inventory.backgroundIndex?.held == .zero,
+            "restore_genuine_four_retains_origins_and_exact_sources": upgraded.inventory.chatEpisodes == verified.inventory.chatEpisodes
+                && upgraded.inventory.localReadEpisodes == verified.inventory.localReadEpisodes
+                && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
+                && upgraded.inventory.sourceBytes == verified.inventory.sourceBytes + Int64(recoveredSourceBytes),
+            "backup_schema_five_cannot_omit_background_tables": rejects { _ = try BackupArchive.verify(at: forged) }
+        ]
     }
 
     private static func closedWALRecognitionChecks(in scratch: URL) throws -> [String: Bool] {
@@ -281,7 +429,7 @@ enum BackupChecks {
         let unrelatedArchive = scratch.appendingPathComponent("non-boros-command-archive")
         let unrelatedSource = try captureCommand(["--backup-create", "--data-directory", unrelatedDirectory.path, "--archive", unrelatedArchive.path])
         checks["backup_cli_unrecognized_source_schema_refused_without_mutation"] = try unrelatedSource.status == 1 && unrelatedSource.output.isEmpty && Data(contentsOf: unrelatedDatabase) == beforeUnrelated && !FileManager.default.fileExists(atPath: unrelatedArchive.path) && !FileManager.default.fileExists(atPath: unrelatedDirectory.appendingPathComponent("owner.lock").path)
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             let foreignDirectory = scratch.appendingPathComponent("foreign-command-source-\(version)", isDirectory: true)
             try FileManager.default.createDirectory(at: foreignDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let database = foreignDirectory.appendingPathComponent("memory.sqlite3")
@@ -320,7 +468,7 @@ enum BackupChecks {
         var legacyReadback = false
         if legacyCommand.status == 0 {
             let legacyOwner = try MemoryStore(directory: legacyDirectory)
-            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 4
+            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 5
         }
         checks["backup_cli_strict_recognition_accepts_genuine_schema_one_upgrade"] = legacyCommand.status == 0 && legacyCommand.errors.isEmpty && legacyReadback
         let versionTwoDirectory = scratch.appendingPathComponent("schema-two-command-source", isDirectory: true)
@@ -332,7 +480,7 @@ enum BackupChecks {
         try downgrade(versionTwoDirectory.appendingPathComponent("memory.sqlite3"), to: 2)
         let versionTwoArchive = scratch.appendingPathComponent("schema-two-command-archive", isDirectory: true)
         let versionTwoCommand = try captureCommand(["--backup-create", "--data-directory", versionTwoDirectory.path, "--archive", versionTwoArchive.path])
-        checks["backup_cli_strict_recognition_accepts_genuine_schema_two_upgrade"] = try versionTwoCommand.status == 0 && versionTwoCommand.errors.isEmpty && BackupArchive.verify(at: versionTwoArchive).databaseSchema == 4
+        checks["backup_cli_strict_recognition_accepts_genuine_schema_two_upgrade"] = try versionTwoCommand.status == 0 && versionTwoCommand.errors.isEmpty && BackupArchive.verify(at: versionTwoArchive).databaseSchema == 5
         let missingArchive = try captureCommand(["--backup-verify", "--archive", scratch.appendingPathComponent("missing-command-archive").path])
         checks["backup_cli_verify_missing_archive_refused"] = missingArchive.status == 1 && missingArchive.output.isEmpty
         let invalid: [[String]] = [
@@ -357,7 +505,7 @@ enum BackupChecks {
         return checks
     }
 
-    /// One live schema-4 snapshot includes completed receipts, interrupted
+    /// One live schema-5 snapshot includes completed receipts, interrupted
     /// answering, preflight-only inference and never-armed reservations.
     private static func episodeChecks(in scratch: URL) throws -> [String: Bool] {
         var checks: [String: Bool] = [:]
@@ -423,7 +571,7 @@ enum BackupChecks {
         let manifest = try BackupArchive.create(from: owner!, at: archive)
         let expectedCharged = try complete.charged.adding(beforePreflight.charged).adding(beforeAnswering.charged)
         let expectedHeld = try complete.held.adding(beforePreflight.held).adding(beforeAnswering.held)
-        checks["backup_schema_four_episode_inventory_captures_active_and_settled_work"] = manifest.databaseSchema == 4 && manifest.inventory.episodes == 3 && manifest.inventory.unfinishedEpisodes == 2 && manifest.inventory.episodeWork == 6 && manifest.inventory.episodePreparedWork == 2 && manifest.inventory.episodeUncertainWork == 2 && manifest.inventory.episodeCharged == expectedCharged && manifest.inventory.episodeHeld == expectedHeld
+        checks["backup_schema_five_episode_inventory_captures_active_and_settled_work"] = manifest.databaseSchema == 5 && manifest.inventory.episodes == 3 && manifest.inventory.unfinishedEpisodes == 2 && manifest.inventory.episodeWork == 6 && manifest.inventory.episodePreparedWork == 2 && manifest.inventory.episodeUncertainWork == 2 && manifest.inventory.episodeCharged == expectedCharged && manifest.inventory.episodeHeld == expectedHeld
         checks["backup_episode_request_snapshots_deduplicate_exact_bodies"] = manifest.inventory.episodeSnapshots == 2 && manifest.inventory.episodeSnapshotBytes == Int64(body.count + calibrationBody.count)
         checks["backup_episode_manifest_roundtrip_verified"] = try BackupArchive.verify(at: archive) == manifest
         checks.merge(try schemaThreeArchiveChecks(in: scratch, archive: archive)) { _, new in new }
@@ -583,7 +731,7 @@ enum BackupChecks {
             checks["restore_schema_two_private_upgrade_preserves_recovery_and_counts"] = try owner.invocation(id: "interrupted-attempt")?.finalStatus == .partial && owner.invocation(id: "empty-attempt")?.finalStatus == .failed && owner.sourceManifest(projectID: "synthetic-backup-alpha", afterSequence: 0, limit: 1000).count == 6
             let upgradedArchive = scratch.appendingPathComponent("schema-two-upgraded-archive", isDirectory: true)
             let upgraded = try BackupArchive.create(from: owner, at: upgradedArchive)
-            checks["restore_schema_two_upgrades_private_staging_to_schema_four"] = upgraded.databaseSchema == 4 && upgraded.inventory.episodes == 0 && upgraded.inventory.episodeWork == 0 && upgraded.inventory.invocations == verified.inventory.invocations && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
+            checks["restore_schema_two_upgrades_private_staging_to_schema_five"] = upgraded.databaseSchema == 5 && upgraded.inventory.episodes == 0 && upgraded.inventory.episodeWork == 0 && upgraded.inventory.invocations == verified.inventory.invocations && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
         }
         checks["restore_schema_two_preserves_original_verified_archive"] = try BackupArchive.verify(at: legacy) == verified
         return checks
@@ -601,7 +749,7 @@ enum BackupChecks {
         let upgraded = try BackupArchive.create(from: owner, at: scratch.appendingPathComponent("schema-one-upgraded-archive", isDirectory: true))
         return [
             "backup_schema_one_explicit_contract_has_no_journal": verified.databaseSchema == 1 && verified.inventory.invocations == 0 && verified.inventory.chunks == 0 && verified.inventory.episodes == nil && verified.inventory.chatEpisodes == nil && verified.inventory.localReadEpisodes == nil,
-            "restore_schema_one_exact_sources_without_invented_attempts": upgraded.databaseSchema == 4 && upgraded.inventory.events == verified.inventory.events && upgraded.inventory.sourceBytes == verified.inventory.sourceBytes && upgraded.inventory.invocations == 0 && upgraded.inventory.episodes == 0 && upgraded.inventory.chatEpisodes == 0 && upgraded.inventory.localReadEpisodes == 0,
+            "restore_schema_one_exact_sources_without_invented_attempts": upgraded.databaseSchema == 5 && upgraded.inventory.events == verified.inventory.events && upgraded.inventory.sourceBytes == verified.inventory.sourceBytes && upgraded.inventory.invocations == 0 && upgraded.inventory.episodes == 0 && upgraded.inventory.chatEpisodes == 0 && upgraded.inventory.localReadEpisodes == 0,
             "backup_schema_one_archive_bytes_unchanged_after_restore": try BackupArchive.verify(at: legacy) == verified
         ]
     }
@@ -646,7 +794,8 @@ enum BackupChecks {
         var object = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as! [String: Any]
         object["databaseSchema"] = version
         var inventory = object["inventory"] as! [String: Any]
-        inventory.removeValue(forKey: "chatEpisodes"); inventory.removeValue(forKey: "localReadEpisodes")
+        if version < 4 { inventory.removeValue(forKey: "chatEpisodes"); inventory.removeValue(forKey: "localReadEpisodes") }
+        if version < 5 { inventory.removeValue(forKey: "backgroundIndex") }
         if version < 3 {
             for key in Array(inventory.keys) where key.hasPrefix("episode") || key == "unfinishedEpisodes" { inventory.removeValue(forKey: key) }
         }
@@ -777,7 +926,7 @@ enum BackupChecks {
         object = try JSONSerialization.jsonObject(with: Data(contentsOf: archive.appendingPathComponent("manifest.json"))) as! [String: Any]
         inventory = object["inventory"] as! [String: Any]; inventory.removeValue(forKey: "localReadEpisodes"); object["inventory"] = inventory
         try privateWrite(try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), at: manifestPath)
-        checks["backup_schema_four_requires_explicit_read_origin_count"] = rejects { _ = try BackupArchive.verify(at: wrongCounts) }
+        checks["backup_schema_five_requires_explicit_read_origin_count"] = rejects { _ = try BackupArchive.verify(at: wrongCounts) }
         let forgedLegacy = try corrupt("legacy-schema-label", "PRAGMA user_version=3")
         try relabelLegacyManifest(forgedLegacy, version: 3)
         checks["backup_read_origin_cannot_masquerade_as_legacy_schema_three"] = rejects { _ = try BackupArchive.verify(at: forgedLegacy) }
@@ -787,6 +936,92 @@ enum BackupChecks {
     /// Independent historical fixture DDL frozen at checkpoint 22c3402.
     /// Rebuilding into these tables preserves old constraints and references.
     private static func historicalFixtureSQL(version: Int) throws -> String {
+        // Independent genuine schema-4 fixture captured from 9cf4d11. It is
+        // not generated from current owner or archive-recognition code.
+        if version == 4 { return """
+        CREATE TABLE conversations (
+          id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE drafts (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), payload BLOB NOT NULL);
+        CREATE TABLE episode_request_snapshots (
+          digest TEXT PRIMARY KEY, byte_count INTEGER NOT NULL CHECK(byte_count>0 AND byte_count<=4194304),
+          payload BLOB NOT NULL CHECK(length(payload)=byte_count)
+        ) WITHOUT ROWID;
+        CREATE TABLE episode_resource_totals (
+          episode_id TEXT NOT NULL REFERENCES episodes(id), resource TEXT NOT NULL,
+          charged INTEGER NOT NULL CHECK(charged>=0), held INTEGER NOT NULL CHECK(held>=0), cap INTEGER NOT NULL CHECK(cap>=0),
+          PRIMARY KEY(episode_id,resource)
+        ) WITHOUT ROWID;
+        CREATE TABLE episode_work (
+          id TEXT PRIMARY KEY, episode_id TEXT NOT NULL REFERENCES episodes(id), parent_id TEXT REFERENCES episode_work(id),
+          kind TEXT NOT NULL, adapter_identity TEXT NOT NULL, request_json BLOB NOT NULL CHECK(length(request_json)>0 AND length(request_json)<=65536),
+          request_digest TEXT NOT NULL, snapshot_digest TEXT REFERENCES episode_request_snapshots(digest),
+          revision INTEGER NOT NULL CHECK(revision>=0), state TEXT NOT NULL CHECK(state IN ('prepared','dispatchArmed','submitted','completed','failedConfirmed','outcomeUnknown','cancelledBeforeDispatch')),
+          charged_json BLOB NOT NULL, held_json BLOB NOT NULL, observed_json BLOB NOT NULL DEFAULT X'',
+          receipt_id TEXT, receipt_json BLOB NOT NULL DEFAULT X'', receipt_digest TEXT NOT NULL DEFAULT '',
+          created_ticks INTEGER NOT NULL CHECK(created_ticks>0), armed_ticks INTEGER NOT NULL DEFAULT 0 CHECK(armed_ticks>=0),
+          ended_ticks INTEGER NOT NULL DEFAULT 0 CHECK(ended_ticks>=0), recovered INTEGER NOT NULL DEFAULT 0 CHECK(recovered IN (0,1)),
+          adapter_violation INTEGER NOT NULL DEFAULT 0 CHECK(adapter_violation IN (0,1)),
+          UNIQUE(episode_id,receipt_id)
+        );
+        CREATE TABLE "episodes" (
+          id TEXT PRIMARY KEY, conversation_id TEXT REFERENCES conversations(id),
+          project_id TEXT NOT NULL, turn_id TEXT, human_event_id TEXT UNIQUE REFERENCES events(id),
+          limits_json BLOB NOT NULL CHECK(length(limits_json)>0 AND length(limits_json)<=65536),
+          limits_digest TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','completed','failed','cancelled','interrupted','deadlineExceeded','budgetExceeded')),
+          revision INTEGER NOT NULL CHECK(revision>=0), clock_domain TEXT NOT NULL,
+          created_ticks INTEGER NOT NULL CHECK(created_ticks>0), deadline_ticks INTEGER NOT NULL CHECK(deadline_ticks>created_ticks),
+          last_ticks INTEGER NOT NULL CHECK(last_ticks>=created_ticks), created_utc REAL NOT NULL,
+          terminal_reason TEXT NOT NULL DEFAULT '',
+          origin_json BLOB NOT NULL CHECK(length(origin_json)>0 AND length(origin_json)<=65536), origin_digest TEXT NOT NULL,
+          CHECK((conversation_id IS NULL AND turn_id IS NULL AND human_event_id IS NULL) OR
+                (conversation_id IS NOT NULL AND turn_id IS NOT NULL AND human_event_id IS NOT NULL)),
+          CHECK((state='active' AND terminal_reason='') OR (state!='active' AND terminal_reason!=''))
+        );
+        CREATE VIRTUAL TABLE event_fts USING fts5(text, content='');
+        CREATE TABLE events (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id), project_id TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('human','assistant')),
+          status TEXT NOT NULL CHECK(status IN ('complete','partial','failed','cancelled')),
+          turn_id TEXT NOT NULL, created_at TEXT NOT NULL, digest TEXT NOT NULL,
+          byte_count INTEGER NOT NULL CHECK(byte_count >= 0 AND byte_count <= 4194304),
+          payload BLOB NOT NULL CHECK(length(payload) = byte_count)
+        );
+        CREATE TABLE invocation_chunks (
+          invocation_id TEXT NOT NULL REFERENCES invocations(id),
+          chunk_sequence INTEGER NOT NULL CHECK(chunk_sequence >= 0 AND chunk_sequence < 65536),
+          byte_count INTEGER NOT NULL CHECK(byte_count > 0 AND byte_count <= 4194304),
+          digest TEXT NOT NULL, payload BLOB NOT NULL CHECK(length(payload) = byte_count),
+          PRIMARY KEY(invocation_id, chunk_sequence)
+        ) WITHOUT ROWID;
+        CREATE TABLE invocations (
+          id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+          project_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+          human_event_id TEXT NOT NULL REFERENCES events(id), assistant_event_id TEXT NOT NULL UNIQUE,
+          provider_identity TEXT NOT NULL, request_body BLOB NOT NULL,
+          request_digest TEXT NOT NULL, admission_json BLOB NOT NULL DEFAULT X'',
+          admission_digest TEXT NOT NULL DEFAULT '', usage_json BLOB NOT NULL DEFAULT X'',
+          usage_digest TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+          chunk_count INTEGER NOT NULL DEFAULT 0 CHECK(chunk_count >= 0 AND chunk_count <= 65536),
+          observed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(observed_bytes >= 0 AND observed_bytes <= 4194304),
+          final_status TEXT NOT NULL DEFAULT '' CHECK(final_status IN ('','complete','partial','failed','cancelled')),
+          terminal_reason TEXT NOT NULL DEFAULT '' CHECK(terminal_reason IN ('','completed','cancelled','upstreamIncomplete','transportFailure','captureFailure','admissionFailure','interrupted')),
+          finalized_at TEXT NOT NULL DEFAULT '', recovered INTEGER NOT NULL DEFAULT 0 CHECK(recovered IN (0,1)), episode_id TEXT REFERENCES episodes(id), episode_work_id TEXT REFERENCES episode_work(id),
+          CHECK(length(request_body) > 0 AND length(request_body) <= 4194304),
+          CHECK((final_status = '' AND terminal_reason = '' AND finalized_at = '') OR
+                (final_status != '' AND terminal_reason != '' AND finalized_at != ''))
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, payload BLOB NOT NULL);
+        CREATE UNIQUE INDEX episode_local_read_request
+        ON episodes(json_extract(origin_json,'$.binding.initiator'),json_extract(origin_json,'$.binding.requestID'))
+        WHERE json_extract(origin_json,'$.kind')='localRead';
+        CREATE INDEX episode_work_episode ON episode_work(episode_id,id);
+        CREATE INDEX event_conversation ON events(conversation_id, sequence);
+        CREATE INDEX event_project ON events(project_id, sequence);
+        PRAGMA user_version=4;
+        """ }
         guard (1...3).contains(version) else { throw BackupError.invalid("unsupported historical schema") }
         var sql = """
         CREATE TABLE IF NOT EXISTS conversations (
@@ -876,7 +1111,7 @@ enum BackupChecks {
     }
 
     private static func downgrade(_ database: URL, to version: Int, alterLimitsConstraint: Bool = false) throws {
-        guard (1...3).contains(version) else { throw BackupError.invalid("synthetic historical fixture version") }
+        guard (1...4).contains(version) else { throw BackupError.invalid("synthetic historical fixture version") }
         let rebuilt = database.deletingLastPathComponent().appendingPathComponent("historical-" + UUID().uuidString + ".sqlite3")
         defer { try? FileManager.default.removeItem(at: rebuilt) }
         try privateWrite(Data(), at: rebuilt)
@@ -897,7 +1132,7 @@ enum BackupChecks {
             guard sqlite3_bind_text(attach, 1, database.path, -1, transient) == SQLITE_OK, sqlite3_step(attach) == SQLITE_DONE else { throw BackupError.database }
             var tables = ["conversations", "events", "drafts", "settings"]
             if version >= 2 { tables += ["invocations", "invocation_chunks"] }
-            if version == 3 { tables += ["episodes", "episode_resource_totals", "episode_request_snapshots", "episode_work"] }
+            if version >= 3 { tables += ["episodes", "episode_resource_totals", "episode_request_snapshots", "episode_work"] }
             for table in tables {
                 var statement: OpaquePointer?
                 guard sqlite3_prepare_v2(handle, "SELECT name FROM pragma_table_info('\(table)') ORDER BY cid", -1, &statement, nil) == SQLITE_OK, let statement else { throw BackupError.database }
