@@ -1,6 +1,6 @@
 # Boros project status
 
-Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. The capture/admission, semantic and backup integration checkpoint has passed verification. The architectural backlog remains active.
+Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Verified implementation checkpoint: `38675c5` (pushed). The architectural backlog remains active. An uncommitted episode-budget interface draft has not passed an integration checkpoint.
 
 The native chat prototype now integrates durable stream capture, exact selected-provider admission, hybrid source retrieval and backup/restore. The final combined suite passed 478 checks. Development evaluation establishes synthetic source coverage for the lexical branch; installed hybrid answer quality remains unmeasured. The complete architecture in the [plan](../tracechat-plan.md) remains in progress. This table reports behavior and verification; it does not estimate completion percentages or delivery dates.
 
@@ -14,6 +14,7 @@ The native chat prototype now integrates durable stream capture, exact selected-
 | Capture during generation | Implemented and verified | Each visible chunk commits before display; exact invocation snapshots; interrupted attempts recover partial/failed; schema v1 migration | Durable accounting before/during admission; retention/purge must include snapshots and chunks |
 | Original-source retrieval | Implemented hybrid baseline | Scoped literal/FTS5 search, exact paging; Send fuses lexical/semantic results and excludes recent sources before candidate limits | Full hybrid quality evaluation, scan budgets and larger-archive scaling |
 | Context assembly | Partial; exact selected-model admission verified | Complete current request, bounded recent/history evidence, exact Qwen rendered token counts, output/safety reservation, immutable request body, actual usage checks | Total episode budget enforcement, durable preflight accounting, more verified provider adapters |
+| Episode budgets and accounting | Interface draft started; enforcement pending | Proposed resource/deadline contract and shared Swift types/protocol | Durable ledger and recovery, reservations before dispatch, metered retrieval, one GUI/CLI/evaluation lifecycle and failure fixtures |
 | Semantic retrieval | Integrated; protocol verified | Real installed Apple English encoder; sealed sources, durable jobs, coverage holes, frozen continuations and replay manifests; 60 component checks plus SIGKILL recovery | Installed-encoder quality evaluation, whole-corpus coverage and daily background budgets |
 | Service, MCP, and imports | Deferred | Single-process native app owns the store | Multi-client memory service when justified, read-only MCP interface, authenticated imports and adapters |
 | Policy and task lifecycle | Not started | Original authorship and capture status are retained | Authenticated lifecycle changes, expiry/reopen rules, separate read/disclosure/processing grants, transitive dependencies |
@@ -24,19 +25,19 @@ The native chat prototype now integrates durable stream capture, exact selected-
 | Quality and economics evaluation | Contracts corrected; development source coverage verified | 41 contract tests; lexical helper recovers all spans in 224/224 eligible synthetic probes | Installed hybrid/answering evaluation, representative workload and comparative quality/economics |
 | Local release | Development build only | Buildable, ad hoc signed app bundle | Complete release gates, packaging, user documentation and recovery validation |
 
-## Active implementation wave
+## Implementation assignments
 
-Work started October 4, 2026. Independent agents have separate file ownership; integration and status updates remain with the coordinating agent. Rows remain in progress until integrated verification passes.
+The prior parallel wave is integrated and verified. The next wave has a draft budget contract and shared interface types; its runtime implementation is pending. Concurrent implementation assignments will use separate file ownership after shared interfaces are frozen. Rows remain in progress until integrated verification passes.
 
 | Assignment | Owned surface | Current state | Integration gate |
 |---|---|---|---|
 | Durable invocation agent | Store schema, invocation/chunk persistence, memory checks | Complete and integrated | Checkpoint passed |
 | Provider admission agent | Request builder, tokenizer/admission adapter, HTTP fixtures | Complete and integrated | Checkpoint passed |
 | Evaluation agent | Harness, synthetic fixtures, evaluation specification | Corrected; v4 development run passed | Future hybrid/answering evaluation |
-| Coordinating agent | Integration, shared contracts, checks and documentation | Checkpoint verified; architecture work active | Next contract implementation |
+| Coordinating agent | Integration, shared contracts, checks and documentation | Checkpoint verified; episode interfaces drafted | Freeze interfaces and integrate the next contract |
 | Semantic retrieval agent | Sidecar, encoder, jobs and replay manifests | Complete and integrated | Protocol/recovery checks passed; quality evaluation pending |
 | Backup/restore agent | Archive, verification, CLI and restore | Complete and integrated | Component, CLI and recovery checks passed |
-| Episode-budget assignment | [Durable preflight and total-work accounting contract](EPISODE-BUDGET.md) | Draft complete; implementation pending | Shared reservations/accounting and failure schedules |
+| Episode-budget assignment | [Durable preflight and total-work accounting contract](EPISODE-BUDGET.md), shared budget types/protocol | Contract and interface drafts; no runtime enforcement | Ledger, provider/retrieval adoption, recovery and failure schedules |
 
 Evaluation review identified timing contamination, incomplete category validation, malformed gate/economic inputs, an overbroad power interpretation and a probe/span label. Corrections passed 41 tests and focused independent recheck. Original frozen reports are retained as historical evidence; v4 measures the lexical-only helper branch explicitly.
 
@@ -72,9 +73,9 @@ Continue with the [episode-budget contract](EPISODE-BUDGET.md), durable prefligh
 | Plan phase | Status | Outstanding exit criteria |
 |---|---|---|
 | 0 — Freeze contracts and evaluation | Partial | Executable policy/task/gate contracts, failure schedules, experiment split and power design |
-| 1 — Evidence foundation | Partial | External-blob ingest/recovery, quotas beyond the per-payload limit, epoch suppression, deletion fencing and verified backup/restore |
-| 2 — Read-only baseline | Partial | Semantic adapter, coverage fallback, CLI/MCP disclosure grants, provider admission, Arm B recall/latency and pilot cost report |
+| 1 — Evidence foundation | Partial | External-blob ingest/recovery, aggregate quotas, epoch suppression, deletion fencing and deletion-aware backup/restore |
+| 2 — Read-only baseline | Partial | Episode budgets and durable preflight, bounded coverage fallback and scan work, CLI/MCP disclosure grants, Arm B recall/latency and pilot cost report |
 | 3 — Policy/task and optional actions | Not started | Lifecycle and scoped harness tests; action recovery tests if actions are enabled |
 | 4 — Optional tree | Gated | Accepted baseline checkpoint before implementation; lineage, frontier and fence verification afterward |
 | 5 — Compare and confirm | Not started | Arms A–E, validation ablations, frozen baseline/tree comparison and held-out quality/economics gates |
-| 6 — Local release | Not ready | Hardened import, resumable purge, diagnostics, verified restore and publication of applicable release invariants |
+| 6 — Local release | Not ready | Hardened import, resumable purge, diagnostics, deletion-aware restore, packaging, final visual recheck and publication of applicable release invariants |
