@@ -10,6 +10,11 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 ORACLE_KEYS = frozenset({"rubric_version", "kind", "expected_answers", "required_source_ids",
                          "forbidden_answers", "answerable"})
 RESPONSE_KEYS = frozenset({"answer", "citations", "abstain"})
+RESPONSE_DIAGNOSTIC_VERSION = "boros-response-diagnostic-v1"
+RESPONSE_ERROR_CODES = frozenset({"response_size", "response_utf8", "response_type",
+    "response_json_syntax", "response_duplicate_key", "response_nonfinite", "response_top_level",
+    "response_keys", "response_abstain_shape", "response_citations_shape",
+    "response_answer_shape_string", "response_answer_shape_array"})
 
 
 class RubricError(ValueError):
@@ -63,33 +68,47 @@ def validate_oracle(oracle):
 def _parse_response(response):
     if type(response) is bytes:
         if len(response) > MAX_RESPONSE_BYTES:
-            raise RubricError("response_invalid")
+            raise RubricError("response_size")
         try:
             response = response.decode("utf-8")
         except UnicodeError:
-            raise RubricError("response_invalid") from None
-    if not _valid_text(response):
-        raise RubricError("response_invalid")
+            raise RubricError("response_utf8") from None
+    if type(response) is not str:
+        raise RubricError("response_type")
+    try:
+        response_bytes = response.encode("utf-8")
+    except UnicodeError:
+        raise RubricError("response_utf8") from None
+    if len(response_bytes) > MAX_RESPONSE_BYTES:
+        raise RubricError("response_size")
 
     def pairs(items):
         result = {}
         for key, value in items:
             if key in result:
-                raise RubricError("response_invalid")
+                raise RubricError("response_duplicate_key")
             result[key] = value
         return result
 
     def nonfinite(_):
-        raise RubricError("response_invalid")
+        raise RubricError("response_nonfinite")
 
     try:
         parsed = json.loads(response, object_pairs_hook=pairs, parse_constant=nonfinite)
+    except RubricError:
+        raise
+    except json.JSONDecodeError:
+        raise RubricError("response_json_syntax") from None
     except (ValueError, TypeError, RecursionError):
-        raise RubricError("response_invalid") from None
-    if (type(parsed) is not dict or set(parsed) != RESPONSE_KEYS
-            or type(parsed["abstain"]) is not bool
-            or not _text_array(parsed["citations"], nonempty=True)):
-        raise RubricError("response_invalid")
+        raise RubricError("response_type") from None
+    if type(parsed) is not dict:
+        raise RubricError("response_top_level")
+    if set(parsed) != RESPONSE_KEYS:
+        raise RubricError("response_keys")
+    if type(parsed["abstain"]) is not bool:
+        raise RubricError("response_abstain_shape")
+    if not _text_array(parsed["citations"], nonempty=True):
+        raise RubricError("response_citations_shape")
     return parsed
 
 
@@ -109,7 +128,9 @@ def score_response(response, oracle, *, operational_complete: bool, delivered_so
               "answer_correct": False, "citation_correct": False, "abstention_correct": False,
               "required_source_count": len(oracle["required_source_ids"]),
               "delivered_required_source_count": len(set(oracle["required_source_ids"]) & delivered_source_ids),
-              "citation_count": 0, "failure_code": None}
+              "citation_count": 0, "failure_code": None,
+              "response_diagnostic_version": RESPONSE_DIAGNOSTIC_VERSION,
+              "response_error_code": None}
     if not operational_complete:
         result["failure_code"] = "invocation_incomplete"
         return result
@@ -117,11 +138,12 @@ def score_response(response, oracle, *, operational_complete: bool, delivered_so
         parsed = _parse_response(response)
         if oracle["kind"] == "cross_message_quotes":
             if not _text_array(parsed["answer"]):
-                raise RubricError("response_invalid")
+                raise RubricError("response_answer_shape_array")
         elif not _valid_text(parsed["answer"]):
-            raise RubricError("response_invalid")
-    except RubricError:
+            raise RubricError("response_answer_shape_string")
+    except RubricError as error:
         result["failure_code"] = "response_invalid"
+        result["response_error_code"] = error.args[0] if error.args and error.args[0] in RESPONSE_ERROR_CODES else "response_type"
         return result
     result["response_valid"] = True
     result["citation_count"] = len(parsed["citations"])

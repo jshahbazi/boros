@@ -84,13 +84,16 @@ def run(source, output, *, timeout=10800):
             "system_sha256": e.digest(CONFIGURATION["system"].encode()), "implementation": implementation,
             "histories": results, "replicates": 1, "strategy_order": list(e.STRATEGIES),
             "rubric_version": cases.RUBRIC_VERSION, "five_category_quality_gate": "inconclusive",
+            "development_amendment": "recent-source-framing-v2-structural-diagnostics-v1",
+            "context_source_snapshot_version": "context-source-snapshot-v2",
             "sufficient_evidence_provider_feasibility": None,
             "limitations": ["three distinct public sharing identities do not establish independent authors or representative histories",
                 "source-derived anchored questions test exact reproduction and citation, not natural developer reasoning",
                 "serialized Prompt/Answer text retained; code-block sidecars excluded; original generation completeness unknown",
                 "original timestamps unindexed; correction and scoped lifecycle cases not measured",
                 "absence target is corpus-verified; retrieval omission alone cannot prove absence",
-                "recent context has no visible event IDs; citation availability can differ between strategies",
+                "recent sources expose host event IDs; identity availability does not establish correct citation or answer",
+                "reused development probes after source framing amendment; not independent confirmation",
                 "one replicate; fixed paired order; caches uncontrolled; per-hybrid construction charged separately",
                 "gold delivery does not establish provider-token feasibility; Apple input tokens and local billed cost unknown"]}
         output.parent.mkdir(parents=True, exist_ok=True)

@@ -1648,7 +1648,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 checks["last_conversation_preference_saved"] = LocalSettings.load(in: store.directory).conversationID == activeChat.id
                 let snapshot = try ContextAssembler.prepare(store: store, conversationID: activeChat.id, projectID: projectID,
                     prompt: "Synthetic follow-up", system: "Synthetic host rule", budgetBytes: 65_536)
-                checks["context_exact_roles_preserved"] = snapshot.messages.contains { $0.role == "user" && $0.content == human.text }
+                let humanContext = try ContextSourceFraming.recentPrefix(eventID: human.id,
+                    role: human.role.rawValue, status: human.status.rawValue,
+                    selectionVersion: ContextSourceFraming.currentSelectionVersion) + human.text
+                checks["context_exact_roles_preserved"] = snapshot.messages.contains { $0.role == "user" && $0.content.utf8.elementsEqual(humanContext.utf8) }
                     && snapshot.messages.last?.content == "Synthetic follow-up"
                 checks.merge(try sendContextChecks(store: store)) { _, new in new }
                 let before = responseView.string
@@ -2132,6 +2135,13 @@ private enum BonsaiPlayground {
                 let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
                 print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"context_admission_self_test\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--recent-source-framing-self-test") {
+            do {
+                let checks = try RecentSourceFramingChecks.run()
+                let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"recent_source_framing_self_test\":false}"); exit(1) }
         }
         if let index = CommandLine.arguments.firstIndex(of: "--endpoint-integration-test"), index + 1 < CommandLine.arguments.count {
             let checks = EndpointChecks.runIntegration(baseURL: CommandLine.arguments[index + 1])

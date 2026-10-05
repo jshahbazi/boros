@@ -14,7 +14,7 @@ The design goal is evidence-backed continuity within bounded context and resourc
 
 | Snapshot | Status |
 |---|---|
-| Latest verified code wave | Three additional pinned public developer histories, strict exact-answer/citation/abstention scorer and native projection allowlist; shared selected-Qwen GUI/diagnostic coordinator retained |
+| Latest verified code wave | V2 recent source IDs, exact source/body validation, genuine v1 count/admission/archive compatibility and fixed structural response diagnostics |
 | Latest preceding evidence documentation | `9ea5c90`: traced failures and controlled long-chat results |
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
 | Latest recorded application verification | **2,218 checks passed** on a copied source snapshot matching the current Swift sources; five additional native public-case checks passed; strict deep development signature verification passed |
@@ -24,7 +24,7 @@ The design goal is evidence-backed continuity within bounded context and resourc
 | Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
-**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3 progress:** three fixed DevGPT histories and strict rubrics pass controlled native checks; live Qwen completed 24/24 attempts, with each strategy passing only the three absence cases. All source text fit recent context, so this run measures reproduction/citation failures rather than historical-retrieval benefit. Natural questions, actual correction cases and a separate sufficient-evidence witness remain pending. **Next:** N4 versioned recent-source IDs and structural failure attribution, then a separately frozen history-outside-recent diagnostic and N3 feasibility. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
+**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3 progress:** three fixed DevGPT histories and strict rubrics pass controlled native checks; live Qwen completed 24/24 attempts, with each strategy passing only the three absence cases. All source text fit recent context, so this run measures reproduction/citation failures rather than historical-retrieval benefit. Natural questions, actual correction cases and a separate sufficient-evidence witness remain pending. **N4 implementation:** versioned recent-source IDs and content-free structural response attribution passed 2,287 application checks and five additional native checks; the declared development repeat is next. **Next:** a separately frozen history-outside-recent diagnostic and N3 sufficient-evidence feasibility. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
 
 ### Status labels
 
@@ -159,6 +159,7 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 | Surface | Recorded result | Evidence boundary |
 |---|---|---|
 | Shared answering source wave | **2,162 application checks passed**; strict deep signature verification | Preceding answering-wave source snapshot; includes 517 preparation/strategy/coordinator checks, 93 GUI self-checks and 20 answering contracts |
+| Recent-source framing amendment | **2,287 application checks passed**; strict deep signature verification; five additional native checks | Frozen source matches current files; 39 framing checks, 544 component/strategy/coordinator checks, 32 rubric checks and genuine v1 count/admission/archive/restore; separate 32-check public suite overlaps 27 default checks |
 | Public developer-history amendment | **2,218 application checks passed**; strict deep signature verification; five additional native checks | Copied Swift source matches amendment; 29 rubric and 27 developer contracts included; separate 32-check public suite overlaps those 27, runs all 24 native attempts against controlled Qwen and verifies killed-child cleanup ownership |
 | Earlier intended import/retrieval source snapshot | **1,700 application checks passed**; strict deep signature verification | Tracked-source closure plus intended changes; unrelated answering edits excluded |
 | Public-chat importer | **12 focused tests passed**, no skips | Strict formats, bytes/roles/statuses, provenance, refused replacement and staging SIGKILL |
@@ -170,7 +171,7 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 | Historical live Qwen smoke | Two public arithmetic turns passed at `b006b6a` | Connectivity, admission, capture/accounting; no long-history quality evidence |
 | Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
 
-Latest verification record: `.build/evaluation/devgpt-wave-verification-20261005.json`. Verified bundle: `.build/boros-n3/Boros.app`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+Latest verification record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Verified bundle: `.build/boros-n4-verified/Boros.app`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
 
 ### Public developer-history amendment
 
@@ -194,7 +195,7 @@ The live run at `987441e` completed all 24 attempts. Every original event fit th
 | Charged output tokens, including calibration | 2,267 | 2,267 |
 | Foreground model calls | 24 | 36 |
 
-All nine source-answer tasks per arm failed overall. Three exact single-quote answers lacked required citation support, three single quotes differed from the frozen text, and three cross-message responses failed strict response validation. The discarded answers cannot support a more specific JSON-failure explanation. Recent messages expose no stable event IDs to the model; the snapshot/journal retains their IDs privately. The next source-framing change must preserve legacy schema-5 body/archive verification through explicit v1/v2 dispatch. It must not reinterpret old unlabelled bodies.
+All nine source-answer tasks per arm failed overall. Three exact single-quote answers lacked required citation support, three single quotes differed from the frozen text, and three cross-message responses failed strict response validation. The discarded answers cannot support a more specific JSON-failure explanation. At this checkpoint, recent messages exposed no stable event IDs to the model; the snapshot/journal retained their IDs privately. The subsequent N4 amendment uses explicit v1/v2 dispatch to retain old unlabelled body/archive validation.
 
 Both arms retained zero input/output holds. Hybrid's twelve additional foreground calls are opaque query encodings; twelve real per-attempt background builds are reported separately. The complete admitted prompts contained every required answer-text span. A separate sufficient-evidence witness including model-visible citation identity remains pending. No representative quality, tree, latency or economics claim follows.
 
@@ -279,7 +280,7 @@ The user authorized completion of the full planned architecture on October 5, 20
 | N1 | Shared Qwen coordinator and retrieval strategies integrated | Prerequisite for production-path comparison implemented | 2,162 passing checks and rebuilt matching-source app; original lease, controlled GUI/runner parity, durable delivery, Stop/late callbacks and ownership verified |
 | N2 | First paired answering driver/scorer implemented and executed | N1 verified; all 18 attempts from the pinned public development history | 15/18 operational completions; hybrid 6/6 and recent-only 1/6 literal factual successes; every failure retained; complete quality gate inconclusive |
 | N3 | Add independent developer-history/imported-chat answering cases — partial | Three pinned DevGPT histories executed; all text fit recent context; strict reproduction/citation/absence rubrics | Separately frozen larger/cross-session histories, natural questions, corrections, immediate follow-ups, chronology and sufficient-evidence witness remain |
-| N4 | Improve baseline where N2/N3 expose failures — next | Recent context hides citation IDs; cross-message schema failures and exact-quote mismatches observed with gold text present | Version recent framing and retain legacy archive validation; content-free structural failure attribution; independent confirmation and larger-history retrieval comparison; preserve metering |
+| N4 | Improve baseline where N2/N3 expose failures — in progress | V2 recent source identity and structural response diagnostics verified; declared repeat pending | Preserve genuine v1 count/admission/archive contracts; measure the declared repeat; independent confirmation and larger-history retrieval comparison remain |
 | N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
 | N6 | Implement standing-policy/task lifecycle | Required for scoped-instruction category and durable correction semantics | Authenticated scope/conflict/expiry/reopen operations; control epoch and stale handoff/output fences |
 | N7 | Freeze/execute representative baseline evaluation | Pilot workload/variance from N2–N5; full five-category claim also needs N6 | New source/config amendment, independent splits, feasibility, failure scoring, power, usage and trajectory accounting; preserve old pins |
@@ -353,7 +354,7 @@ All confidence bounds above are the specified 95% bounds. Replicates and tree bu
 
 | Decision | Current position | Needed choice/evidence |
 |---|---|---|
-| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 next | Recent-source citation IDs with legacy proof/archive compatibility, structural attribution, larger histories and sufficient-gold witness; retain optional gates |
+| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 framing/diagnostics verified; declared repeat pending | Complete declared repeat, larger histories and sufficient-gold witness; retain optional gates |
 | Answering runtime | Configured Qwen executed the first paired diagnostic | Retain initial admission failure and unknown output hold; establish startup/warm reliability before representative measurements |
 | Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories; all new source text fit recent context | Independent authors, natural questions, original times, larger/cross-session histories and representative workload unestablished |
 | Rubrics | Literal factual pilot and frozen strict exact-answer/cross-message/citation/abstention contracts; synthetic correction checks | Actual public correction cases, semantic reasoning and scoped lifecycle remain unmeasured/unimplemented |

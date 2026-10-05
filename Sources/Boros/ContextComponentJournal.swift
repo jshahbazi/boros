@@ -178,26 +178,29 @@ enum ContextComponentJournal {
               let messages = body["messages"] as? [[String: String]], messages.count >= 2 else { throw invalid("selection snapshot missing") }
         var selection: [String: Any]?
         var selectionRequest: EpisodeWorkRequest?
+        var selectionVersion: String?
         try rows(database, """
             SELECT w.episode_id,w.kind,w.adapter_identity,w.state,s.digest,s.payload,w.request_json,w.receipt_json
             FROM episode_work w LEFT JOIN episode_request_snapshots s ON s.digest=w.snapshot_digest WHERE w.id=?
             """, [workID]) { row in
+            let adapterVersion = text(row, 2)
             guard selection == nil, equal(text(row, 0), episodeID), text(row, 1) == "sourceRead",
-                  text(row, 2) == "context-source-snapshot-v1", text(row, 3) == "completed",
+                  ContextSourceFraming.isSupportedSelectionVersion(adapterVersion), text(row, 3) == "completed",
                   text(row, 4) == sourceDigest, digest(data(row, 5)) == sourceDigest else { throw invalid("selection work mismatch") }
             selection = try object(data(row, 5))
             let request = try JSONDecoder().decode(EpisodeWorkRequest.self, from: data(row, 6))
             let settlements = try JSONDecoder().decode([EpisodeWorkSettlement].self, from: data(row, 7))
             guard request.kind == .sourceRead, request.inputTokensKnown,
-                  request.adapterIdentity == "context-source-snapshot-v1", settlements.last?.outcome == .completed,
+                  request.adapterIdentity == adapterVersion, settlements.last?.outcome == .completed,
                   settlements.last?.observed == request.resources else { throw invalid("selection charge linkage mismatch") }
             selectionRequest = request
+            selectionVersion = adapterVersion
         }
-        guard let selection, selection["version"] as? String == "context-source-snapshot-v1",
+        guard let selection, let selectionVersion, selection["version"] as? String == selectionVersion,
               let recentIDs = selection["recent_source_ids"] as? [String], recentIDs.count <= policy.recentCandidates,
               let recent = selection["recent_sources"] as? [[String: Any]], recent.count == recentIDs.count,
               let historical = selection["historical_sources"] as? [[String: Any]], historical.count <= policy.evidenceSpans,
-              let binding = selection["binding"] as? [String: Any], binding["version"] as? String == "context-source-snapshot-v1",
+              let binding = selection["binding"] as? [String: Any], binding["version"] as? String == selectionVersion,
               equal(binding["projectID"], projectID), equal(binding["conversationID"], conversationID),
               equal(binding["acceptedHumanEventID"], humanID),
               selection["messages_sha256"] as? String == digest(try JSONSerialization.data(withJSONObject: messages, options: [.sortedKeys])),
@@ -232,7 +235,8 @@ enum ContextComponentJournal {
                   let length = integer(source["byteCount"]), let hash = source["digest"] as? String,
                   messages[index + 1]["role"] == (role == "human" ? "user" : "assistant"),
                   let content = messages[index + 1]["content"] else { throw invalid("recent source mismatch") }
-            let prefix = Data(ContextSourceFraming.recentPrefix(role: role, status: status).utf8), bytes = Data(content.utf8)
+            let prefix = Data(try ContextSourceFraming.recentPrefix(eventID: id, role: role, status: status,
+                selectionVersion: selectionVersion).utf8), bytes = Data(content.utf8)
             guard bytes.starts(with: prefix), bytes.count - prefix.count == length,
                   digest(Data(bytes.dropFirst(prefix.count))) == hash else { throw invalid("recent source bytes mismatch") }
             try sourceMetadata(database: database, id: id, projectID: projectID, conversationID: conversationID,

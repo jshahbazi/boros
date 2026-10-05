@@ -72,7 +72,7 @@ enum RetrievalStrategyChecks {
             semanticIndex: index, retrievalStrategy: .recentOnly, episodeLease: lease)
         checks["strategy_recent_only_keeps_reduced_suffix_and_same_frozen_selection_contract"] = try reducedSelection.includedRecentCount == 1
             && reducedSelection.selectionAudit?.recentTokenExcludedCount == 1
-            && reducedSelection.selectionBinding?.version == "context-source-snapshot-v1"
+            && reducedSelection.selectionBinding?.version == ContextSourceFraming.currentSelectionVersion
             && (try reducedSelection.componentAssignments()) == [.mandatory, .recent, .mandatory]
             && sourceWorkEqual(beforeReductionSelection.charged, try lease.checkActive().charged)
         var stale = recent

@@ -27,6 +27,8 @@ The content-free result contains the frozen rubric version and kind, overall int
 
 This protocol measures compliance with a constrained exact-answer request. It does not evaluate unrestricted prose, paraphrases, entailment, citation sufficiency independent of host attestations, or general conversational usefulness. A successful absence case only measures the declared question and frozen corpus; it does not prove that the requested fact is absent from other histories or external knowledge. No quality, latency, economic, summary-tree, or release threshold is established by the scorer itself.
 
+The N4 additive diagnostic `boros-response-diagnostic-v1` preserves every v1 scoring decision and `failure_code`. Results add `response_diagnostic_version` and `response_error_code`. Invalid responses report one fixed structural code for size, UTF-8, host input type, JSON syntax, duplicate keys, nonfinite numbers, top-level shape, key set, abstention/citation shape, or string/array answer shape. Validation order determines the first failure. Valid and incomplete responses have a null structural code; incomplete invocations are not parsed. These codes contain no supplied text, parser error, path, citation or source ID. Discarded prior responses cannot be retroactively classified.
+
 The synthetic contract suite runs with:
 
 ```sh

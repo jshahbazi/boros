@@ -4,7 +4,8 @@ import copy
 import json
 import unittest
 
-from answer_rubrics import MAX_RESPONSE_BYTES, RUBRIC_VERSION, RubricError, score_response, validate_oracle
+from answer_rubrics import (MAX_RESPONSE_BYTES, RESPONSE_DIAGNOSTIC_VERSION, RESPONSE_ERROR_CODES,
+                             RUBRIC_VERSION, RubricError, score_response, validate_oracle)
 
 
 def oracle(kind="exact_quote"):
@@ -43,10 +44,14 @@ class RubricChecks(unittest.TestCase):
                                     oracle("cross_message_quotes"))["score"], 0)
 
     def test_cross_message_shape_is_fixed(self):
-        self.assertEqual(self.score(response(), oracle("cross_message_quotes"))["failure_code"], "response_invalid")
+        row = self.score(response(), oracle("cross_message_quotes"))
+        self.assertEqual(row["failure_code"], "response_invalid")
+        self.assertEqual(row["response_error_code"], "response_answer_shape_array")
 
     def test_quote_shape_is_fixed(self):
-        self.assertEqual(self.score(response(["value-new"]))["failure_code"], "response_invalid")
+        row = self.score(response(["value-new"]))
+        self.assertEqual(row["failure_code"], "response_invalid")
+        self.assertEqual(row["response_error_code"], "response_answer_shape_string")
 
     def test_negated_correct_value_fails(self):
         self.assertFalse(self.score(response("not value-new"))["answer_correct"])
@@ -181,7 +186,39 @@ class RubricChecks(unittest.TestCase):
         self.assertFalse("synthetic-secret" in encoded)
         self.assertEqual(set(row), {"rubric_version", "kind", "score", "operational_complete", "response_valid",
                                    "answer_correct", "citation_correct", "abstention_correct", "required_source_count",
-                                   "delivered_required_source_count", "citation_count", "failure_code"})
+                                   "delivered_required_source_count", "citation_count", "failure_code",
+                                   "response_diagnostic_version", "response_error_code"})
+
+    def test_response_diagnostic_codes_are_fixed_and_content_free(self):
+        cases = [
+            (b"\xff", "response_utf8"), ("\ud800", "response_utf8"), (1, "response_type"),
+            (b"{" + b"x" * (MAX_RESPONSE_BYTES + 1), "response_size"),
+            (" " * (MAX_RESPONSE_BYTES + 1), "response_size"),
+            ("{", "response_json_syntax"), ("[]", "response_top_level"),
+            ("null", "response_top_level"), ("true", "response_top_level"),
+            ("42", "response_top_level"),
+            ("{" + '"answer":"x","answer":"y","citations":[],"abstain":false}', "response_duplicate_key"),
+            ('{"answer":NaN,"citations":[],"abstain":false}', "response_nonfinite"),
+            ('{"answer":"x","citations":[],"abstain":0}', "response_abstain_shape"),
+            ('{"answer":"x","citations":"event-a","abstain":false}', "response_citations_shape"),
+            ('{"answer":"x","citations":[],"abstain":false,"extra":1}', "response_keys"),
+        ]
+        for raw, code in cases:
+            row = self.score(raw)
+            self.assertEqual(row["failure_code"], "response_invalid")
+            self.assertEqual(row["response_diagnostic_version"], RESPONSE_DIAGNOSTIC_VERSION)
+            self.assertEqual(row["response_error_code"], code)
+            self.assertIn(row["response_error_code"], RESPONSE_ERROR_CODES)
+
+    def test_diagnostic_precedence_and_incomplete_preservation(self):
+        row = self.score("{", complete=False)
+        self.assertEqual(row["failure_code"], "invocation_incomplete")
+        self.assertIsNone(row["response_error_code"])
+
+    def test_valid_response_has_no_response_error(self):
+        row = self.score()
+        self.assertEqual(row["response_error_code"], None)
+        self.assertEqual(row["failure_code"], None)
 
 
 if __name__ == "__main__":

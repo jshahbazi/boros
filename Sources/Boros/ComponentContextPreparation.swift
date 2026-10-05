@@ -229,7 +229,8 @@ final class ComponentContextPreparationOperation {
                             let resources = EpisodeResources(memoryOperations: 1,
                                 metadataRows: snapshot.recentSources.count + snapshot.evidence.count + 8)
                             let work = try self.lease.prepare(kind: .sourceRead, resources: resources,
-                                adapterIdentity: "context-source-snapshot-v1", snapshot: snapshot.selectionEvidence())
+                                adapterIdentity: snapshot.selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion,
+                                snapshot: snapshot.selectionEvidence())
                             let submitted = try self.lease.dispatch(work, start: {})
                             _ = try self.lease.settle(submitted, outcome: .completed, observed: resources)
                             audited.selectionWorkID = work.id

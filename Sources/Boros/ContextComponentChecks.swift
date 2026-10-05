@@ -135,8 +135,12 @@ enum ContextComponentChecks {
         let largeCurrent = try append(store, largeChat.id, "component-large-current", "Synthetic large allocation request")
         let large = try ContextAssembler.prepareRecent(store: store, conversationID: largeChat.id, projectID: project,
             prompt: largeCurrent.text, system: "", excludingEventID: largeCurrent.id)
+        let largeFramingBytes = try large.recentSources.reduce(0) { total, source in
+            total + (try ContextSourceFraming.recentPrefix(eventID: source.eventID, role: source.role.rawValue,
+                status: source.status.rawValue, selectionVersion: ContextSourceFraming.currentSelectionVersion)).utf8.count
+        }
         checks["component_recent_guard_enlarged_beyond_legacy_bytes"] = large.includedRecentCount == 2
-            && large.messages.dropFirst().dropLast().reduce(0) { $0 + $1.content.utf8.count } == 140_000
+            && large.messages.dropFirst().dropLast().reduce(0) { $0 + $1.content.utf8.count } == 140_000 + largeFramingBytes
         do {
             _ = try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
                 prompt: prompt, system: "Synthetic host", excludingEventID: current.id, budgetBytes: 100)

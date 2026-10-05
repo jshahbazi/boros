@@ -13,6 +13,7 @@ enum ComponentPreparationChecks {
     private enum Case: String, CaseIterable {
         case mandatory, scope, boundary, pipeline, envelope, httpLimit, cancel, deadline
         case identityModel, identityTemplate, identityRuntime
+        case legacyVersion
     }
     private final class Clock: EpisodeClockSource {
         private let lock = NSLock()
@@ -62,6 +63,7 @@ enum ComponentPreparationChecks {
         let completion: ([String: Bool]) -> Void
         var settings = GenerationSettings()
         var operation: ComponentContextPreparationOperation?
+        var legacySession: ProviderComponentSession?
         var completed = false
         private var failureStage = "preparation_audit"
         let droppedSourceID: String
@@ -100,13 +102,13 @@ enum ComponentPreparationChecks {
                         turnID: "fixture-archive-turn-\(index)", eventID: "fixture-\(kind.rawValue)-archive-\(index)")
                 }
             }
-            let count = kind == .boundary ? 2 : (kind == .cancel || kind == .deadline
+            let count = kind == .boundary || kind == .legacyVersion ? 2 : (kind == .cancel || kind == .deadline
                 || kind == .identityModel || kind == .identityTemplate || kind == .identityRuntime) ? 1 : 7
             for index in 0..<count {
                 let text = kind == .cancel || kind == .deadline ? marker + " recent source"
                     : index == 0 ? "pipelinekey original recent decision" : "Synthetic recent source \(index)"
                 _ = try store.append(conversationID: chat.id, role: index % 2 == 0 ? .human : .assistant,
-                    text: text, status: index == 3 ? .partial : .complete,
+                    text: text, status: index == 3 || (kind == .legacyVersion && index == 1) ? .partial : .complete,
                     turnID: "fixture-recent-turn-\(index)", eventID: "fixture-\(kind.rawValue)-recent-\(index)")
             }
             let episodeID = UUID().uuidString
@@ -128,6 +130,7 @@ enum ComponentPreparationChecks {
         }
         deinit { try? FileManager.default.removeItem(at: directory) }
         func start() {
+            if kind == .legacyVersion { startLegacy(); return }
             let preparation = ComponentContextPreparationOperation(store: store, conversationID: chat.id,
                 projectID: chat.projectID, humanEventID: kind == .scope ? "fixture-foreign-human" : currentID,
                 prompt: prompt, settings: settings,
@@ -135,6 +138,85 @@ enum ComponentPreparationChecks {
             operation = preparation
             if kind == .cancel || kind == .deadline { installBarrierObserver() }
             preparation.start()
+        }
+        /// A real legacy body is rendered and independently counted before
+        /// admission. No already-counted v2 proof is rewritten into v1.
+        private func startLegacy() {
+            do {
+                var mandatory = settings
+                mandatory.messagesOverride = ContextAssembler.mandatoryMessages(prompt: prompt, system: settings.system)
+                    .map { ["role": $0.role, "content": $0.content] }
+                let mandatoryBody = try EndpointRequest.build(prompt: prompt, settings: mandatory, conversation: Conversation())
+                legacySession = ProviderAdmission.beginComponentSession(mandatoryBody: mandatoryBody,
+                    address: settings.endpointURL, apiKey: settings.endpointAPIKey, contextLimit: settings.endpointContextLimit,
+                    safetyTokens: settings.endpointSafetyTokens, episodeLease: lease) { [self] outcome in
+                    switch outcome {
+                    case .failure(let error): finish(.failure(error))
+                    case .success(let session):
+                        do {
+                            let selected = try ContextAssembler.prepareRecent(store: store, conversationID: chat.id,
+                                projectID: chat.projectID, prompt: prompt, system: settings.system,
+                                excludingEventID: currentID, episodeLease: lease)
+                            let originals = try store.events(conversationID: chat.id).filter { !episodeIdentifierEqual($0.id, currentID) }
+                            let legacyMessages = [selected.messages[0]] + originals.map {
+                                ContextMessage(role: $0.role == .human ? "user" : "assistant",
+                                    content: ContextSourceFraming.recentPrefix(role: $0.role.rawValue, status: $0.status.rawValue) + $0.text)
+                            } + [selected.messages.last!]
+                            var binding = selected.selectionBinding!
+                            binding.version = ContextSourceFraming.legacySelectionVersion
+                            let snapshot = ContextSnapshot(messages: legacyMessages, evidence: [],
+                                serializedBytes: try ContextAssembler.serializedMessages(legacyMessages).count,
+                                omittedRecentCount: selected.omittedRecentCount, includedRecentCount: selected.includedRecentCount,
+                                recentSourceIDs: selected.recentSourceIDs, recentSources: selected.recentSources,
+                                selectionBinding: binding, selectionAudit: selected.selectionAudit)
+                            var ready = settings
+                            ready.messagesOverride = legacyMessages.map { ["role": $0.role, "content": $0.content] }
+                            let body = try EndpointRequest.build(prompt: prompt, settings: ready, conversation: Conversation())
+                            let assignment: [ProviderMessageComponent] = try snapshot.componentAssignments().map {
+                                switch $0 { case .mandatory: return .mandatory; case .recent: return .recent; case .historicalEvidence: return .evidence }
+                            }
+                            let policyDigest = EndpointRequest.digest(try ContextComponentPolicy.selectedQwen.canonicalData())
+                            let sourceDigest = try snapshot.selectionDigest()
+                            session.countComponent(requestBody: body, assignments: assignment, component: .recent) { [self] recentOutcome in
+                                switch recentOutcome {
+                                case .failure(let error): finish(.failure(error))
+                                case .success(let recent):
+                                    session.countComponent(requestBody: body, assignments: assignment, component: .evidence) { [self] evidenceOutcome in
+                                        switch evidenceOutcome {
+                                        case .failure(let error): finish(.failure(error))
+                                        case .success(let evidence):
+                                            session.admit(requestBody: body, assignments: assignment, sourceSnapshotDigest: sourceDigest,
+                                                policyDigest: policyDigest, recentReceipt: recent, evidenceReceipt: evidence) { [self] admitted in
+                                                switch admitted {
+                                                case .failure(let error): finish(.failure(error))
+                                                case .success(let receipt):
+                                                    do {
+                                                        var audited = snapshot
+                                                        audited.componentAuditJSON = try receipt.componentProof.map { try JSONEncoder().encode($0) }
+                                                        let resources = EpisodeResources(memoryOperations: 1, metadataRows: snapshot.recentSources.count + 8)
+                                                        let work = try lease.prepare(kind: .sourceRead, resources: resources,
+                                                            adapterIdentity: ContextSourceFraming.legacySelectionVersion, snapshot: snapshot.selectionEvidence())
+                                                        let submitted = try lease.dispatch(work, start: {})
+                                                        _ = try lease.settle(submitted, outcome: .completed, observed: resources)
+                                                        audited.selectionWorkID = work.id
+                                                        var finalSettings = ready
+                                                        finalSettings.preparedEndpointBody = body; finalSettings.endpointAdmission = receipt
+                                                        finalSettings.preparedContextComponents = ContextComponentDispatchBinding(assignments: assignment,
+                                                            sourceSnapshotDigest: sourceDigest, policyDigest: policyDigest)
+                                                        session.close(); legacySession = nil
+                                                        finish(.success(PreparedComponentContext(snapshot: audited, settings: finalSettings,
+                                                            body: body, receipt: receipt)))
+                                                    } catch { finish(.failure(error)) }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch { finish(.failure(error)) }
+                    }
+                }
+            } catch { finish(.failure(error)) }
         }
         private func installBarrierObserver() {
             guard let base = LocalEndpoint.chatURL(baseURL), var parts = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return }
@@ -210,6 +292,7 @@ enum ComponentPreparationChecks {
         private func finish(_ outcome: Result<PreparedComponentContext, Error>) {
             guard !completed else { return }
             completed = true
+            legacySession?.close(); legacySession = nil
             var checks: [String: Bool] = [:]
             let prefix = "component_preparation_" + kind.rawValue
             do {
@@ -245,6 +328,11 @@ enum ComponentPreparationChecks {
                     checks[prefix + "_durable_component_audit_attached"] = audit["components"] is [String: Any]
                         && audit["source_snapshot_sha256"] as? String == sourceDigest
                     switch kind {
+                    case .legacyVersion:
+                        checks[prefix + "_authentic_complete_and_partial_original_bodies_counted"] = prepared.snapshot.selectionBinding?.version == ContextSourceFraming.legacySelectionVersion
+                            && prepared.snapshot.includedRecentCount == 2 && prepared.snapshot.messages[1].content == "pipelinekey original recent decision"
+                            && prepared.snapshot.messages[2].content == "[Incomplete historical assistant message; capture status: partial.]\nSynthetic recent source 1"
+                            && proof.recent.tokens == 8000 && proof.evidence.tokens == 0 && proof.wholePrompt.tokens == 8100
                     case .boundary:
                         checks[prefix + "_exact_cap_boundaries_retained"] = proof.recent.tokens == 8000 && proof.evidence.tokens == 12000
                             && prepared.snapshot.includedRecentCount == 2 && prepared.snapshot.evidence.count == 3
@@ -289,6 +377,9 @@ enum ComponentPreparationChecks {
                         && invocation?.admissionJSON == originalAdmission
                     if kind == .pipeline {
                         checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory)) { _, latest in latest }
+                    }
+                    if kind == .legacyVersion {
+                        checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory, versionsOnly: true)) { _, latest in latest }
                     }
                 case .failure(let error):
                     let code = ComponentContextPreparationOperation.failureCode(error)
@@ -457,6 +548,8 @@ enum ComponentPreparationChecks {
             case policyExtraKey, policyChangedCap
             case reboundHistoricalScope, reboundHistoricalOffset, reboundHistoricalHash
             case reboundRecentRole, reboundRecentStatus, reboundRecentHash, originalSourceRange
+            case unknownSelectionVersion, mixedSelectionDocumentVersion, mixedSelectionBindingVersion, mixedSelectionWorkVersion
+            case reboundRecentBodyLabel, reboundRecentBodyID
         }
         private enum FixtureError: Error { case malformed, database }
         private enum Binding { case text(String), bytes(Data), integer(Int) }
@@ -525,14 +618,16 @@ enum ComponentPreparationChecks {
             }
             return try body(Database(copied))
         }
-        static func run(archive: URL, directory: URL) -> [String: Bool] {
+        static func run(archive: URL, directory: URL, versionsOnly: Bool = false) -> [String: Bool] {
             var checks: [String: Bool] = [:]
-            let prefix = "component_preparation_journal_"
+            let prefix = versionsOnly ? "component_preparation_legacy_journal_" : "component_preparation_journal_"
             do {
                 try withCopy(archive: archive, directory: directory) { try MemoryStore.validateEpisodeJournal(database: $0.handle) }
                 checks[prefix + "valid_coordinator_control"] = true
             } catch { checks[prefix + "valid_coordinator_control"] = false }
-            for mutation in Mutation.allCases {
+            let versionMutations: [Mutation] = [.unknownSelectionVersion, .mixedSelectionDocumentVersion,
+                .mixedSelectionBindingVersion, .mixedSelectionWorkVersion, .reboundRecentBodyLabel, .reboundRecentBodyID]
+            for mutation in versionsOnly ? versionMutations : Mutation.allCases {
                 do {
                     checks[prefix + mutation.rawValue + "_rejected"] = try withCopy(archive: archive, directory: directory) { database in
                         try MemoryStore.validateEpisodeJournal(database: database.handle)
@@ -564,6 +659,64 @@ enum ComponentPreparationChecks {
             let tokenizerWorkID = try string(recentCount["tokenizerWorkID"])
             let zeroDigest = String(repeating: "0", count: 64)
             switch mutation {
+            case .unknownSelectionVersion, .mixedSelectionDocumentVersion, .mixedSelectionBindingVersion, .mixedSelectionWorkVersion,
+                 .reboundRecentBodyLabel, .reboundRecentBodyID:
+                let payload = try database.bytes("SELECT s.payload FROM episode_work w JOIN episode_request_snapshots s ON s.digest=w.snapshot_digest WHERE w.id=?", [.text(selectionWorkID)])
+                var selection = try object(payload)
+                guard var binding = selection["binding"] as? [String: Any] else { throw FixtureError.malformed }
+                let oldVersion = try string(selection["version"])
+                let otherVersion = oldVersion == ContextSourceFraming.legacySelectionVersion
+                    ? ContextSourceFraming.currentSelectionVersion : ContextSourceFraming.legacySelectionVersion
+                if mutation == .unknownSelectionVersion || mutation == .mixedSelectionDocumentVersion {
+                    selection["version"] = mutation == .unknownSelectionVersion ? "context-source-snapshot-v999" : otherVersion
+                }
+                if mutation == .unknownSelectionVersion || mutation == .mixedSelectionBindingVersion {
+                    binding["version"] = mutation == .unknownSelectionVersion ? "context-source-snapshot-v999" : otherVersion
+                    selection["binding"] = binding
+                }
+                if mutation == .unknownSelectionVersion || mutation == .mixedSelectionWorkVersion {
+                    let version = mutation == .unknownSelectionVersion ? "context-source-snapshot-v999" : otherVersion
+                    var request = try object(database.bytes("SELECT request_json FROM episode_work WHERE id=?", [.text(selectionWorkID)]))
+                    request["adapterIdentity"] = version
+                    let bytes = try encoded(request)
+                    try database.execute("UPDATE episode_work SET adapter_identity=?,request_json=?,request_digest=? WHERE id=?",
+                        [.text(version), .bytes(bytes), .text(ContextSnapshot.digest(bytes)), .text(selectionWorkID)])
+                }
+                if mutation == .reboundRecentBodyLabel || mutation == .reboundRecentBodyID {
+                    var body = try object(database.bytes("SELECT request_body FROM invocations WHERE id='fixture-invocation'"))
+                    guard var messages = body["messages"] as? [[String: String]], messages.count > 2 else { throw FixtureError.malformed }
+                    let original = try string(messages[1]["content"])
+                    if mutation == .reboundRecentBodyLabel {
+                        messages[1]["content"] = "Synthetic incorrect metadata label\n" + original
+                    } else if oldVersion == ContextSourceFraming.currentSelectionVersion {
+                        var lines = original.components(separatedBy: "\n")
+                        guard let line = lines.firstIndex(where: { $0.hasPrefix(ContextSourceFraming.recentMetadataHeading) }) else { throw FixtureError.malformed }
+                        var metadata = try object(Data(lines[line].dropFirst(ContextSourceFraming.recentMetadataHeading.count).utf8))
+                        metadata["event_id"] = "synthetic-fabricated-citation-id"
+                        lines[line] = ContextSourceFraming.recentMetadataHeading + String(decoding: try encoded(metadata), as: UTF8.self)
+                        messages[1]["content"] = lines.joined(separator: "\n")
+                    } else {
+                        messages[1]["content"] = try ContextSourceFraming.recentPrefix(eventID: "synthetic-fabricated-citation-id",
+                            role: "human", status: "complete", selectionVersion: ContextSourceFraming.currentSelectionVersion) + original
+                    }
+                    body["messages"] = messages
+                    let bodyBytes = try encoded(body), bodyDigest = ContextSnapshot.digest(bodyBytes)
+                    selection["messages_sha256"] = ContextSnapshot.digest(try encoded(messages))
+                    receipt["bodyDigest"] = bodyDigest; proof["bodyDigest"] = bodyDigest
+                    let answerRequest = try object(database.bytes("SELECT request_json FROM episode_work WHERE id=(SELECT episode_work_id FROM invocations WHERE id='fixture-invocation')"))
+                    let answerID = try string(answerRequest["id"])
+                    try database.replaceSnapshot(workID: answerID, payload: bodyBytes)
+                    try database.execute("UPDATE invocations SET request_body=?,request_digest=? WHERE id='fixture-invocation'",
+                        [.bytes(bodyBytes), .text(bodyDigest)])
+                }
+                let refreshed = try encoded(selection), digest = ContextSnapshot.digest(refreshed)
+                // A work-version mutation deliberately leaves the selection
+                // bytes unchanged. Its already-deduplicated snapshot must not
+                // be reinserted under the same primary key before validation.
+                if digest != ContextSnapshot.digest(payload) {
+                    try database.replaceSnapshot(workID: selectionWorkID, payload: refreshed)
+                }
+                context["source_snapshot_sha256"] = digest; proof["sourceSnapshotDigest"] = digest
             case .copiedHistoricalScope, .copiedHistoricalOffset, .copiedHistoricalHash:
                 guard var historical = context["historical_sources"] as? [[String: Any]], !historical.isEmpty else { throw FixtureError.malformed }
                 if mutation == .copiedHistoricalScope { historical[0]["project_id"] = "foreign-synthetic-project" }
