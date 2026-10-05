@@ -1021,12 +1021,32 @@ final class MemoryStore: @unchecked Sendable {
         return formatter.string(from: Date())
     }
     private static func digest(_ payload: Data) -> String { SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined() }
-    private static func hit(_ event: MemoryEvent, terms: [String], literal: Bool = false) -> MemoryHit {
-        let target = terms.compactMap { event.text.range(of: $0, options: literal ? [] : [.caseInsensitive, .diacriticInsensitive]) }.first
-        let center = target?.lowerBound ?? event.text.startIndex
-        let lower = event.text.index(center, offsetBy: -160, limitedBy: event.text.startIndex) ?? event.text.startIndex
-        let upper = event.text.index(lower, offsetBy: 560, limitedBy: event.text.endIndex) ?? event.text.endIndex
-        let excerpt = String(event.text[lower..<upper])
+    /// One bounded occurrence per distinct term. Choose the window containing
+    /// the most complete matches, then the most matched term bytes. A common
+    /// request word must not center the excerpt away from a denser term cluster.
+    /// Literal search retains its exact first-match window.
+    static func hit(_ event: MemoryEvent, terms: [String], literal: Bool = false) -> MemoryHit {
+        var seen = Set<String>()
+        let matches = terms.filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }.compactMap { term in
+            event.text.range(of: term, options: literal ? [] : [.caseInsensitive, .diacriticInsensitive])
+        }
+        var lower = event.text.startIndex, upper = event.text.endIndex
+        var bestCount = -1, bestBytes = -1
+        for center in matches.isEmpty ? [event.text.startIndex] : matches.map(\.lowerBound) {
+            let start = event.text.index(center, offsetBy: -160, limitedBy: event.text.startIndex) ?? event.text.startIndex
+            let end = event.text.index(start, offsetBy: 560, limitedBy: event.text.endIndex) ?? event.text.endIndex
+            let included = matches.filter { $0.lowerBound >= start && $0.upperBound <= end }
+            let weight = included.reduce(0) { $0 + event.text[$1].utf8.count }
+            if included.count > bestCount || (included.count == bestCount && (weight > bestBytes
+                || (weight == bestBytes && start < lower))) {
+                lower = start; upper = end; bestCount = included.count; bestBytes = weight
+            }
+            if literal { break }
+        }
+        let candidate = Data(event.text[lower..<upper].utf8)
+        var length = min(candidate.count, maximumPageBytes)
+        while length > 0 && String(data: candidate.prefix(length), encoding: .utf8) == nil { length -= 1 }
+        let excerpt = String(decoding: candidate.prefix(length), as: UTF8.self)
         return MemoryHit(eventID: event.id, conversationID: event.conversationID, projectID: event.projectID, role: event.role, status: event.status, createdAt: event.createdAt, digest: event.digest, totalBytes: event.byteCount, excerptOffset: event.text[..<lower].utf8.count, excerpt: excerpt)
     }
     private static func prepareDirectory(_ url: URL) throws {

@@ -263,7 +263,8 @@ final class SemanticIndex: @unchecked Sendable {
         indexFingerprint = Self.digest(try Self.canonical(["encoder": encoderFingerprint, "chunker": "utf8-whitespace-v1", "chunk_bytes": String(configuration.chunkBytes), "schema": "2-source-seal"]))
         rankingFingerprint = Self.digest(try Self.canonical(["ranking": "literal-first-rrf-cosine-v1", "rrf_constant": String(configuration.reciprocalRankConstant),
             "candidate_cap": String(configuration.maximumCandidateChunks), "lexical": "caller-query-anyterm-prefiltered-exclusions-v2",
-            "raw_filters": "scope-frontier-utf8-exclusions-before-limit-v2", "dedup": "one-range-per-source-v1"]))
+            "raw_filters": "scope-frontier-utf8-exclusions-before-limit-v2", "dedup": "one-range-per-source-v1",
+            "lexical_excerpt": "first-occurrence-cluster-v2"]))
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             var statValue = stat()

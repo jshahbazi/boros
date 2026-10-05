@@ -32,6 +32,39 @@ enum MemoryChecks {
         let literal = try store!.literalSearch(query: "MIDPAYLOAD_SENTINEL exact record café", projectID: "synthetic-alpha")
         checks["lexical_middle_source_retrieval"] = lexical.count == 1 && lexical[0].eventID == saved.id && lexical[0].excerpt.contains("MIDPAYLOAD_SENTINEL") && lexical[0].excerptOffset > 0
         checks["literal_scope_isolation"] = literal.count == 1 && literal[0].projectID == "synthetic-alpha" && literal[0].eventID == saved.id
+        let hitConversation = try store!.createConversation(projectID: "synthetic-hit", title: "Hit selection fixtures")
+        let clustered = try store!.append(conversationID: hitConversation.id, role: .human,
+            text: "unrelatedfirstterm " + String(repeating: " ", count: 900) + "densealpha densebeta densegamma", status: .complete,
+            turnID: "hit-cluster-turn", eventID: "hit-cluster-event")
+        let clusteredTerms = MemoryStore.hit(clustered, terms: ["unrelatedfirstterm", "densealpha", "densebeta", "densegamma"])
+        let reorderedTerms = MemoryStore.hit(clustered, terms: ["densegamma", "unrelatedfirstterm", "densebeta", "densealpha"])
+        checks["hit_centers_on_dense_distinctive_terms"] = clusteredTerms.excerpt.contains("densealpha") && clusteredTerms.excerpt.contains("densegamma")
+            && clusteredTerms.excerptOffset > "unrelatedfirstterm ".utf8.count
+        checks["hit_query_order_permutation_preserves_coverage"] = clusteredTerms.excerptOffset == reorderedTerms.excerptOffset
+            && clusteredTerms.digest == reorderedTerms.digest
+        let unicodePrefix = String(repeating: "x", count: 220)
+        let unicodeHitEvent = try store!.append(conversationID: hitConversation.id, role: .assistant,
+            text: unicodePrefix + " é 🚀 exactneedle suffix", status: .complete, turnID: "hit-unicode-turn", eventID: "hit-unicode-event")
+        let unicodeHit = MemoryStore.hit(unicodeHitEvent, terms: ["exactneedle"])
+        let unicodeBytes = Data(unicodeHitEvent.text.utf8)
+        let unicodeEnd = min(unicodeBytes.count, unicodeHit.excerptOffset + unicodeHit.excerpt.utf8.count)
+        let unicodeSlice = unicodeBytes.subdata(in: unicodeHit.excerptOffset..<unicodeEnd)
+        checks["hit_unicode_offset_and_digest_are_exact"] = unicodeHit.excerpt.contains("exactneedle")
+            && unicodeSlice == Data(unicodeHit.excerpt.utf8)
+            && unicodeHit.digest == unicodeHitEvent.digest
+        let repeatedLiteralEvent = try store!.append(conversationID: hitConversation.id, role: .human,
+            text: "needle before " + String(repeating: "x", count: 700) + "needle after", status: .complete, turnID: "hit-literal-turn", eventID: "hit-literal-event")
+        let repeatedLiteral = MemoryStore.hit(repeatedLiteralEvent, terms: ["needle"], literal: true)
+        checks["hit_literal_keeps_first_match"] = repeatedLiteral.excerptOffset == 0 && !repeatedLiteral.excerpt.contains("needle after")
+        let longGrapheme = "e" + String(repeating: "\u{301}", count: 128)
+        let combiningPayload = "capneedle " + String(repeating: longGrapheme + " ", count: 600)
+        let cappedEvent = try store!.append(conversationID: hitConversation.id, role: .human,
+            text: combiningPayload,
+            status: .complete, turnID: "hit-cap-turn", eventID: "hit-cap-event")
+        let cappedHit = MemoryStore.hit(cappedEvent, terms: ["capneedle"])
+        checks["hit_excerpt_respects_4096_utf8_bytes"] = cappedHit.excerpt.utf8.count <= MemoryStore.maximumPageBytes
+            && cappedHit.excerpt.utf8.count >= MemoryStore.maximumPageBytes - 3
+            && Data(cappedHit.excerpt.utf8) == Data(cappedEvent.text.utf8).prefix(cappedHit.excerpt.utf8.count)
         checks["quoted_fts_syntax_is_data"] = try store!.search(query: "MIDPAYLOAD_SENTINEL\" OR *", projectID: "synthetic-alpha").isEmpty
         let frozenFrontier = try store!.sourceFrontier(projectID: "synthetic-alpha")
         let references = try store!.sourceManifest(projectID: "synthetic-alpha", afterSequence: 0, throughSequence: frozenFrontier, limit: 10)

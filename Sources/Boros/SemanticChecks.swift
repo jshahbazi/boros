@@ -340,7 +340,7 @@ enum SemanticChecks {
         } catch let error as EpisodeBudgetError {
             let result = try store.episodeReceipt(id: small.lease.episodeID, clock: small.clock.now())
             checks["semantic_budget_failure_is_not_swallowed_by_lexical_fallback"] = error.failureCode == "episode_budget_exceeded"
-                && result.charged.rawSourceBytes == (source.byteCount + second.byteCount) * 5 && result.charged.modelCalls == 1
+                && result.charged.rawSourceBytes == (source.byteCount + second.byteCount) * 6 && result.charged.modelCalls == 1
         }
         let stopped = try meteredEpisode(store: store, project: project)
         encoder.beforeEncoding = { _ = try stopped.lease.finish(reason: .cancelled) }
@@ -351,7 +351,7 @@ enum SemanticChecks {
         } catch let error as EpisodeBudgetError {
             let result = try store.episodeReceipt(id: stopped.lease.episodeID, clock: stopped.clock.now())
             checks["semantic_stop_during_encoder_fences_result_and_fallback"] = error.failureCode == "episode_inactive"
-                && result.charged.rawSourceBytes == (source.byteCount + second.byteCount) * 5 && result.charged.modelCalls == 1
+                && result.charged.rawSourceBytes == (source.byteCount + second.byteCount) * 6 && result.charged.modelCalls == 1
         }
         let deadline = try meteredEpisode(store: store, project: project)
         encoder.beforeEncoding = { deadline.clock.ticks = 200_000_000_000 }

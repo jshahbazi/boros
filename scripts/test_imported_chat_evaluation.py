@@ -182,6 +182,56 @@ class NativeContracts(unittest.TestCase):
         self.assertTrue(report["probes"][0]["protocols"]["recent_only"]["allRequiredSpansPresent"] is False, "wrong_source_does_not_score")
         self.assertTrue(report["probes"][0]["protocols"]["raw_pages"]["allRequiredSpansPresent"] is False, "prompt_echo_does_not_score")
 
+    def test_dense_excerpt_and_fair_pages_recover_original_ranges(self):
+        def run_fixture(name, texts, probe):
+            source = [{"id": f"import-{name}-{i}", "role": "human", "status": "complete",
+                       "text": text, "sha256": self.e.digest(text.encode())} for i, text in enumerate(texts)]
+            fixture = {"version": 1, "messages": source, "probes": [probe], "semanticChunks": 0,
+                       "indexSeconds": 1, "memoryOperationCap": 24}
+            path = self.scratch / f"{name}.json"
+            self.e.private_write(path, self.e.canonical(fixture))
+            warm = self.e.execute(self.binary, "warm", path, self.scratch / f"{name}-store", self.scratch / f"{name}-warm.json")
+            restart = self.e.execute(self.binary, "restart", path, self.scratch / f"{name}-store", self.scratch / f"{name}-restart.json")
+            return warm, restart
+
+        prefix = "containing " + "ordinary filler " * 100
+        span = "clusteralpha clusterbeta clustergamma exact original café value."
+        texts = [prefix + span + " ending", "ordinary recent filler " * 2000]
+        probe = {"prompt": "Find the earlier discussion containing these terms: clusteralpha clusterbeta clustergamma",
+                 "query": "clusteralpha clusterbeta clustergamma", "literal": "clusteralpha", "region": "early", "kind": "answerable",
+                 "gold": [{"message": 0, "offset": len(prefix.encode()), "bytes": len(span.encode()), "sha256": self.e.digest(span.encode())}]}
+        for report in run_fixture("cluster", texts, probe):
+            for name in ("lexical_context", "raw_pages"):
+                result = report["probes"][0]["protocols"][name]
+                self.assertTrue(result["allRequiredSpansPresent"], "dense_excerpt_recovers_gold")
+                self.assertTrue(result["goldDiagnostics"][0]["sourceDelivered"], "dense_excerpt_trace_has_source")
+
+        # Without literal hits, a late lexical candidate must get a first page
+        # before preceding large source tails exhaust the same 12,000 bytes.
+        span = "fairpagemarker original bounded range."
+        texts = [span + " plain filler " * 400 for _ in range(13)] + ["recent filler " * 2500]
+        probe = {"prompt": "Find fairpagemarker", "query": "fairpagemarker", "literal": None,
+                 "region": "early", "kind": "answerable",
+                 "gold": [{"message": 0, "offset": 0, "bytes": len(span.encode()), "sha256": self.e.digest(span.encode())}]}
+        for report in run_fixture("fair-pages", texts, probe):
+            result = report["probes"][0]["protocols"]["raw_pages"]
+            self.assertTrue(result["allRequiredSpansPresent"], "fair_pages_recovers_late_candidate")
+            self.assertTrue(result["goldDiagnostics"][0]["searchCandidateRank"] == 13, "fair_pages_candidate_rank")
+            self.assertTrue(result["returnedSourceBytes"] <= 12000 and result["readCalls"] <= 19, "fair_pages_same_allowance")
+            self.assertTrue(result["episodeReceipt"]["state"] == "completed", "fair_pages_completed_original_episode")
+            self.assertTrue(span not in json.dumps(report), "fair_pages_content_free_report")
+
+        span = "literalwindow exact original span."
+        prefix = "querywindow " + "ordinary filler " * 1800
+        texts = [prefix + span, "recent filler " * 2500]
+        probe = {"prompt": "Find querywindow", "query": "querywindow", "literal": "literalwindow",
+                 "region": "early", "kind": "answerable",
+                 "gold": [{"message": 0, "offset": len(prefix.encode()), "bytes": len(span.encode()), "sha256": self.e.digest(span.encode())}]}
+        for report in run_fixture("distinct-windows", texts, probe):
+            result = report["probes"][0]["protocols"]["raw_pages"]
+            self.assertTrue(result["allRequiredSpansPresent"] and result["hitWindowCount"] == 2, "literal_window_preserved_beside_distant_lexical_window")
+            self.assertTrue(result["goldDiagnostics"][0]["failureStage"] == "covered", "trace_classifies_recovered_range")
+
     def test_read_only_snapshot_verifies_import_and_rejects_corruption(self):
         texts = ["Snapshot exact café\r\n\t\x00 value.", "Preserved partial source."]
         declaration = {"dataset": "synthetic", "sha256": "a" * 64, "selection": 0, "url": None}

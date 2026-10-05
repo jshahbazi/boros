@@ -34,7 +34,7 @@ enum ReadCoverageChecks {
         let report = try MeteredRetrieval.lexicalSearch(store: store, query: "needle", projectID: project, lease: probe)
         checks["read_coverage_fixture_returns_small_hit_before_budget_frontier"] = report.hits.count == 1
             && report.hits.first?.eventID == smallSource.id && report.inspectedCandidates == 1
-            && report.continuation != nil && report.rawWorkCharged == 150
+            && report.continuation != nil && report.rawWorkCharged == 180
         _ = try probe.finish(reason: .budgetExceeded)
 
         func limited(_ name: String, expectedRaw: Int, purpose: EpisodeLocalReadPurpose = .contextSelection,
@@ -54,16 +54,16 @@ enum ReadCoverageChecks {
                 && receipt.charged.encoderInputBytes == 0 && receipt.unknownInputOperations == 0
                 && receipt.charged.vectorBytes == 0
         }
-        try limited("context_lexical", expectedRaw: 150) { lease in
+        try limited("context_lexical", expectedRaw: 180) { lease in
             _ = try ContextAssembler.prepare(store: store, conversationID: current.id, projectID: project,
                 prompt: "Synthetic selection", system: "", historicalQuery: "needle", maximumRecentBytes: 0,
                 episodeLease: lease)
         }
-        try limited("chat_lexical", expectedRaw: 150) { lease in
+        try limited("chat_lexical", expectedRaw: 180) { lease in
             _ = try ChatContextPreparation.prepare(store: store, conversationID: current.id, projectID: project,
                 prompt: "needle", system: "", excludingEventID: "synthetic-unsaved-current", episodeLease: lease)
         }
-        try limited("semantic_lexical", expectedRaw: 150, purpose: .retrievalProbe) { lease in
+        try limited("semantic_lexical", expectedRaw: 180, purpose: .retrievalProbe) { lease in
             _ = try semantic.search(query: "needle", lexicalQuery: "needle", projectID: project,
                 includeLiteral: false, episodeLease: lease)
         }
@@ -73,7 +73,7 @@ enum ReadCoverageChecks {
             _ = try semantic.search(query: "needle", lexicalQuery: "needle", projectID: project,
                 includeLiteral: true, episodeLease: lease)
         }
-        try limited("chat_hybrid", expectedRaw: 150) { lease in
+        try limited("chat_hybrid", expectedRaw: 180) { lease in
             _ = try ChatContextPreparation.prepare(store: store, conversationID: current.id, projectID: project,
                 prompt: "needle", system: "", excludingEventID: "synthetic-unsaved-current",
                 semanticIndex: semantic, episodeLease: lease)
@@ -89,7 +89,7 @@ enum ReadCoverageChecks {
         let completeReceipt = try complete.finish(reason: .completed)
         checks["read_coverage_complete_selection_keeps_exact_validation_reread"] = snapshot.evidence.count == 1
             && snapshot.evidence.first?.eventID == smallSource.id && completeReceipt.state == .completed
-            && completeReceipt.charged.rawSourceBytes == 212 && completeReceipt.charged.memoryOperations == 1
+            && completeReceipt.charged.rawSourceBytes == 242 && completeReceipt.charged.memoryOperations == 1
         checks["read_coverage_operations_create_no_source_capture_or_hidden_chats"] = try inventory(store.directory.appendingPathComponent("memory.sqlite3")) == sourceCounts
         return checks
     }

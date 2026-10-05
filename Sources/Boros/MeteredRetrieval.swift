@@ -251,13 +251,14 @@ enum MeteredRetrieval {
                 let reference = references[index]
                 guard reference.byteCount >= 0, reference.byteCount <= MemoryStore.maximumPayloadBytes else { throw MeteredRetrievalError.sourceMismatch }
                 // One materialization, one digest, a declared whole-source
-                // bound for every Unicode term search, and two preview/range
-                // walks. Retain only the excerpt before loading another BLOB.
-                let bytes = try checkedProduct(reference.byteCount, 4 + terms.count)
+                // bound for every Unicode term search and its two candidate
+                // window walks, plus final excerpt materialization. Retain
+                // only the excerpt before loading another BLOB.
+                let bytes = try checkedProduct(reference.byteCount, 3 + 3 * terms.count)
                 guard try available(EpisodeResources(rawSourceBytes: bytes, metadataRows: 1), lease: lease) else { next = index; break }
                 let hit = try charge(lease: lease, kind: .sourceRead, resources: EpisodeResources(rawSourceBytes: bytes, metadataRows: 1)) {
                     let event = try authoritative(store: store, lease: lease) { try store.loadCandidate(reference: reference) }
-                    return preview(event, terms: terms)
+                    return MemoryStore.hit(event, terms: terms)
                 }
                 charged += bytes; inspected += 1
                 if !hit.excerpt.isEmpty { hits.append(hit) }
@@ -376,17 +377,4 @@ enum MeteredRetrieval {
         }
     }
 
-    private static func preview(_ event: MemoryEvent, terms: [String]) -> MemoryHit {
-        let target = terms.lazy.compactMap { event.text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) }.first
-        let center = target?.lowerBound ?? event.text.startIndex
-        let lower = event.text.index(center, offsetBy: -160, limitedBy: event.text.startIndex) ?? event.text.startIndex
-        let upper = event.text.index(lower, offsetBy: 560, limitedBy: event.text.endIndex) ?? event.text.endIndex
-        let candidate = Data(event.text[lower..<upper].utf8)
-        var end = min(candidate.count, MemoryStore.maximumPageBytes)
-        while end > 0 && String(data: candidate.prefix(end), encoding: .utf8) == nil { end -= 1 }
-        let excerpt = String(decoding: candidate.prefix(end), as: UTF8.self)
-        return MemoryHit(eventID: event.id, conversationID: event.conversationID, projectID: event.projectID,
-            role: event.role, status: event.status, createdAt: event.createdAt, digest: event.digest,
-            totalBytes: event.byteCount, excerptOffset: event.text[..<lower].utf8.count, excerpt: excerpt)
-    }
 }

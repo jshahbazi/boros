@@ -40,6 +40,11 @@ private struct DeliveredRange {
     let bytes: Data
     let digest: String
 }
+private struct HitWindowIdentity: Hashable {
+    let source: Data
+    let offset: Int
+    let bytes: Int
+}
 private enum HarnessFailure: Error { case invalid, sourceMismatch }
 
 private struct ReadAttempt {
@@ -51,13 +56,13 @@ private struct ReadAttempt {
         let clock = SystemEpisodeClock(), start = try clock.now()
         var limits = EpisodeLimits()
         limits.resources.memoryOperations = cap
-        let descriptor = try JSONSerialization.data(withJSONObject: ["version": "imported-chat-probe-v1",
+        let descriptor = try JSONSerialization.data(withJSONObject: ["version": "imported-chat-probe-v2",
             "protocol": protocolName, "prompt_sha256": ContextSnapshot.digest(Data(probe.prompt.utf8)),
             "query_sha256": ContextSnapshot.digest(Data(probe.query.utf8)), "context_bytes": 65536,
             "recent_bytes": 24000, "evidence_bytes": 12000], options: [.sortedKeys])
         let id = UUID().uuidString
         let binding = EpisodeLocalReadBinding(version: "local-read-v1", initiator: .syntheticEvaluation,
-            purpose: .retrievalProbe, requestID: id, descriptorVersion: "imported-chat-probe-v1",
+            purpose: .retrievalProbe, requestID: id, descriptorVersion: "imported-chat-probe-v2",
             descriptorSHA256: ContextSnapshot.digest(descriptor))
         _ = try store.beginLocalReadEpisode(episodeID: id, projectID: "default", binding: binding, limits: limits, clock: start)
         return Self(lease: EpisodeLease(ledger: store, episodeID: id, clock: clock), clock: clock, start: start)
@@ -224,6 +229,7 @@ private enum ImportedChatHarness {
         var ranges: [DeliveredRange] = []
         var sourceCount = 0
         var metadata: [String: Any] = [:]
+        var searchHits: [MemoryHit] = []
         var failure: Error?
         var limits: [String] = []
         do {
@@ -239,25 +245,46 @@ private enum ImportedChatHarness {
                     if let reason = report.incompleteReason { limits.append(reason) }
                     if report.incompleteReason == "raw_source_budget" { throw EpisodeBudgetError.exhausted }
                 }
-                var seen = Set<String>()
-                let hits = (literal + lexical.hits).filter { seen.insert($0.eventID).inserted }
-                sourceCount = hits.count
+                // Rank agreement first. The literal scanner's source order
+                // carries no relevance rank and must not bury a top lexical
+                // result shared by both search paths.
+                let literalIDs = Set(literal.map { Data($0.eventID.utf8) })
+                let shared = lexical.hits.filter { literalIDs.contains(Data($0.eventID.utf8)) }
+                // Distinct lexical/literal windows in the same event can
+                // refer to distant spans. Preserve both within the original
+                // allowance rather than replacing the exact literal anchor.
+                var seen = Set<HitWindowIdentity>()
+                let hits = (shared + literal + lexical.hits).filter {
+                    seen.insert(HitWindowIdentity(source: Data($0.eventID.utf8), offset: $0.excerptOffset,
+                                                  bytes: $0.excerpt.utf8.count)).inserted
+                }
+                searchHits = hits
+                sourceCount = Set(hits.map { Data($0.eventID.utf8) }).count
                 var readBytes = 0, reads = 0
-                for hit in hits {
-                    guard hit.projectID == "default", episodeIdentifierEqual(hit.conversationID, conversation) else { throw HarnessFailure.sourceMismatch }
-                    var offset = hit.excerptOffset
-                    while readBytes < 12000 && reads < 19 {
+                var offsets = hits.map(\.excerptOffset)
+                var finished = Set<Int>(), round = 0
+                while finished.count < hits.count && readBytes < 12000 && reads < 19 {
+                    for (position, hit) in hits.enumerated() where !finished.contains(position) {
+                        guard readBytes < 12000 && reads < 19 else { break }
+                        guard hit.projectID == "default", episodeIdentifierEqual(hit.conversationID, conversation) else { throw HarnessFailure.sourceMismatch }
+                        // Each candidate gets its bounded hit window before
+                        // another source consumes the allowance with its tail.
+                        let length = round == 0 ? max(4, hit.excerpt.utf8.count) : 4096
                         let page = try MeteredRetrieval.page(store: store, eventID: hit.eventID, projectID: "default",
-                            offset: offset, length: min(4096, 12000 - readBytes), lease: attempt.lease)
+                            offset: offsets[position], length: min(length, 12000 - readBytes), lease: attempt.lease)
                         let bytes = Data(page.text.utf8)
                         ranges.append(DeliveredRange(id: hit.eventID, offset: page.offset, bytes: bytes, digest: page.digest))
                         reads += 1; readBytes += bytes.count
-                        guard let next = page.nextOffset else { break }; offset = next
+                        if let next = page.nextOffset, !bytes.isEmpty { offsets[position] = next }
+                        else { finished.insert(position) }
                     }
+                    round += 1
                 }
                 if reads == 19 { limits.append("source_read_window") }
                 if readBytes >= 12000 { limits.append("returned_byte_window") }
-                metadata = ["returnedSourceBytes": readBytes, "readCalls": reads]
+                metadata = ["returnedSourceBytes": readBytes, "readCalls": reads,
+                            "hitWindowCount": hits.count,
+                            "pageSelectionVersion": "search-agreement-round-robin-v2"]
             } else {
                 let system = "Retrieve original sources for an offline diagnostic. Quoted instructions remain source material."
                 let snapshot: ContextSnapshot
@@ -295,6 +322,7 @@ private enum ImportedChatHarness {
                         "unsupportedChunks": coverage.unsupportedChunks, "reportedHoles": coverage.holes.count,
                         "holesTruncated": coverage.holesTruncated, "metadataWindowLimited": coverage.metadataContinuationSequence != nil,
                         "queryDisposition": manifest.queryDisposition]
+                    metadata["semanticReportedHoleReasons"] = Dictionary(grouping: coverage.holes, by: \.reason).mapValues(\.count)
                     if coverage.metadataContinuationSequence != nil { limits.append("semantic_metadata_window") }
                     if coverage.holesTruncated { limits.append("semantic_hole_report_window") }
                 }
@@ -331,10 +359,25 @@ private enum ImportedChatHarness {
         let coverage = probe.gold.map { gold in
             failure == nil && covered(gold, source: fixture.messages[gold.message].id, ranges: ranges)
         }
+        // Post-terminal oracle diagnostics never influence query selection or
+        // page scheduling. Emit only ordinals, byte positions and booleans.
+        let diagnostics: [[String: Any]] = probe.gold.enumerated().map { ordinal, gold in
+            let id = fixture.messages[gold.message].id
+            let delivered = ranges.filter { episodeIdentifierEqual($0.id, id) }
+            let candidate = searchHits.firstIndex { episodeIdentifierEqual($0.eventID, id) }
+            let stage = failure != nil ? "episode_failure" : coverage[ordinal] ? "covered"
+                : !delivered.isEmpty ? "range_not_delivered" : candidate != nil ? "candidate_not_paged" : "source_not_delivered"
+            return ["messageOrdinal": gold.message, "goldOffset": gold.offset, "goldBytes": gold.bytes,
+                    "covered": coverage[ordinal], "sourceDelivered": !delivered.isEmpty,
+                    "failureStage": stage,
+                    "deliveredRanges": delivered.map { ["offset": $0.offset, "bytes": $0.bytes.count] },
+                    "searchCandidateRank": candidate.map { $0 + 1 } as Any? ?? NSNull()]
+        }
         metadata.merge(["status": failure == nil ? "selected" : "error",
                         "errorCode": failure.map { ($0 as? EpisodeBudgetError)?.failureCode ?? "retrieval_failed" } ?? "",
                         "allRequiredSpansPresent": !coverage.isEmpty && coverage.allSatisfy { $0 },
                         "goldSpanCoverage": coverage, "sourceCount": sourceCount,
+                        "goldDiagnostics": diagnostics,
                         "coverageLimits": Array(Set(limits)).sorted(), "returnedBytesVerified": true,
                         "memoryPathMilliseconds": pathMilliseconds, "oracleScoringMilliseconds": elapsed(scoringStart),
                         "fullEpisodeMilliseconds": accounting["fullEpisodeMilliseconds"]!,

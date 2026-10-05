@@ -188,7 +188,7 @@ enum ContextAdmissionChecks {
             prompt: "Where is meteredkey?", system: "Synthetic instruction", excludingEventID: fixture.currentID,
             episodeLease: fixture.lease)
         let receipt = try fixture.lease.checkActive()
-        let queryPasses = 5 // materialization, digest, one term, two preview walks
+        let queryPasses = 6 // load, digest, term search, two windows, excerpt materialization
         let expected = recent.byteCount * 2 + old.byteCount * queryPasses + (snapshot.evidence[0].excerpt.utf8.count + 1) * 2
         var checks: [String: Bool] = [
             "metered_context_one_composite_memory_operation": receipt.charged.memoryOperations == 1,
@@ -297,7 +297,7 @@ enum ContextAdmissionChecks {
         var checks: [String: Bool] = [
             "metered_stress_has_one_hundred_four_mib_metadata_candidates": references.count == 100 && references.allSatisfy { $0.byteCount == MemoryStore.maximumPayloadBytes },
             "metered_lexical_stops_before_unaffordable_ranked_blob": report.inspectedCandidates == 1 && report.hits.count == 1 && report.continuation?.nextCandidate == 1,
-            "metered_lexical_stress_counts_digest_and_preview_passes": receipt.charged.rawSourceBytes == MemoryStore.maximumPayloadBytes * 5 && report.rawWorkCharged == receipt.charged.rawSourceBytes,
+            "metered_lexical_stress_counts_digest_and_preview_passes": receipt.charged.rawSourceBytes == MemoryStore.maximumPayloadBytes * 6 && report.rawWorkCharged == receipt.charged.rawSourceBytes,
             "metered_lexical_continuation_retains_unaffordable_candidate": again.inspectedCandidates == 0 && again.rawWorkCharged == 0 && again.continuation?.candidates == report.continuation?.candidates && again.continuation?.nextCandidate == 1
         ]
         do {
