@@ -1,6 +1,6 @@
 # Boros project status
 
-Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Verified implementation checkpoint: `22c3402`. The prior checkpoint is `38675c5`. The architectural backlog remains active.
+Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Verified implementation checkpoint: `22c3402`; documentation checkpoint: `ae9ef8c`. Both checkpoints are pushed. The prior implementation checkpoint is `38675c5`. The architectural backlog remains active.
 
 The verified native chat prototype integrates durable stream capture, exact selected-provider admission, hybrid source retrieval, episode accounting and backup/restore. The current integration passed 793 combined checks; the prior checkpoint passed 478. Development evaluation establishes synthetic source coverage for the historical lexical branch; current installed hybrid answer quality remains unmeasured. The complete architecture in the [plan](../tracechat-plan.md) remains in progress. No completion percentages or delivery dates are assigned.
 
@@ -27,7 +27,7 @@ The verified native chat prototype integrates durable stream capture, exact sele
 
 ## Implementation assignments
 
-The current parallel wave integrated the [episode-budget contract](EPISODE-BUDGET.md) across answering and core retrieval with separate file ownership. Whole-app, isolated recovery, independent recheck, signature and live synthetic CLI gates passed. Remaining adoption work below belongs to the next contract, rather than an implied claim that the full budget architecture is complete.
+The most recently completed parallel wave integrated the [episode-budget contract](EPISODE-BUDGET.md) across answering and core retrieval with separate file ownership. Whole-app, isolated recovery, independent recheck, signature and live synthetic CLI gates passed. The assignments below record that completed wave; they are not active implementation assignments. Remaining adoption work belongs to the next contract.
 
 | Assignment | Owned surface | Current state | Integration gate |
 |---|---|---|---|
@@ -73,7 +73,19 @@ These checks do not establish general model competence, production long-history 
 
 ## Next checkpoint
 
-Continue the [standalone read-episode contract](READ-EPISODES.md): extend metering to standalone source browsing and the evaluation harness. Implement the [recent/evidence token contract](CONTEXT-COMPONENTS.md) and add background-index budgets. The schema-4 origin and project-scope contract is recorded before implementation; it must not invent hidden chat turns or reset quotas through automatic fallbacks. Apple encoder input tokens remain opaque; development mode records that fact and strict known-input mode skips the encoder. Raw-source charges are conservative logical work bounds. Policy mutation, deletion, external actions and the optional tree require their own contracts and verification gates. The phase mapping below follows the plan's milestones.
+Continue the [standalone read-episode contract](READ-EPISODES.md): extend metering to standalone source browsing and the evaluation harness. Implement the [recent/evidence token contract](CONTEXT-COMPONENTS.md) and add background-index budgets. The schema-4 origin and project-scope contract is recorded before implementation; it must not invent hidden chat turns or reset quotas through automatic fallbacks. Apple encoder input tokens remain opaque; development mode records that fact and strict known-input mode skips the encoder. Raw-source charges are conservative logical work bounds. Policy mutation, deletion, external actions and the optional tree require their own contracts and verification gates.
+
+| Next work | Current status | Dependency / completion evidence |
+|---|---|---|
+| Standalone read episodes and project-scope checks | Contract recorded; implementation pending | Schema-4 migration, durable read origins, central scope checks and backup compatibility verified together |
+| Source-browser budget adoption | Pending read-episode foundation | Each explicit operation uses a bounded episode; cancellation, paging and incomplete results verified |
+| Evaluation budget adoption | Pending read-episode foundation | All measured retrieval work uses the shared ledger; failed or capped probes remain in reported denominators |
+| Exact recent/evidence token allocations | Contract recorded; implementation pending | Attributed selected-model counts and final request snapshots agree; mandatory content remains intact |
+| Background indexing budgets | Not started | Durable daily limits and recovery behavior verified |
+| Hybrid answering quality and economics | Unmeasured; evaluation adoption required | Frozen development protocol, representative workloads and comparative results before held-out confirmation |
+| Final GUI visual recheck | Pending Mac unlock | Inspect the rebuilt app using an isolated synthetic store |
+
+The phase mapping below follows the plan's milestones.
 
 | Plan phase | Status | Outstanding exit criteria |
 |---|---|---|
