@@ -62,6 +62,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var pendingRequestBody: Data?
     private var pendingProviderIdentity = ""
     private var pendingAdmission: ProviderAdmissionOperation?
+    private var pendingComponentPreparation: ComponentContextPreparationOperation?
     private var pendingContextSnapshot: ContextSnapshot?
     private var pendingAdmissionAccounting: [ProviderAdmissionAccounting] = []
     private var pendingAdmissionReceipt: EndpointAdmissionReceipt?
@@ -682,9 +683,11 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let episodeID = UUID().uuidString
         let lease = EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
         do {
+            var limits = EpisodeLimits()
+            if selectedProfile == .customLocal { limits.componentPolicy = .selectedQwen }
             _ = try store.acceptRequestAndBeginEpisode(conversationID: activeChat.id, turnID: turnID,
                 humanEventID: humanID, episodeID: episodeID, text: prompt,
-                limits: EpisodeLimits(), clock: clock.now())
+                limits: limits, clock: clock.now())
             settings.episodeLease = lease
             // Synthetic preparation checks keep their synchronous observation;
             // ordinary Send prepares on the coordinator queue below.
@@ -741,6 +744,29 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let frozenConversation = conversation
         let index = semanticIndex
         let scope = projectID
+        if frozenSettings.profile == .customLocal {
+            let operation = ComponentContextPreparationOperation(store: store, conversationID: activeChat.id,
+                projectID: scope, humanEventID: humanID, prompt: prompt, settings: frozenSettings,
+                conversation: frozenConversation, semanticIndex: index, episodeLease: lease) { [weak self] outcome in
+                guard let self, self.generating, self.pendingInvocationID == invocationID else { return }
+                self.pendingComponentPreparation = nil; self.preparingContext = false
+                switch outcome {
+                case .success(let prepared):
+                    self.pendingContextSnapshot = prepared.snapshot
+                    self.pendingRequestBody = prepared.body
+                    self.pendingProviderIdentity = prepared.receipt.endpoint
+                    self.pendingAdmissionReceipt = prepared.receipt
+                    if let accounting = prepared.receipt.accounting { self.pendingAdmissionAccounting.append(accounting) }
+                    self.dispatchPreparedGeneration(prompt: prompt, settings: prepared.settings)
+                case .failure(let error):
+                    self.completeGeneration(GenerationResult(elapsed: Date().timeIntervalSince(self.started),
+                        tokensPerSecond: nil, failure: ComponentContextPreparationOperation.failureCode(error), stopped: false))
+                }
+            }
+            pendingComponentPreparation = operation
+            operation.start()
+            return
+        }
         preparationQueue.async { [weak self] in
             let outcome: Result<PreparedEpisodeContext, Error>
             do {
@@ -839,6 +865,13 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         do {
             if let lease = pendingEpisode {
                 _ = try lease.checkActive()
+                if settings.profile == .customLocal, try lease.checkActive().limits.componentPolicy != nil {
+                    guard let receipt = settings.endpointAdmission,
+                          settings.preparedContextComponents?.accepts(receipt: receipt, body: body, settings: settings) == true,
+                          try pendingContextSnapshot?.selectionDigest() == settings.preparedContextComponents?.sourceSnapshotDigest else {
+                        throw ProviderAdmissionError.countMismatch
+                    }
+                }
                 let input = settings.endpointAdmission?.promptTokens ?? 0
                 let adapter = settings.endpointAdmission?.answerAdapterIdentity ?? ("native:" + settings.profile.rawValue)
                 let work = try lease.prepare(kind: settings.profile == .customLocal ? .answer : .nativeInference,
@@ -854,8 +887,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 requestBody: body, admissionJSON: admission, episodeID: pendingEpisode?.episodeID, episodeWorkID: pendingAnswerWork?.id)
             pendingInvocationStarted = true
         } catch {
-            pendingCaptureFailure = !(error is EpisodeBudgetError)
-            completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: (error as? EpisodeBudgetError)?.failureCode ?? "capture_failure", stopped: false))
+            pendingCaptureFailure = !(error is EpisodeBudgetError || error is ProviderAdmissionError)
+            completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil,
+                failure: (error as? ProviderAdmissionError)?.failureCode ?? (error as? EpisodeBudgetError)?.failureCode ?? "capture_failure", stopped: false))
             return
         }
         let invocationID = pendingInvocationID
@@ -967,6 +1001,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         pendingInvocationID = ""; pendingChunkSequence = 0; pendingCaptureFailure = false
         pendingInvocationStarted = false; pendingRequestBody = nil; pendingProviderIdentity = ""
         pendingAdmission = nil
+        pendingComponentPreparation = nil
         pendingContextSnapshot = nil
         pendingAdmissionAccounting = []; pendingAdmissionReceipt = nil
         pendingNativeConfiguration = nil
@@ -998,6 +1033,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             pendingAdmission = nil
             admission.cancel()
             pendingAdmissionAccounting.append(admission.accounting)
+        }
+        if let operation = pendingComponentPreparation {
+            pendingComponentPreparation = nil
+            operation.cancel()
         }
         let waitingForNativeCleanup = selectedProfile != .customLocal && pendingInvocationStarted && runner.isRunning
         runner.cancel()
@@ -1604,7 +1643,7 @@ private enum SmokeTest {
         var answer = ""
         var conversation = Conversation()
         var turn = 0
-        var admissionOperation: ProviderAdmissionOperation?
+        var componentPreparation: ComponentContextPreparationOperation?
         func runTurn() {
             let prompt = greetingOnly ? "hi" : turn == 0 ? "Compute 17 + 25. Reply with only the integer."
                 : "Add one to your last answer. Reply with only the integer."
@@ -1683,6 +1722,13 @@ private enum SmokeTest {
             func dispatch(_ admitted: GenerationSettings, body: Data) {
                 var ready = admitted
                 do {
+                    if admitted.profile == .customLocal, try lease.checkActive().limits.componentPolicy != nil {
+                        guard let receipt = admitted.endpointAdmission,
+                              admitted.preparedContextComponents?.accepts(receipt: receipt, body: body, settings: admitted) == true,
+                              try snapshot?.selectionDigest() == admitted.preparedContextComponents?.sourceSnapshotDigest else {
+                            throw ProviderAdmissionError.countMismatch
+                        }
+                    }
                     let work = try lease.prepare(kind: admitted.profile == .customLocal ? .answer : .nativeInference,
                         resources: EpisodeResources(inputTokens: admitted.endpointAdmission?.promptTokens ?? 0,
                             outputTokens: admitted.maximumOutput, modelCalls: 1, httpAttempts: admitted.profile == .customLocal ? 1 : 0),
@@ -1698,7 +1744,8 @@ private enum SmokeTest {
                     invocationStarted = true
                 } catch {
                     complete(GenerationResult(elapsed: 0, tokensPerSecond: nil,
-                        failure: (error as? EpisodeBudgetError)?.failureCode ?? "capture_failure", stopped: false))
+                        failure: (error as? ProviderAdmissionError)?.failureCode
+                            ?? (error as? EpisodeBudgetError)?.failureCode ?? "capture_failure", stopped: false))
                     return
                 }
                 runner.start(prompt: prompt, settings: ready, conversation: conversation, onText: { text in
@@ -1711,32 +1758,31 @@ private enum SmokeTest {
                 }, onComplete: complete)
             }
             do {
+                var limits = EpisodeLimits()
+                if frozenSettings.profile == .customLocal { limits.componentPolicy = .selectedQwen }
                 _ = try owner.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: turnID, humanEventID: humanID,
-                    episodeID: episodeID, text: prompt, limits: EpisodeLimits(), clock: clock.now())
-                let context = try ChatContextPreparation.prepare(store: owner, conversationID: chat.id, projectID: chat.projectID,
-                    prompt: prompt, system: frozenSettings.system, excludingEventID: humanID, episodeLease: lease)
-                snapshot = context
-                frozenSettings.messagesOverride = context.messages.map { ["role": $0.role, "content": $0.content] }
+                    episodeID: episodeID, text: prompt, limits: limits, clock: clock.now())
                 if frozenSettings.profile == .customLocal {
-                    let body = try EndpointRequest.build(prompt: prompt, settings: frozenSettings, conversation: conversation)
-                    frozenSettings.preparedEndpointBody = body
-                    admissionOperation = ProviderAdmission.prepare(requestBody: body, address: frozenSettings.endpointURL,
-                        apiKey: frozenSettings.endpointAPIKey, contextLimit: frozenSettings.endpointContextLimit,
-                        safetyTokens: frozenSettings.endpointSafetyTokens, episodeLease: lease) { outcome in
-                        DispatchQueue.main.async {
-                            // Retain the operation through the completion
-                            // handoff; it owns the in-flight admission state.
-                            withExtendedLifetime(admissionOperation) { admissionOperation = nil }
-                            switch outcome {
-                            case .success(let receipt):
-                                var admitted = frozenSettings; admitted.endpointAdmission = receipt
-                                dispatch(admitted, body: body)
-                            case .failure(let error):
-                                complete(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: error.failureCode, stopped: false))
-                            }
+                    let operation = ComponentContextPreparationOperation(store: owner, conversationID: chat.id,
+                        projectID: chat.projectID, humanEventID: humanID, prompt: prompt, settings: frozenSettings,
+                        conversation: conversation, semanticIndex: nil, episodeLease: lease) { outcome in
+                        withExtendedLifetime(componentPreparation) { componentPreparation = nil }
+                        switch outcome {
+                        case .success(let prepared):
+                            snapshot = prepared.snapshot
+                            dispatch(prepared.settings, body: prepared.body)
+                        case .failure(let error):
+                            complete(GenerationResult(elapsed: 0, tokensPerSecond: nil,
+                                failure: ComponentContextPreparationOperation.failureCode(error), stopped: false))
                         }
                     }
+                    componentPreparation = operation
+                    operation.start()
                 } else {
+                    let context = try ChatContextPreparation.prepare(store: owner, conversationID: chat.id, projectID: chat.projectID,
+                        prompt: prompt, system: frozenSettings.system, excludingEventID: humanID, episodeLease: lease)
+                    snapshot = context
+                    frozenSettings.messagesOverride = context.messages.map { ["role": $0.role, "content": $0.content] }
                     let body = frozenSettings.profile == .bonsai
                         ? try NativeRequest.completionEvidence(prompt: prompt, settings: frozenSettings, conversation: conversation)
                         : try NativeRequest.reasoningBody(prompt: prompt, settings: frozenSettings, conversation: conversation)
@@ -1810,6 +1856,15 @@ private enum BonsaiPlayground {
             let checks = EndpointChecks.runIntegration(baseURL: CommandLine.arguments[index + 1])
             if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) { print(String(decoding: data, as: UTF8.self)) }
             exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--component-preparation-integration-test"), index + 1 < CommandLine.arguments.count {
+            ComponentPreparationChecks.run(baseURL: CommandLine.arguments[index + 1]) { checks in
+                if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) {
+                    print(String(decoding: data, as: UTF8.self))
+                }
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            }
+            dispatchMain()
         }
         if CommandLine.arguments.contains("--reasoning-self-test") {
             let checks = ReasoningChecks.run()

@@ -1,6 +1,6 @@
 # Exact context component limits
 
-Status: implementation contract for the next answering wave, October 4, 2026. Current answering enforces exact whole-request admission and aggregate episode allowances. Recent/evidence selection still has byte allocation guards. The matched component-token configuration remains incomplete.
+Status: implemented and verified October 5, 2026; frozen for publication. The matched component-token configuration passed 1,297 combined checks, 97 coordinator/proof fixtures, independent rendering and identity review, strict app signature verification and two live mlx-serve turns. Counts overlap. Registered measurement adoption remains pending.
 
 Use `selected-model-context-components-v1` with 8,000 recent tokens and 12,000 historical-evidence tokens. Freeze counting, reduction and independent byte/row guards together before registered measurement. The original decision sheet and preregistration remain unchanged; the next development amendment will identify this configuration after implementation stabilizes.
 
@@ -18,7 +18,7 @@ Apply the provider's actual ASCII trimming and think-tag normalization. Exact co
 
 Count with the verified selected-model `/tokenize` binding. Empty components count zero without a request. Counts consume HTTP attempts and elapsed time under the original episode; they are not additional generative input charges. Calibration and answering retain their full prompt/model/output charges.
 
-An immutable count receipt binds text digest, token count, tokenizer-work ID, episode, adapter identity and renderer version. The final admitted context binds the final source snapshot, canonical body, frozen component policy, component receipts and whole-request receipt. Dispatch rejects changed body, text, source selection, scope, policy, model epoch, template or thinking state.
+An immutable count receipt binds text digest, token count, tokenizer-work ID, episode, adapter identity and renderer version. Tokenizer work retains the exact rendered-text request and its committed count evidence. All receipts share the original verified session's boot domain and continuous-clock timestamp; component calls do not extend its 30-second validity. A failure to read the original lease clock rejects handoff. The final admitted context binds the final source snapshot, canonical body, frozen component policy, component receipts and whole-request receipt. Dispatch rejects changed body, text, source selection, scope, policy, observed model metadata, template or thinking state.
 
 ## Preparation and reduction
 
@@ -36,9 +36,29 @@ This geometric reduction bounds calls and can underfill an allocation. It is a d
 
 Refactor provider admission into one verified session for component counts and final body admission. Reuse an unchanged count only under its identical verified binding and original validity period. Identity drift or expiry requires rejection or re-verification within remaining allowances. No unsupported batch endpoint, offline tokenizer or cross-episode cache is assumed.
 
-The current 24,000 recent bytes, 12,000 evidence bytes and 65,536 total serialized bytes often bind before token caps. The next baseline should enlarge independent allocation guards within bounded recent candidates, at most 16 historical spans of 4,096 bytes, a fixed recent candidate count and the existing 2 MiB HTTP envelope limit. Freeze exact byte/row values after synthetic boundary checks. These guards bound materialization and do not estimate tokens. Report byte-limited exclusion separately from token-limited exclusion.
+The component policy freezes these independent materialization guards alongside `whole-source-geometric-v1` and `qwen38-attributed-text-v1`:
 
-Persist an optional component policy in episode limits; old journals decode it as absent and unverified. Retain original excerpt offsets, source/delivered digests and the final retained subset in the delivery audit. Record counting/reduction versions, rendered digests, source-order digests and exclusion causes within a bounded durable representation.
+| Guard | Limit |
+|---|---|
+| Serialized recent-message array | 180,000 bytes |
+| Recent candidate rows | 256 |
+| Historical spans | 16 |
+| Individual historical excerpt | 4,096 UTF-8 bytes |
+| Serialized framed evidence-message array | 131,072 bytes |
+| Complete serialized message array | 1,900,000 bytes |
+| Complete HTTP request body | 2 MiB |
+
+These guards bound materialization and do not estimate tokens. Byte/row exclusions and token/envelope reductions are recorded separately. Exact UTF-8 source-ID sets reach SQL filtering, metered retrieval, semantic fusion and replay before candidate limits; Swift's canonically equivalent string equality cannot collapse distinct stored IDs.
+
+Persist an optional component policy in episode limits; old journals decode it as absent and unverified. Its decoder rejects unknown fields and changed frozen limits. Retain original excerpt offsets, source/delivered digests and the final retained subset in the delivery audit. Record counting/reduction versions, rendered digests, source-order digests and exclusion causes within a bounded durable representation.
+
+The full canonical selection document contains ordered recent source metadata, historical range references, message hashes, scope/current-request binding and selection audit. A completed `sourceRead` work record stores it in the existing bounded authoritative snapshot journal and charges one memory operation plus bounded metadata work. The small delivery audit links its work ID and digest. Invocation admission recomputes that digest and checks request bytes, source metadata and count-work evidence before commit, without rereading source payloads already verified by metered assembly. Offline journal/archive verification additionally compares each bounded historical range to its original source bytes. This validates internal linkage; it does not authenticate an archive against deliberate rewriting of all evidence.
+
+Final admission rereads observed server/model/template metadata within the same lease. The descriptor records `mlx-serve-model-observation-v1` and explicitly sets model-instance identity to `unobservable`; it binds the selected model, owner, engine, architecture, model context/position limits, advertised capabilities/modalities, server version and template digest. Receipt and component proof retain the same validated canonical descriptor, and the adapter identity includes its digest. Legacy epoch slots are zero for new observations and have no identity meaning. Historical receipts without a descriptor retain their original decode and journal representation.
+
+The pinned [mlx-serve model-list implementation](https://github.com/ddalcu/mlx-serve/blob/25e94c3381c7f8428c4b0e45e814d2554c4926be/src/server.zig#L6243-L6248) sets `created` from the response-time clock. It is excluded from identity comparison. Calibration is scoped to one preparation operation or component session; independent sessions cannot reuse a calibration because the provider exposes no stable load generation.
+
+mlx-serve offers no atomic identity lease spanning observation and answer dispatch. An unload/reload, weight replacement or restart preserving all advertised metadata remains unobservable. The supported count contract is conditional on the verified rendering/tokenizer/calibration observations and terminal model/usage checks. It does not attest model weights or the server binary. Observed model/count mismatch and quarantine remain authoritative for detected drift.
 
 Exact support initially covers the verified Qwen/mlx-serve text adapter. Native paths retain unknown component counts in development mode and fail strict unsupported admission. Apple encoder input tokens remain a separate opaque inference. Browser reads need no answering-token admission. Retrieval-only evaluation keeps token feasibility unknown until a declared tokenized-selection/answering protocol accounts for verification, calibration and costs.
 

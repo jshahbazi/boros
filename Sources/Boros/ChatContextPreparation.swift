@@ -30,7 +30,7 @@ enum ChatContextPreparation {
             let report: SemanticSearchReport
             do {
                 report = try semanticIndex.search(query: prompt, lexicalQuery: lexical ?? "", projectID: projectID,
-                    limit: 16, excludingEventIDs: Set(recent.recentSourceIDs + [excludingEventID]), includeLiteral: false,
+                    limit: 16, excludingSourceIDs: ExactSourceIDs(recent.recentSourceIDs + [excludingEventID]), includeLiteral: false,
                     episodeLease: episodeLease, operationIsNested: true)
             } catch {
                 if error is EpisodeBudgetError || error is MeteredRetrievalError || error is MemoryError || error is ContextError { throw error }
@@ -88,6 +88,105 @@ enum ChatContextPreparation {
                 snapshot.retrievalNotice = "Archive recall used a partial semantic index. Missing evidence may still be in the archive."
             }
             return snapshot
+        }
+    }
+
+    /// Retrieve only after exact recent-component reduction. The caller owns
+    /// adapter counts and keeps the same original lease across every stage.
+    static func prepareEvidence(recent: ContextSnapshot, store: MemoryStore, conversationID: String,
+        projectID: String, prompt: String, excludingEventID: String,
+        semanticIndex: SemanticIndex? = nil, episodeLease: EpisodeLease? = nil) throws -> ContextSnapshot {
+        _ = try episodeLease?.checkActive(projectID: projectID)
+        return try MeteredRetrieval.operation(lease: episodeLease) {
+            _ = try recent.componentAssignments()
+            guard let binding = recent.selectionBinding,
+                  episodeIdentifierEqual(binding.projectID, projectID), episodeIdentifierEqual(binding.conversationID, conversationID),
+                  episodeIdentifierEqual(binding.acceptedHumanEventID, excludingEventID),
+                  episodeIdentifierEqual(recent.messages.last?.content, prompt), recent.evidence.isEmpty else { throw ContextError.sourceMismatch }
+            let lexical = historicalQuery(prompt)
+            let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
+            func lexicalSnapshot(fallback: Bool) throws -> ContextSnapshot {
+                let hits: [MemoryHit]
+                var raw: MeteredLexicalReport?
+                if let lexical {
+                    if let episodeLease {
+                        let report = try MeteredRetrieval.lexicalSearch(store: store, query: lexical, projectID: projectID,
+                            limit: ContextAssembler.componentMaximumEvidenceSpans, matching: .anyTerm,
+                            excludingSourceIDs: excluded, lease: episodeLease, nested: true)
+                        try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
+                        raw = report; hits = report.hits
+                    } else {
+                        hits = try store.search(query: lexical, projectID: projectID, limit: ContextAssembler.componentMaximumEvidenceSpans,
+                            matching: .anyTerm, excludingSourceIDs: excluded)
+                    }
+                } else { hits = [] }
+                var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
+                    projectID: projectID, excludingEventID: excludingEventID, historicalHits: hits,
+                    episodeLease: episodeLease, operationIsNested: true)
+                var fields: [String: Any] = ["mode": fallback ? "lexical_fallback" : "lexical", "semantic_available": false]
+                if fallback { fields["failure"] = "semantic_search_failed" }
+                if let raw {
+                    fields["raw_work_version"] = "raw_work_v1"; fields["source_frontier"] = raw.sourceFrontier
+                    fields["raw_work_charged"] = raw.rawWorkCharged; fields["inspected_candidates"] = raw.inspectedCandidates
+                    fields["candidate_window_full"] = raw.candidateWindowFull; fields["candidate_window_complete"] = raw.candidateWindowComplete
+                    fields["continuation_available"] = raw.continuation != nil
+                }
+                try appendAudit(to: &result, fields: fields)
+                result.retrievalNotice = fallback ? "Semantic recall failed; archive recall used lexical search."
+                    : "Archive recall used lexical search; semantic recall is unavailable."
+                if let raw, !raw.candidateWindowComplete || raw.candidateWindowFull {
+                    result.retrievalNotice = "Archive recall inspected a bounded lexical candidate window; additional evidence may remain."
+                }
+                return result
+            }
+            guard let semanticIndex else { return try lexicalSnapshot(fallback: false) }
+            let report: SemanticSearchReport
+            do {
+                report = try semanticIndex.search(query: prompt, lexicalQuery: lexical ?? "", projectID: projectID,
+                    limit: ContextAssembler.componentMaximumEvidenceSpans, excludingSourceIDs: excluded, includeLiteral: false,
+                    episodeLease: episodeLease, operationIsNested: true)
+            } catch {
+                if error is EpisodeBudgetError || error is MeteredRetrievalError || error is MemoryError || error is ContextError { throw error }
+                if let semanticError = error as? SemanticError {
+                    switch semanticError { case .sourceMismatch, .publicationConflict: throw error; default: break }
+                }
+                return try lexicalSnapshot(fallback: true)
+            }
+            try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease,
+                resourceLimited: report.manifest.meteredLexicalCoverage?.continuation != nil
+                    || report.manifest.meteredLiteralCoverage?.incompleteReason == "raw_source_budget")
+            var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
+                projectID: projectID, excludingEventID: excludingEventID, historicalHits: report.hits,
+                episodeLease: episodeLease, operationIsNested: true)
+            result.retrievalManifestID = report.manifestID
+            result.retrievalManifestJSON = try report.serializedManifest()
+            let coverage = report.manifest.coverage
+            var audit: [String: Any] = ["mode": "hybrid", "manifest_id": report.manifestID,
+                "index_fingerprint": report.manifest.indexFingerprint, "encoder_fingerprint": report.manifest.encoderFingerprint,
+                "ranking_fingerprint": report.manifest.rankingFingerprint, "configuration_fingerprint": report.manifest.configurationFingerprint,
+                "query_configuration_fingerprint": report.manifest.queryConfigurationFingerprint,
+                "query_sha256": report.manifest.queryDigest, "lexical_query_sha256": report.manifest.lexicalQueryDigest,
+                "raw_snapshot_id": report.manifest.rawSnapshotID,
+                "source_frontier": report.manifest.sourceFrontier, "published_chunk_frontier": report.manifest.publishedChunkFrontier,
+                "query_disposition": report.manifest.queryDisposition, "literal_search": false,
+                "coverage_complete": coverage.complete, "inspected_sources": coverage.inspectedSources,
+                "complete_sources": coverage.completeSources, "pending_sources": coverage.pendingSources,
+                "unsupported_sources": coverage.unsupportedSources, "failed_sources": coverage.failedSources,
+                "holes_truncated": coverage.holesTruncated, "vector_candidates_inspected": report.manifest.vectorCandidatesInspected,
+                "vector_continuation_available": report.manifest.vectorContinuation != nil]
+            if let sequence = coverage.metadataContinuationSequence { audit["metadata_continuation_sequence"] = sequence }
+            if let raw = report.manifest.meteredLexicalCoverage {
+                audit["raw_work_version"] = "raw_work_v1"; audit["raw_work_charged"] = raw.rawWorkCharged
+                audit["inspected_candidates"] = raw.inspectedCandidates; audit["candidate_window_full"] = raw.candidateWindowFull
+                audit["candidate_window_complete"] = raw.candidateWindowComplete; audit["raw_continuation_available"] = raw.continuation != nil
+            }
+            result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
+            if report.manifest.queryDisposition != "supported" {
+                result.retrievalNotice = "This request used lexical archive recall; semantic recall does not support its text."
+            } else if !coverage.complete || report.manifest.vectorContinuation != nil || report.manifest.meteredLexicalCoverage?.candidateWindowComplete == false || report.manifest.meteredLexicalCoverage?.candidateWindowFull == true {
+                result.retrievalNotice = "Archive recall used a partial semantic index. Missing evidence may still be in the archive."
+            }
+            return result
         }
     }
 

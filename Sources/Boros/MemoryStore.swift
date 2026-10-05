@@ -103,6 +103,20 @@ extension MemorySourceReference {
     }
 }
 
+/// Source IDs match SQLite BINARY identity. Swift Set<String> merges
+/// canonically equivalent Unicode strings and cannot represent this contract.
+struct ExactSourceIDs: Codable, Equatable, Sequence {
+    private let keys: Set<Data>
+    init(_ ids: [String]) { keys = Set(ids.map { Data($0.utf8) }) }
+    var count: Int { keys.count }
+    var isEmpty: Bool { keys.isEmpty }
+    func contains(_ id: String) -> Bool { keys.contains(Data(id.utf8)) }
+    func sorted() -> [String] { keys.sorted { $0.lexicographicallyPrecedes($1) }.map { String(decoding: $0, as: UTF8.self) } }
+    func makeIterator() -> IndexingIterator<[String]> { sorted().makeIterator() }
+    init(from decoder: Decoder) throws { self.init(try decoder.singleValueContainer().decode([String].self)) }
+    func encode(to encoder: Encoder) throws { var value = encoder.singleValueContainer(); try value.encode(sorted()) }
+}
+
 struct PayloadPage: Codable {
     let eventID: String
     let offset: Int
@@ -344,16 +358,26 @@ final class MemoryStore: @unchecked Sendable {
     /// Source bytes are read separately using read(eventID:offset:length:).
     /// A fixed upper frontier prevents later publications changing a scan.
     func sourceManifest(projectID: String, afterSequence: Int, throughSequence: Int? = nil, limit: Int) throws -> [MemorySourceReference] {
+        try sourceManifest(projectID: projectID, afterSequence: afterSequence, throughSequence: throughSequence,
+            limit: limit, excludingSourceIDs: ExactSourceIDs([]))
+    }
+
+    func sourceManifest(projectID: String, afterSequence: Int, throughSequence: Int? = nil, limit: Int,
+                        excludingSourceIDs: ExactSourceIDs) throws -> [MemorySourceReference] {
         try locked {
             try validateIdentifier(projectID, name: "project ID")
             guard afterSequence >= 0, (throughSequence ?? 0) >= 0, (1...1000).contains(limit) else {
                 throw MemoryError.invalid("source manifest requires nonnegative bounds and 1–1000 rows")
             }
+            guard excludingSourceIDs.count <= 10000 else { throw MemoryError.invalid("source manifest excludes at most 10000 sources") }
+            for id in excludingSourceIDs { try validateIdentifier(id, name: "excluded source ID") }
             var bindings: [Value] = [.text(projectID), .integer(afterSequence)]
             var upperBound = ""
             if let throughSequence { upperBound = " AND sequence<=?"; bindings.append(.integer(throughSequence)) }
+            let exclusions = excludingSourceIDs.isEmpty ? "" : " AND id NOT IN (SELECT value FROM json_each(?))"
+            if !excludingSourceIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingSourceIDs.sorted()), as: UTF8.self))) }
             bindings.append(.integer(limit))
-            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE project_id=? AND sequence>?" + upperBound + " ORDER BY sequence LIMIT ?", bindings, map: sourceReference)
+            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE project_id=? AND sequence>?" + upperBound + exclusions + " ORDER BY sequence LIMIT ?", bindings, map: sourceReference)
         }
     }
 
@@ -367,7 +391,12 @@ final class MemoryStore: @unchecked Sendable {
     }
 
     /// Metadata-only FTS candidates; callers reserve full-source work before loading any payload.
+    /// Compatibility for callers that already supply Swift-set identity.
     func lexicalCandidateReferences(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms, throughSequence: Int? = nil, excludingEventIDs: Set<String> = []) throws -> [MemorySourceReference] {
+        try lexicalCandidateReferences(query: query, projectID: projectID, limit: limit, matching: matching, throughSequence: throughSequence, excludingSourceIDs: ExactSourceIDs(Array(excludingEventIDs)))
+    }
+
+    func lexicalCandidateReferences(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms, throughSequence: Int? = nil, excludingSourceIDs excludingEventIDs: ExactSourceIDs) throws -> [MemorySourceReference] {
         try locked {
             try validateSearch(query: query, projectID: projectID, limit: limit)
             if let throughSequence, throughSequence < 0 { throw MemoryError.invalid("source frontier must be nonnegative") }
@@ -504,6 +533,11 @@ final class MemoryStore: @unchecked Sendable {
                 if let episodeID, let episodeWorkID {
                     try execute("UPDATE invocations SET episode_id=?,episode_work_id=? WHERE id=?", [.text(episodeID), .text(episodeWorkID), .text(invocationID)])
                 }
+                guard let database else { throw MemoryError.database("store is closed") }
+                // Assembly already metered and verified the original ranges.
+                // This gate checks retained provenance and actual request
+                // bytes without performing an additional raw-source read.
+                try ContextComponentJournal.validate(database: database, invocationID: invocationID, verifySourceRanges: false)
             }
             guard let result = try findInvocation(invocationID) else { throw MemoryError.database("invocation publication failed") }
             return result
@@ -580,7 +614,12 @@ final class MemoryStore: @unchecked Sendable {
     /// Queries are converted to quoted lexical terms, never interpolated into
     /// SQL or accepted as raw FTS syntax. Manual search requires all terms;
     /// automatic context retrieval may explicitly request any-term matching.
+    /// Compatibility for callers that already supply Swift-set identity.
     func search(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms, throughSequence: Int? = nil, excludingEventIDs: Set<String> = []) throws -> [MemoryHit] {
+        try search(query: query, projectID: projectID, limit: limit, matching: matching, throughSequence: throughSequence, excludingSourceIDs: ExactSourceIDs(Array(excludingEventIDs)))
+    }
+
+    func search(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms, throughSequence: Int? = nil, excludingSourceIDs excludingEventIDs: ExactSourceIDs) throws -> [MemoryHit] {
         try locked {
             try validateSearch(query: query, projectID: projectID, limit: limit)
             if let throughSequence, throughSequence < 0 { throw MemoryError.invalid("source frontier must be nonnegative") }
@@ -602,7 +641,12 @@ final class MemoryStore: @unchecked Sendable {
     }
 
     /// Literal search is case-sensitive over original UTF-8 payload bytes.
+    /// Compatibility for callers that already supply Swift-set identity.
     func literalSearch(query: String, projectID: String, limit: Int = 8, throughSequence: Int? = nil, excludingEventIDs: Set<String> = []) throws -> [MemoryHit] {
+        try literalSearch(query: query, projectID: projectID, limit: limit, throughSequence: throughSequence, excludingSourceIDs: ExactSourceIDs(Array(excludingEventIDs)))
+    }
+
+    func literalSearch(query: String, projectID: String, limit: Int = 8, throughSequence: Int? = nil, excludingSourceIDs excludingEventIDs: ExactSourceIDs) throws -> [MemoryHit] {
         try locked {
             try validateSearch(query: query, projectID: projectID, limit: limit)
             if let throughSequence, throughSequence < 0 { throw MemoryError.invalid("source frontier must be nonnegative") }
@@ -1104,6 +1148,7 @@ extension MemoryStore: EpisodeLedger {
     private func validateEpisodeLimits(_ limits: EpisodeLimits) throws {
         try validateIdentifier(limits.version, name: "episode limit version")
         _ = try limits.resources.validated()
+        _ = try limits.componentPolicy?.validated()
         guard limits.deadlineMilliseconds > 0, limits.deadlineMilliseconds <= 86_400_000 else { throw EpisodeBudgetError.invalid }
     }
     private func findEpisode(_ id: String) throws -> EpisodeReceipt? {
@@ -1306,8 +1351,7 @@ extension MemoryStore: EpisodeLedger {
                 if let parent = request.parentID {
                     guard let work = try findEpisodeWork(parent), episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.invalid }
                 }
-                let blocked = try query("SELECT id FROM episode_work WHERE adapter_identity=? AND adapter_violation=1 LIMIT 1", [.text(request.adapterIdentity)]) { string($0, 0) }
-                guard blocked.isEmpty else { failure = .adapterViolation; return }
+                guard try !episodeAdapterQuarantined(request.adapterIdentity) else { failure = .adapterViolation; return }
                 let workCount = try query("SELECT count(*) FROM episode_work WHERE episode_id=?", [.text(episodeID)]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
                 var snapshotBytes = try query("SELECT coalesce(sum(byte_count),0) FROM episode_request_snapshots WHERE digest IN (SELECT DISTINCT snapshot_digest FROM episode_work WHERE episode_id=? AND snapshot_digest IS NOT NULL)", [.text(episodeID)]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
                 if let snapshot = request.snapshot {
@@ -1351,6 +1395,28 @@ extension MemoryStore: EpisodeLedger {
             return result
         }
     }
+    /// Keep full observation keys in the journal, while quarantine spans
+    /// capacity/capability changes and the historical epoch key format.
+    /// Matching is binary and validates each candidate's known identity shape.
+    /// Unsupported adapter names retain their original exact-key semantics.
+    private func episodeAdapterQuarantined(_ adapterIdentity: String) throws -> Bool {
+        guard let family = ProviderAdapterQuarantineFamily.recognize(adapterIdentity) else {
+            return try !query("SELECT id FROM episode_work WHERE adapter_identity=? AND adapter_violation=1 LIMIT 1",
+                [.text(adapterIdentity)], map: { string($0, 0) }).isEmpty
+        }
+        let ranges = family.prefixRanges
+        guard ranges.count == 2 else { throw EpisodeBudgetError.invalid }
+        return try query("""
+            SELECT adapter_identity FROM episode_work WHERE adapter_violation=1
+              AND ((adapter_identity>=? COLLATE BINARY AND adapter_identity<? COLLATE BINARY)
+                OR (adapter_identity>=? COLLATE BINARY AND adapter_identity<? COLLATE BINARY))
+              AND substr(adapter_identity,-?)=? COLLATE BINARY
+            """, [.text(ranges[0].lowerInclusive), .text(ranges[0].upperExclusive),
+                .text(ranges[1].lowerInclusive), .text(ranges[1].upperExclusive),
+                .integer(family.thinkingSuffix.utf8.count), .text(family.thinkingSuffix)]) {
+            family.contains(string($0, 0))
+        }.contains(true)
+    }
     private func armEpisodeWorkLocked(episodeID: String, operationID: String, expectedRevision: Int, clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord {
         let clock = try episodeRuntimeClock(clock)
         var failure: EpisodeBudgetError?
@@ -1361,6 +1427,10 @@ extension MemoryStore: EpisodeLedger {
             }
             if let problem = try advanceEpisodeClock(episode, clock: clock) { failure = problem; return }
             guard expectedRevision == work.revision, expectedRevision == episode.revision else { failure = .staleRevision; return }
+            if try episodeAdapterQuarantined(work.request.adapterIdentity) {
+                try terminalizeEpisode(episode, reason: .failed, ticks: clock.continuousNanoseconds)
+                failure = .adapterViolation; return
+            }
             if work.state == .dispatchArmed { return }
             guard work.state == .prepared else { failure = .conflict; return }
             var charged = work.request.resources, held = EpisodeResources.zero
@@ -1617,6 +1687,7 @@ extension MemoryStore: EpisodeLedger {
             guard Self.digest(bytes) == text(row, 6), let state = EpisodeState(rawValue: text(row, 7)) else { throw MemoryError.database("episode archive integrity failure") }
             try credentialFree(bytes)
             let limits = try decode(EpisodeLimits.self, bytes); _ = try limits.resources.validated(); try identifier(limits.version)
+            _ = try limits.componentPolicy?.validated()
             let revision = Int(sqlite3_column_int64(row, 8)), created = Int(sqlite3_column_int64(row, 10)), deadline = Int(sqlite3_column_int64(row, 11)), last = Int(sqlite3_column_int64(row, 12))
             guard limits.deadlineMilliseconds > 0, limits.deadlineMilliseconds <= 86_400_000,
                   created > 0, deadline > created, last >= created, revision >= 0,
@@ -1766,6 +1837,7 @@ extension MemoryStore: EpisodeLedger {
             """
         let invocationMismatch = try rows(invocationMismatchSQL) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
         guard invocationMismatch == 0 else { throw MemoryError.database("episode archive invocation linkage mismatch") }
+        try ContextComponentJournal.validate(database: database)
     }
 
 }

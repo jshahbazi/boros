@@ -108,6 +108,67 @@ struct EpisodeResources: Codable, Equatable {
     }
 }
 
+/// Frozen selected-model component limits. They are independent of the full
+/// provider envelope and byte guards never estimate a token count.
+struct ContextComponentPolicy: Codable, Equatable {
+    var version = "selected-model-context-components-v1"
+    var recentTokens = 8_000
+    var evidenceTokens = 12_000
+    var recentBytes = 180_000
+    var recentCandidates = 256
+    var evidenceSpans = 16
+    var evidenceBytes = 131_072
+    var maximumMessageBytes = 1_900_000
+    var reductionVersion = "whole-source-geometric-v1"
+    var rendererVersion = "qwen38-attributed-text-v1"
+
+    static let selectedQwen = ContextComponentPolicy()
+
+    init() {}
+    private enum CodingKeys: String, CodingKey {
+        case version, recentTokens, evidenceTokens, recentBytes, recentCandidates, evidenceSpans,
+             evidenceBytes, maximumMessageBytes, reductionVersion, rendererVersion
+    }
+    init(from decoder: Decoder) throws {
+        try requireEpisodeKeys(decoder, ["version", "recentTokens", "evidenceTokens", "recentBytes",
+            "recentCandidates", "evidenceSpans", "evidenceBytes", "maximumMessageBytes",
+            "reductionVersion", "rendererVersion"])
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decode(String.self, forKey: .version)
+        recentTokens = try values.decode(Int.self, forKey: .recentTokens)
+        evidenceTokens = try values.decode(Int.self, forKey: .evidenceTokens)
+        recentBytes = try values.decode(Int.self, forKey: .recentBytes)
+        recentCandidates = try values.decode(Int.self, forKey: .recentCandidates)
+        evidenceSpans = try values.decode(Int.self, forKey: .evidenceSpans)
+        evidenceBytes = try values.decode(Int.self, forKey: .evidenceBytes)
+        maximumMessageBytes = try values.decode(Int.self, forKey: .maximumMessageBytes)
+        reductionVersion = try values.decode(String.self, forKey: .reductionVersion)
+        rendererVersion = try values.decode(String.self, forKey: .rendererVersion)
+        _ = try validated()
+    }
+
+    func validated() throws -> ContextComponentPolicy {
+        guard self == Self.selectedQwen else { throw EpisodeBudgetError.invalid }
+        return self
+    }
+
+    func canonicalData() throws -> Data {
+        _ = try validated()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(self)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        episodeIdentifierEqual(lhs.version, rhs.version) && lhs.recentTokens == rhs.recentTokens
+            && lhs.evidenceTokens == rhs.evidenceTokens && lhs.recentBytes == rhs.recentBytes
+            && lhs.recentCandidates == rhs.recentCandidates && lhs.evidenceSpans == rhs.evidenceSpans
+            && lhs.evidenceBytes == rhs.evidenceBytes && lhs.maximumMessageBytes == rhs.maximumMessageBytes
+            && episodeIdentifierEqual(lhs.reductionVersion, rhs.reductionVersion)
+            && episodeIdentifierEqual(lhs.rendererVersion, rhs.rendererVersion)
+    }
+}
+
 struct EpisodeLimits: Codable, Equatable {
     var version = "development-episode-v1"
     var resources = EpisodeResources.developmentCaps
@@ -115,6 +176,9 @@ struct EpisodeLimits: Codable, Equatable {
     // Development mode retains useful local semantic inference while reporting
     // its tokens unknown. Strict mode requires verified model input counts.
     var requireKnownModelInput = false
+    // Historical and standalone-read journals retain nil. Only selected-model
+    // answering explicitly freezes this policy and obtains a count proof.
+    var componentPolicy: ContextComponentPolicy? = nil
 }
 
 struct EpisodeClockSnapshot: Codable, Equatable {
@@ -330,6 +394,7 @@ extension EpisodeLimits {
     static func == (lhs: Self, rhs: Self) -> Bool {
         episodeIdentifierEqual(lhs.version, rhs.version) && lhs.resources == rhs.resources
             && lhs.deadlineMilliseconds == rhs.deadlineMilliseconds && lhs.requireKnownModelInput == rhs.requireKnownModelInput
+            && lhs.componentPolicy == rhs.componentPolicy
     }
 }
 extension EpisodeClockSnapshot {

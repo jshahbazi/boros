@@ -216,7 +216,7 @@ def main():
         harness.write_text(HARNESS)
         binary = scratch / "episode-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "EpisodeChecks.swift")]
+            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "EpisodeChecks.swift")]
         subprocess.run(["swiftc", "-I", str(ROOT / "Sources/CSQLite"), "-o", str(binary),
                         *map(str, sources), str(harness)], check=True)
         checks = parsed(subprocess.run([str(binary)], capture_output=True, text=True, timeout=90))

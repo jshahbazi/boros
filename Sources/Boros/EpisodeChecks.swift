@@ -27,7 +27,7 @@ enum EpisodeChecks {
         let chat = try store!.createConversation(projectID: "synthetic-episode-project", title: "Synthetic episode lifecycle")
         let other = try store!.createConversation(projectID: "synthetic-other-project", title: "Separate scope")
         let clock = Clock(), body = Data("{\"messages\":[{\"role\":\"user\",\"content\":\"synthetic question\"}],\"max_tokens\":20}".utf8)
-        var checks: [String: Bool] = [:]
+        var checks = try providerQuarantineChecks()
         func begin(_ id: String, limits: EpisodeLimits = .init()) throws -> EpisodeLease {
             _ = try store!.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "turn-" + id, humanEventID: "human-" + id, episodeID: id, text: "Synthetic accepted request " + id, limits: limits, clock: clock.now())
             return EpisodeLease(ledger: store!, episodeID: id, clock: clock)
@@ -643,6 +643,81 @@ enum EpisodeChecks {
         checks["episode_schema_three_migration_foreign_keys_intact"] = try inspect(directory) { try scalar($0, "SELECT count(*) FROM pragma_foreign_key_check") == "0" }
         checks["episode_schema_three_migration_archive_validator_accepts"] = try validate(directory)
         withExtendedLifetime(freshOwner) {}
+        return checks
+    }
+    private static func providerQuarantineChecks() throws -> [String: Bool] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-provider-quarantine-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock(), endpoint = "http://localhost:11234/v1/chat/completions"
+        let pinned = endpoint + "|" + Qwen38TextRendering.modelID + "|" + Qwen38TextRendering.serverVersion + "|" + Qwen38TextRendering.templateDigest
+        let legacy = "mlx-serve-qwen38-text-v1|" + pinned + "|1700000000|thinking=false"
+        func observed(cap: Int = 32768, capabilities: [String] = ["chat", "streaming"], thinking: Bool = false,
+            address: String? = nil) throws -> String {
+            let identity = ProviderObservedModelIdentity(version: ProviderObservedModelIdentity.versionValue,
+                instanceIdentity: "unobservable", modelID: Qwen38TextRendering.modelID, owner: "mlx-serve", engine: "mlx",
+                architecture: "qwen4_exp", modelContextLimit: cap, maxModelLength: 32768, capabilities: capabilities,
+                inputModalities: ["text"], serverVersion: Qwen38TextRendering.serverVersion, templateDigest: Qwen38TextRendering.templateDigest)
+            return ProviderObservedModelIdentity.adapterIdentity(endpoint: address ?? endpoint,
+                metadataDigest: SHA256.hash(data: try identity.canonicalData()).map { String(format: "%02x", $0) }.joined(), thinking: thinking)
+        }
+        let original = try observed(), capacityChange = try observed(cap: 16384), capabilityChange = try observed(capabilities: ["chat", "reasoning", "streaming"])
+        let resources = EpisodeResources(inputTokens: 9, outputTokens: 5, modelCalls: 1, httpAttempts: 1)
+        var checks: [String: Bool] = [:]
+        var conversationID = ""
+        do {
+            let store = try MemoryStore(directory: directory)
+            let chat = try store.createConversation(projectID: "synthetic-quarantine-project", title: "Synthetic provider quarantine")
+            conversationID = chat.id
+            func begin(_ id: String) throws -> EpisodeLease {
+                _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "turn-" + id, humanEventID: "human-" + id,
+                    episodeID: id, text: "Synthetic quarantine request " + id, limits: .init(), clock: clock.now())
+                return EpisodeLease(ledger: store, episodeID: id, clock: clock)
+            }
+            func violated(_ id: String, adapter: String) throws -> Bool {
+                let lease = try begin(id), prepared = try lease.prepare(kind: .calibration, resources: resources, adapterIdentity: adapter)
+                let submitted = try lease.dispatch(prepared) {}
+                return rejected(.adapterViolation) {
+                    _ = try lease.settle(submitted, outcome: .completed,
+                        observed: EpisodeResources(inputTokens: 10, outputTokens: 1, modelCalls: 1, httpAttempts: 1))
+                }
+            }
+            checks["episode_quarantine_generic_lookalike_records_violation"] = try violated("lookalike", adapter: "mlx-serve-qwen38-text-v1|" + pinned + "|01|thinking=false")
+            let pendingArm = try begin("pending-arm"), pendingHandoff = try begin("pending-handoff"), armedHandoff = try begin("armed-handoff")
+            let first = try pendingArm.prepare(kind: .calibration, resources: resources, adapterIdentity: original)
+            let second = try pendingHandoff.prepare(kind: .calibration, resources: resources, adapterIdentity: capacityChange)
+            let third = try armedHandoff.arm(armedHandoff.prepare(kind: .calibration, resources: resources, adapterIdentity: capabilityChange))
+            checks["episode_quarantine_malformed_lookalike_does_not_block_family"] = first.state == .prepared && second.state == .prepared && third.state == .dispatchArmed
+            checks["episode_quarantine_legacy_count_violation_recorded"] = try violated("legacy-violation", adapter: legacy)
+            for (name, adapter) in [("same_observation", original), ("capacity_change", capacityChange), ("capability_change", capabilityChange),
+                ("legacy_epoch_change", "mlx-serve-qwen38-text-v1|" + pinned + "|1700000001|thinking=false")] {
+                let lease = try begin("blocked-" + name)
+                checks["episode_quarantine_blocks_" + name] = rejected(.adapterViolation) {
+                    _ = try lease.prepare(kind: .calibration, resources: resources, adapterIdentity: adapter)
+                }
+            }
+            checks["episode_quarantine_rechecks_prepared_before_arm"] = rejected(.adapterViolation) { _ = try pendingArm.arm(first) }
+            var starts = 0
+            checks["episode_quarantine_rechecks_prepared_before_handoff"] = rejected(.adapterViolation) { _ = try pendingHandoff.dispatch(second) { starts += 1 } } && starts == 0
+            checks["episode_quarantine_rechecks_armed_before_handoff"] = rejected(.adapterViolation) { _ = try armedHandoff.dispatch(third) { starts += 1 } } && starts == 0
+            let preparedReceipt = try store.episodeReceipt(id: pendingArm.episodeID, clock: clock.now())
+            let armedReceipt = try store.episodeReceipt(id: armedHandoff.episodeID, clock: clock.now())
+            checks["episode_quarantine_denied_prepared_releases_only_unused_hold"] = preparedReceipt.state == .failed && preparedReceipt.charged == .zero && preparedReceipt.held == .zero
+            checks["episode_quarantine_denied_armed_retains_conservative_charge"] = armedReceipt.state == .failed
+                && armedReceipt.charged == EpisodeResources(inputTokens: 9, modelCalls: 1, httpAttempts: 1) && armedReceipt.held == EpisodeResources(outputTokens: 5)
+            for (name, adapter) in [("other_thinking", try observed(thinking: true)), ("other_endpoint", try observed(address: "http://localhost:11235/v1/chat/completions"))] {
+                let lease = try begin(name)
+                checks["episode_quarantine_preserves_" + name + "_scope"] = try lease.prepare(kind: .calibration, resources: resources, adapterIdentity: adapter).state == .prepared
+                _ = try lease.finish(reason: .cancelled)
+            }
+            checks["episode_quarantine_journal_preserves_full_historical_keys"] = try validate(directory)
+        }
+        let reopened = try MemoryStore(directory: directory)
+        _ = try reopened.acceptRequestAndBeginEpisode(conversationID: conversationID, turnID: "reopen-turn", humanEventID: "reopen-human",
+            episodeID: "reopen-episode", text: "Synthetic reopen quarantine request", limits: .init(), clock: clock.now())
+        let lease = EpisodeLease(ledger: reopened, episodeID: "reopen-episode", clock: clock)
+        checks["episode_quarantine_family_survives_reopen"] = rejected(.adapterViolation) {
+            _ = try lease.prepare(kind: .calibration, resources: resources, adapterIdentity: capabilityChange)
+        }
         return checks
     }
     private static func snapshotChecks() throws -> [String: Bool] {

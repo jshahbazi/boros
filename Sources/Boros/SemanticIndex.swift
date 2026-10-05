@@ -244,7 +244,7 @@ final class SemanticIndex: @unchecked Sendable {
         indexFingerprint = Self.digest(try Self.canonical(["encoder": encoderFingerprint, "chunker": "utf8-whitespace-v1", "chunk_bytes": String(configuration.chunkBytes), "schema": "2-source-seal"]))
         rankingFingerprint = Self.digest(try Self.canonical(["ranking": "literal-first-rrf-cosine-v1", "rrf_constant": String(configuration.reciprocalRankConstant),
             "candidate_cap": String(configuration.maximumCandidateChunks), "lexical": "caller-query-anyterm-prefiltered-exclusions-v2",
-            "raw_filters": "scope-frontier-exclusions-before-limit-v1", "dedup": "one-range-per-source-v1"]))
+            "raw_filters": "scope-frontier-utf8-exclusions-before-limit-v2", "dedup": "one-range-per-source-v1"]))
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             var statValue = stat()
@@ -359,6 +359,14 @@ final class SemanticIndex: @unchecked Sendable {
     func search(query: String, lexicalQuery: String? = nil, projectID: String, limit: Int = 16,
                 excludingEventIDs: Set<String> = [], includeLiteral: Bool = true, continuation: SemanticSearchContinuation? = nil,
                 episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false) throws -> SemanticSearchReport {
+        try search(query: query, lexicalQuery: lexicalQuery, projectID: projectID, limit: limit,
+            excludingSourceIDs: ExactSourceIDs(Array(excludingEventIDs)), includeLiteral: includeLiteral,
+            continuation: continuation, episodeLease: episodeLease, operationIsNested: operationIsNested)
+    }
+
+    func search(query: String, lexicalQuery: String? = nil, projectID: String, limit: Int = 16,
+                excludingSourceIDs excludingEventIDs: ExactSourceIDs, includeLiteral: Bool = true, continuation: SemanticSearchContinuation? = nil,
+                episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false) throws -> SemanticSearchReport {
         _ = try episodeLease?.checkActive(projectID: projectID)
         return try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
             try searchWithinOperation(query: query, lexicalQuery: lexicalQuery, projectID: projectID, limit: limit,
@@ -367,7 +375,7 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     private func searchWithinOperation(query: String, lexicalQuery: String?, projectID: String, limit: Int,
-                                      excludingEventIDs: Set<String>, includeLiteral: Bool,
+                                      excludingEventIDs: ExactSourceIDs, includeLiteral: Bool,
                                       continuation: SemanticSearchContinuation?, episodeLease: EpisodeLease?) throws -> SemanticSearchReport {
         guard query.utf8.count <= MemoryStore.maximumPayloadBytes, (1...100).contains(limit), excludingEventIDs.count <= 10000 else { throw SemanticError.invalid }
         let lexical = lexicalQuery ?? query
@@ -388,21 +396,21 @@ final class SemanticIndex: @unchecked Sendable {
         if let episodeLease {
             if continuation == nil && includeLiteral && query.utf8.count <= 4096 {
                 let report = try MeteredRetrieval.literalSearch(store: store, query: query, projectID: projectID, limit: 100,
-                    throughSequence: frontier, excludingEventIDs: excludingEventIDs, lease: episodeLease, nested: true)
+                    throughSequence: frontier, excludingSourceIDs: excludingEventIDs, lease: episodeLease, nested: true)
                 try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.incompleteReason == "raw_source_budget")
                 literalReport = report; literal = report.hits
             } else { literal = [] }
             if continuation == nil {
                 let report = try MeteredRetrieval.lexicalSearch(store: store, query: lexical, projectID: projectID, limit: 100,
-                    matching: .anyTerm, throughSequence: frontier, excludingEventIDs: excludingEventIDs, lease: episodeLease, nested: true)
+                    matching: .anyTerm, throughSequence: frontier, excludingSourceIDs: excludingEventIDs, lease: episodeLease, nested: true)
                 try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
                 lexicalReport = report; lexicalHits = report.hits
             } else { lexicalHits = [] }
         } else {
             literal = continuation == nil && includeLiteral && query.utf8.count <= 4096 ? try store.literalSearch(query: query, projectID: projectID,
-                limit: 100, throughSequence: frontier, excludingEventIDs: excludingEventIDs) : []
+                limit: 100, throughSequence: frontier, excludingSourceIDs: excludingEventIDs) : []
             lexicalHits = continuation == nil ? try store.search(query: lexical, projectID: projectID, limit: 100, matching: .anyTerm,
-                throughSequence: frontier, excludingEventIDs: excludingEventIDs) : []
+                throughSequence: frontier, excludingSourceIDs: excludingEventIDs) : []
         }
         let encoding: SemanticEncoding
         if let episodeLease, try episodeLease.checkActive().limits.requireKnownModelInput {
@@ -432,7 +440,7 @@ final class SemanticIndex: @unchecked Sendable {
                         maximumRows: configuration.maximumManifestSources * 3 + configuration.maximumReportedHoles + 1) {
                         try self.coverage(projectID: projectID, frontier: frontier, publishedFrontier: publishedFrontier)
                     }
-                    var candidates: [String: Candidate] = [:]
+                    var candidates: [Data: Candidate] = [:]
                     let configurationDigest = Self.digest(try Self.canonical(configuration))
                     let lexicalDigest = Self.digest(Data(lexical.utf8))
                     let exclusionsDigest = Self.digest(try Self.canonical(excludingEventIDs.sorted()))
@@ -456,7 +464,7 @@ final class SemanticIndex: @unchecked Sendable {
                                   !excludingEventIDs.contains(result.source.eventID), result.fusedScore.isFinite, result.fusedScore > 0,
                                   result.retrievalPaths.allSatisfy({ $0 == "literal" || $0 == "lexical" }) else { throw SemanticError.invalid }
                             try verify(result.source, lease: activeSearchLease)
-                            candidates[result.source.eventID] = Candidate(source: result.source, offset: result.offset, byteCount: result.byteCount,
+                            candidates[Data(result.source.eventID.utf8)] = Candidate(source: result.source, offset: result.offset, byteCount: result.byteCount,
                                 textDigest: result.excerptDigest, paths: Set(result.retrievalPaths), score: result.fusedScore, cosine: nil)
                         }
                         meteredLexicalCoverage = snapshot.meteredLexicalCoverage
@@ -526,15 +534,15 @@ final class SemanticIndex: @unchecked Sendable {
                             ranked.append((row, max(-1, min(1, score))))
                         }
                         ranked.sort { lhs, rhs in lhs.1 == rhs.1 ? Self.rangeOrder(lhs.0.source, lhs.0.offset, rhs.0.source, rhs.0.offset) : lhs.1 > rhs.1 }
-                        var seen: Set<String> = []
-                        for (row, score) in ranked where seen.insert(row.source.eventID).inserted {
+                        var seen: Set<Data> = []
+                        for (row, score) in ranked where seen.insert(Data(row.source.eventID.utf8)).inserted {
                             let rank = seen.count
                             let contribution = 1.0 / Double(configuration.reciprocalRankConstant + rank)
-                            if var existing = candidates[row.source.eventID] {
+                            if var existing = candidates[Data(row.source.eventID.utf8)] {
                                 existing.paths.insert("semantic"); existing.score += contribution; existing.cosine = score
-                                candidates[row.source.eventID] = existing
+                                candidates[Data(row.source.eventID.utf8)] = existing
                             } else {
-                                candidates[row.source.eventID] = Candidate(source: row.source, offset: row.offset, byteCount: row.byteCount, textDigest: row.textDigest,
+                                candidates[Data(row.source.eventID.utf8)] = Candidate(source: row.source, offset: row.offset, byteCount: row.byteCount, textDigest: row.textDigest,
                                     paths: ["semantic"], score: contribution, cosine: score)
                             }
                         }
@@ -727,7 +735,7 @@ final class SemanticIndex: @unchecked Sendable {
             holes: holes, holesTruncated: holesTotal > holes.count, sources: states)
     }
 
-    private func addRaw(_ hits: [MemoryHit], path: String, frontier: Int, excluded: Set<String>, candidates: inout [String: Candidate]) throws {
+    private func addRaw(_ hits: [MemoryHit], path: String, frontier: Int, excluded: ExactSourceIDs, candidates: inout [Data: Candidate]) throws {
         var rank = 0
         for hit in hits where !excluded.contains(hit.eventID) {
             // Obtain source sequence without reading a complete payload.
@@ -735,10 +743,10 @@ final class SemanticIndex: @unchecked Sendable {
             guard source.sequence <= frontier else { continue }
             rank += 1
             let contribution = 1.0 / Double(configuration.reciprocalRankConstant + rank)
-            if var existing = candidates[hit.eventID] {
-                existing.paths.insert(path); existing.score += contribution; candidates[hit.eventID] = existing
+            if var existing = candidates[Data(hit.eventID.utf8)] {
+                existing.paths.insert(path); existing.score += contribution; candidates[Data(hit.eventID.utf8)] = existing
             } else {
-                candidates[hit.eventID] = Candidate(source: source, offset: hit.excerptOffset, byteCount: hit.excerpt.utf8.count, textDigest: Self.digest(Data(hit.excerpt.utf8)), paths: [path], score: contribution, cosine: nil)
+                candidates[Data(hit.eventID.utf8)] = Candidate(source: source, offset: hit.excerptOffset, byteCount: hit.excerpt.utf8.count, textDigest: Self.digest(Data(hit.excerpt.utf8)), paths: [path], score: contribution, cosine: nil)
             }
         }
     }
@@ -753,8 +761,9 @@ final class SemanticIndex: @unchecked Sendable {
     }
 
     private func readResults(_ manifest: SemanticSearchManifest) throws -> [MemoryHit] {
-        try manifest.results.map { result in
-            guard episodeIdentifierEqual(result.source.projectID, manifest.projectID), result.source.sequence <= manifest.sourceFrontier,
+        let excluded = ExactSourceIDs(manifest.excludedEventIDs)
+        return try manifest.results.map { result in
+            guard !excluded.contains(result.source.eventID), episodeIdentifierEqual(result.source.projectID, manifest.projectID), result.source.sequence <= manifest.sourceFrontier,
                   result.offset >= 0, result.byteCount > 0, result.byteCount <= MemoryStore.maximumPageBytes,
                   result.source.byteCount >= 0, result.source.byteCount <= MemoryStore.maximumPayloadBytes,
                   result.offset <= result.source.byteCount,

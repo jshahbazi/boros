@@ -185,6 +185,7 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
             }
             if let receipt = settings.endpointAdmission {
                 guard receipt.accepts(body: bytes, address: settings.endpointURL),
+                      self.componentBindingAccepts(settings: settings, body: bytes, receipt: receipt),
                       receipt.outputReserve == settings.maximumOutput,
                       receipt.safetyTokens == settings.endpointSafetyTokens,
                       receipt.effectiveContextLimit <= settings.endpointContextLimit else {
@@ -192,6 +193,13 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
                 }
                 self.dispatch(body: bytes, settings: settings, receipt: receipt)
             } else {
+                if let lease = settings.episodeLease {
+                    do {
+                        if try lease.checkActive().limits.componentPolicy != nil {
+                            self.finish("provider_count_mismatch"); return
+                        }
+                    } catch { self.finish(ProviderAdmissionError.budget(error).failureCode); return }
+                }
                 self.admissionOperation = ProviderAdmission.prepare(requestBody: bytes, address: settings.endpointURL,
                     apiKey: settings.endpointAPIKey, contextLimit: settings.endpointContextLimit,
                     safetyTokens: settings.endpointSafetyTokens, episodeLease: settings.episodeLease) { result in
@@ -210,7 +218,8 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
 
     private func dispatch(body bytes: Data, settings: GenerationSettings, receipt: EndpointAdmissionReceipt) {
             guard !ended, !cancelled, let url = LocalEndpoint.chatURL(settings.endpointURL),
-                  receipt.accepts(body: bytes, address: settings.endpointURL) else {
+                  receipt.accepts(body: bytes, address: settings.endpointURL),
+                  componentBindingAccepts(settings: settings, body: bytes, receipt: receipt) else {
                 finish(cancelled ? nil : "provider_count_mismatch", stopped: cancelled); return
             }
             admission = receipt
@@ -252,13 +261,39 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
                         answerWork = try lease.prepare(kind: .answer, resources: resources,
                             adapterIdentity: receipt.answerAdapterIdentity, snapshot: bytes)
                     }
+                    var expiredBeforeHandoff = false
                     answerWork = try lease.dispatch(answerWork!) {
+                        // No ledger reentry inside the owner's serialized gate.
+                        // All body/scope/policy bindings were checked above;
+                        // immutable receipts must also remain fresh right now.
+                        let age = Date().timeIntervalSince(receipt.admittedAt)
+                        var fresh = true
+                        if let proof = receipt.componentProof {
+                            if let clock = try? lease.clockSnapshot() { fresh = proof.isFresh(clock: clock) }
+                            else { fresh = false }
+                        }
+                        guard age >= 0, age <= 30, fresh else {
+                            expiredBeforeHandoff = true; return
+                        }
                         self.answerDispatched = true; self.task!.resume()
                     }
+                    if expiredBeforeHandoff { finish("provider_count_mismatch"); return }
                 } else {
                     self.answerDispatched = true; self.task!.resume()
                 }
             } catch { finish(ProviderAdmissionError.budget(error).failureCode) }
+    }
+
+    private func componentBindingAccepts(settings: GenerationSettings, body: Data, receipt: EndpointAdmissionReceipt) -> Bool {
+        guard let lease = settings.episodeLease else {
+            return receipt.componentProof == nil && settings.preparedContextComponents == nil
+        }
+        do {
+            if try lease.checkActive().limits.componentPolicy == nil {
+                return receipt.componentProof == nil && settings.preparedContextComponents == nil
+            }
+            return settings.preparedContextComponents?.accepts(receipt: receipt, body: body, settings: settings) == true
+        } catch { return false }
     }
 
     func cancel() {

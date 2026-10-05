@@ -63,6 +63,9 @@ final class EpisodeLease: @unchecked Sendable {
         guard episodeIdentifierEqual(receipt.projectID, projectID) else { throw EpisodeBudgetError.scopeMismatch }
         return receipt
     }
+    /// Independent continuous-clock read; safe inside a serialized handoff
+    /// because it never reenters the ledger or owner mutex.
+    func clockSnapshot() throws -> EpisodeClockSnapshot { try clock.now() }
     func prepare(kind: EpisodeWorkKind, resources: EpisodeResources, adapterIdentity: String,
         snapshot: Data? = nil, inputTokensKnown: Bool = true, parentID: String? = nil,
         operationID: String = UUID().uuidString) throws -> EpisodeWorkRecord {

@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import time
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -11,7 +12,11 @@ MODES = ["good", "http-error", "sse-error", "unfinished", "length", "redirect", 
          "wrong-model-no-usage", "wrong-model-invalid-usage", "invalid-usage"]
 ADMISSION_MODES = ["template-mismatch", "version-mismatch", "model-mismatch", "count-mismatch", "bad-tokenizer", "admission-redirect", "admission-cancel",
                    "calibration-stop", "calibration-zero", "calibration-negative", "calibration-missing", "calibration-excess",
-                   "calibration-wrong-model-missing", "calibration-wrong-model-invalid"]
+                   "calibration-wrong-model-missing", "calibration-wrong-model-invalid",
+                   "component-model-drift", "component-capability-drift", "component-template-drift", "component-version-drift"]
+METADATA_LOCK = threading.Lock()
+MODEL_READS = {}
+CREATED_COUNTER = 1770000000
 LOW = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration."
 
 
@@ -72,6 +77,10 @@ class Fixture(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
+    def drifting(self, mode):
+        with METADATA_LOCK:
+            return MODEL_READS.get(mode, 0) >= 2
+
     def do_GET(self):
         mode = self.admission_mode()
         if mode is None:
@@ -86,11 +95,21 @@ class Fixture(BaseHTTPRequestHandler):
         if mode == "admission-cancel":
             time.sleep(2)
         if urlsplit(self.path).path == "/v1/models":
-            self.json_response({"data": [{"id": "wrong-model" if mode == "model-mismatch" else MODEL, "owned_by": "mlx-serve", "loaded": True,
-                "state": "ready", "created": ADMISSION_MODES.index(mode) + 2 if mode else 1, "context_length": 32768,
+            global CREATED_COUNTER
+            with METADATA_LOCK:
+                MODEL_READS[mode] = MODEL_READS.get(mode, 0) + 1
+                CREATED_COUNTER += 1
+                created = CREATED_COUNTER
+                drift = MODEL_READS[mode] >= 2
+            self.json_response({"data": [{"id": "wrong-model" if mode == "model-mismatch" or (drift and mode == "component-model-drift") else MODEL,
+                "owned_by": "mlx-serve", "loaded": True, "state": "ready", "created": created,
+                "context_length": 32768, "max_model_len": 32768,
+                "capabilities": ["chat"] if drift and mode == "component-capability-drift" else ["chat", "streaming"],
+                "input_modalities": ["text"],
                 "meta": {"engine": "mlx", "architecture": "qwen4_exp"}}]})
         elif urlsplit(self.path).path == "/props":
-            self.json_response({"settings": {"version": "unverified" if mode == "version-mismatch" else "26.10.1", "engine": "mlx"},
+            version_drift = mode == "component-version-drift" and self.drifting(mode)
+            self.json_response({"settings": {"version": "unverified" if mode == "version-mismatch" or version_drift else "26.10.1", "engine": "mlx"},
                 "default_generation_settings": {"n_ctx": 32768}, "memory": {"max_safe_context": 32768}})
         else:
             self.send_error(404)
@@ -107,7 +126,10 @@ class Fixture(BaseHTTPRequestHandler):
                 self.send_error(403)
                 return
             if self.path == "/api/show":
-                self.json_response({"model_info": {"general.basename": MODEL}, "template": TEMPLATE + ("changed" if admission_mode == "template-mismatch" else "")})
+                template_drift = admission_mode == "component-template-drift" and self.drifting(admission_mode)
+                model_drift = admission_mode == "component-model-drift" and self.drifting(admission_mode)
+                self.json_response({"model_info": {"general.basename": "wrong-model" if model_drift else MODEL},
+                    "template": TEMPLATE + ("changed" if admission_mode == "template-mismatch" or template_drift else "")})
                 return
             if self.path == "/tokenize":
                 self.json_response({"tokens": [True] if admission_mode == "bad-tokenizer" else [1] * count(body["content"])})

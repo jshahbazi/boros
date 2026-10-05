@@ -154,7 +154,8 @@ enum MeteredRetrieval {
         SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func exclusionDigest(_ ids: Set<String>) throws -> String { digest(try JSONEncoder().encode(ids.sorted())) }
+    static func exclusionDigest(_ ids: Set<String>) throws -> String { try exclusionDigest(ExactSourceIDs(Array(ids))) }
+    static func exclusionDigest(_ ids: ExactSourceIDs) throws -> String { digest(try JSONEncoder().encode(ids.sorted())) }
 
     /// Loading checks complete source identity and SHA-256 in MemoryStore.
     /// The caller declares additional matching/preview passes before loading.
@@ -209,6 +210,16 @@ enum MeteredRetrieval {
                               excludingEventIDs: Set<String> = [], lease: EpisodeLease,
                               continuation: MeteredLexicalContinuation? = nil,
                               nested: Bool = false) throws -> MeteredLexicalReport {
+        try lexicalSearch(store: store, query: query, projectID: projectID, limit: limit, matching: matching,
+            throughSequence: throughSequence, excludingSourceIDs: ExactSourceIDs(Array(excludingEventIDs)),
+            lease: lease, continuation: continuation, nested: nested)
+    }
+
+    static func lexicalSearch(store: MemoryStore, query: String, projectID: String, limit: Int = 16,
+                              matching: LexicalMatchMode = .allTerms, throughSequence: Int? = nil,
+                              excludingSourceIDs excludingEventIDs: ExactSourceIDs, lease: EpisodeLease,
+                              continuation: MeteredLexicalContinuation? = nil,
+                              nested: Bool = false) throws -> MeteredLexicalReport {
         _ = try lease.checkActive(projectID: projectID)
         return try operation(lease: lease, nested: nested) {
             guard query.utf8.count <= 4096, (1...100).contains(limit), excludingEventIDs.count <= 10000 else { throw MeteredRetrievalError.invalid }
@@ -231,7 +242,7 @@ enum MeteredRetrieval {
                 frontier = try throughSequence ?? sourceMetadata(store: store, lease: lease, maximumRows: 1) { try store.sourceFrontier(projectID: projectID) }
                 references = terms.isEmpty ? [] : try sourceMetadata(store: store, lease: lease, maximumRows: limit) {
                     try store.lexicalCandidateReferences(query: query, projectID: projectID, limit: limit, matching: matching,
-                        throughSequence: frontier, excludingEventIDs: excludingEventIDs)
+                        throughSequence: frontier, excludingSourceIDs: excludingEventIDs)
                 }
                 first = 0; windowFull = references.count == limit
             }
@@ -266,6 +277,15 @@ enum MeteredRetrieval {
                               throughSequence: Int? = nil, excludingEventIDs: Set<String> = [], lease: EpisodeLease,
                               continuation: MeteredLiteralContinuation? = nil,
                               maximumSources: Int = 1000, nested: Bool = false) throws -> MeteredLiteralReport {
+        try literalSearch(store: store, query: query, projectID: projectID, limit: limit, throughSequence: throughSequence,
+            excludingSourceIDs: ExactSourceIDs(Array(excludingEventIDs)), lease: lease, continuation: continuation,
+            maximumSources: maximumSources, nested: nested)
+    }
+
+    static func literalSearch(store: MemoryStore, query: String, projectID: String, limit: Int = 16,
+                              throughSequence: Int? = nil, excludingSourceIDs excludingEventIDs: ExactSourceIDs, lease: EpisodeLease,
+                              continuation: MeteredLiteralContinuation? = nil,
+                              maximumSources: Int = 1000, nested: Bool = false) throws -> MeteredLiteralReport {
         _ = try lease.checkActive(projectID: projectID)
         return try operation(lease: lease, nested: nested) {
             guard !query.isEmpty, query.utf8.count <= MemoryStore.maximumPageBytes, (1...100).contains(limit),
@@ -284,7 +304,7 @@ enum MeteredRetrieval {
                 frontier = try throughSequence ?? sourceMetadata(store: store, lease: lease, maximumRows: 1) { try store.sourceFrontier(projectID: projectID) }
             }
             let sources = try sourceMetadata(store: store, lease: lease, maximumRows: maximumSources) {
-                try store.sourceManifest(projectID: projectID, afterSequence: cursor, throughSequence: frontier, limit: maximumSources)
+                try store.sourceManifest(projectID: projectID, afterSequence: cursor, throughSequence: frontier, limit: maximumSources, excludingSourceIDs: excludingEventIDs)
             }
             var table = [Int](repeating: 0, count: needle.count), prefix = 0
             if needle.count > 1 {

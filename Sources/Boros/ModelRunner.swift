@@ -32,6 +32,7 @@ struct GenerationSettings {
     // These runtime references never enter persisted settings or request JSON.
     var episodeLease: EpisodeLease?
     var preparedAnswerWork: EpisodeWorkRecord?
+    var preparedContextComponents: ContextComponentDispatchBinding?
 
     func messages(_ prompt: String, conversation: Conversation) -> [[String: String]] {
         messagesOverride ?? profile.chatMessages(system: system, prompt: prompt, conversation: conversation)

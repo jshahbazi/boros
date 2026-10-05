@@ -98,6 +98,7 @@ enum ContextAdmissionChecks {
         checks.merge(try sqliteFenceChecks(store: store)) { _, new in new }
         checks.merge(try standaloneScopeChecks(store: store, semantic: semantic)) { _, new in new }
         checks.merge(try ReadCoverageChecks.run(store: store, semantic: semantic)) { _, new in new }
+        checks.merge(try ContextComponentChecks.run()) { _, new in new }
         return checks
     }
 

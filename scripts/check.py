@@ -45,6 +45,13 @@ def main():
         finally:
             fixture.terminate()
             fixture.wait(timeout=5)
+        component = subprocess.run([sys.executable, str(ROOT / "scripts/test_component_preparation.py"),
+                                    "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=110)
+        component_report = json.loads(component.stdout)
+        print(json.dumps(component_report))
+        total += component_report["checks"]
+        if component.returncode or component_report["failed"]:
+            return 1
     print(json.dumps({"total_checks": total, "passed": True}))
     return 0
 

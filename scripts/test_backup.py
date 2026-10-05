@@ -90,7 +90,7 @@ def main():
         harness.write_text(HARNESS)
         binary = scratch / "backup-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "MeteredRetrieval.swift",
+            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "MeteredRetrieval.swift",
             "BackupArchive.swift", "BackupCommand.swift", "BackupChecks.swift", "ReadIdentityChecks.swift"
         )]
         # Compile one captured dependency set. Other integration agents may be
