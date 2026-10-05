@@ -1,8 +1,8 @@
 # Boros project status
 
-Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Verified implementation checkpoint: `38675c5` (pushed). The architectural backlog remains active. An uncommitted episode-budget interface draft has not passed an integration checkpoint.
+Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Verified implementation checkpoint: `38675c5` (pushed). The current episode-budget wave has passing component checks and remains uncommitted pending whole-app integration verification. The architectural backlog remains active.
 
-The native chat prototype now integrates durable stream capture, exact selected-provider admission, hybrid source retrieval and backup/restore. The final combined suite passed 478 checks. Development evaluation establishes synthetic source coverage for the lexical branch; installed hybrid answer quality remains unmeasured. The complete architecture in the [plan](../tracechat-plan.md) remains in progress. This table reports behavior and verification; it does not estimate completion percentages or delivery dates.
+The verified native chat prototype integrates durable stream capture, exact selected-provider admission, hybrid source retrieval and backup/restore. That checkpoint passed 478 combined checks. Development evaluation establishes synthetic source coverage for the lexical branch; installed hybrid answer quality remains unmeasured. The complete architecture in the [plan](../tracechat-plan.md) remains in progress. Status labels distinguish verified behavior from implementation awaiting integration; no completion percentages or delivery dates are assigned.
 
 | Workstream | Status | Available now | Remaining work |
 |---|---|---|---|
@@ -14,30 +14,29 @@ The native chat prototype now integrates durable stream capture, exact selected-
 | Capture during generation | Implemented and verified | Each visible chunk commits before display; exact invocation snapshots; interrupted attempts recover partial/failed; schema v1 migration | Durable accounting before/during admission; retention/purge must include snapshots and chunks |
 | Original-source retrieval | Implemented hybrid baseline | Scoped literal/FTS5 search, exact paging; Send fuses lexical/semantic results and excludes recent sources before candidate limits | Full hybrid quality evaluation, scan budgets and larger-archive scaling |
 | Context assembly | Partial; exact selected-model admission verified | Complete current request, bounded recent/history evidence, exact Qwen rendered token counts, output/safety reservation, immutable request body, actual usage checks | Total episode budget enforcement, durable preflight accounting, more verified provider adapters |
-| Episode budgets and accounting | Interface draft started; enforcement pending | Proposed resource/deadline contract and shared Swift types/protocol | Durable ledger and recovery, reservations before dispatch, metered retrieval, one GUI/CLI/evaluation lifecycle and failure fixtures |
-| Semantic retrieval | Integrated; protocol verified | Real installed Apple English encoder; sealed sources, durable jobs, coverage holes, frozen continuations and replay manifests; 60 component checks plus SIGKILL recovery | Installed-encoder quality evaluation, whole-corpus coverage and daily background budgets |
+| Episode budgets and accounting | Implemented; integration pending | Schema-3 reservations and receipts; continuous deadline; metered provider/retrieval paths; unknown outcomes retained through recovery; ledger and backup kill/reopen checks pass | Whole-app GUI/CLI verification, manual-browser read episodes, evaluation adoption and background-index budgets |
+| Semantic retrieval | Baseline verified; metering integration pending | Real installed Apple English encoder; sealed sources, durable jobs, coverage holes, frozen continuations and replay manifests; metered component checks pass | Installed-encoder quality evaluation, whole-corpus coverage and daily background budgets |
 | Service, MCP, and imports | Deferred | Single-process native app owns the store | Multi-client memory service when justified, read-only MCP interface, authenticated imports and adapters |
 | Policy and task lifecycle | Not started | Original authorship and capture status are retained | Authenticated lifecycle changes, expiry/reopen rules, separate read/disclosure/processing grants, transitive dependencies |
 | Revocation and deletion controls | Not started | No deletion or policy mutation feature is enabled | Durable control epoch, handoff/delivery gate, late-output fencing, safe physical purge |
 | External actions | Optional; deferred | No external tool actions are enabled | Durable action journal, explicit unknown outcomes, reconciliation and recovery |
-| Retention and recovery | Backup/restore integrated and verified | Consistent SQLite snapshot, inventory verification, no-clobber restore, recovery and rebuilt lexical index; CLI and File menu; 60 isolated checks | Deletion-ledger application, retention, purge and a polished restored-store opening workflow |
+| Retention and recovery | Baseline verified; schema-3 integration pending | Consistent SQLite snapshot, inventory verification, no-clobber restore, recovery and rebuilt lexical index; schema-3 compatibility, corruption and unknown-reservation fixtures pass | Whole-app schema-3 integration, deletion-ledger application, retention, purge and a polished restored-store opening workflow |
 | Summary tree | Optional; gated | No tree or model-generated archive summaries | Implement only after the raw-retrieval baseline passes its checkpoint; test incremental updates and reproducible frontiers |
 | Quality and economics evaluation | Contracts corrected; development source coverage verified | 41 contract tests; lexical helper recovers all spans in 224/224 eligible synthetic probes | Installed hybrid/answering evaluation, representative workload and comparative quality/economics |
 | Local release | Development build only | Buildable, ad hoc signed app bundle | Complete release gates, packaging, user documentation and recovery validation |
 
 ## Implementation assignments
 
-The prior parallel wave is integrated and verified. The next wave has a draft budget contract and shared interface types; its runtime implementation is pending. Concurrent implementation assignments will use separate file ownership after shared interfaces are frozen. Rows remain in progress until integrated verification passes.
+The current parallel wave implements the [episode-budget contract](EPISODE-BUDGET.md) with separate file ownership. Component results below describe the current working tree. They do not advance the verified implementation checkpoint until the whole-app suite and integration gates pass.
 
 | Assignment | Owned surface | Current state | Integration gate |
 |---|---|---|---|
-| Durable invocation agent | Store schema, invocation/chunk persistence, memory checks | Complete and integrated | Checkpoint passed |
-| Provider admission agent | Request builder, tokenizer/admission adapter, HTTP fixtures | Complete and integrated | Checkpoint passed |
-| Evaluation agent | Harness, synthetic fixtures, evaluation specification | Corrected; v4 development run passed | Future hybrid/answering evaluation |
-| Coordinating agent | Integration, shared contracts, checks and documentation | Checkpoint verified; episode interfaces drafted | Freeze interfaces and integrate the next contract |
-| Semantic retrieval agent | Sidecar, encoder, jobs and replay manifests | Complete and integrated | Protocol/recovery checks passed; quality evaluation pending |
-| Backup/restore agent | Archive, verification, CLI and restore | Complete and integrated | Component, CLI and recovery checks passed |
-| Episode-budget assignment | [Durable preflight and total-work accounting contract](EPISODE-BUDGET.md), shared budget types/protocol | Contract and interface drafts; no runtime enforcement | Ledger, provider/retrieval adoption, recovery and failure schedules |
+| Coordinating agent | Shared interfaces, GUI/CLI/native lifecycle, SQL interruption, kill fixtures, scripts and documentation | Integrated source changes; syntax parse passes; finalization and native-cleanup regressions added | Whole-app compilation and GUI lifecycle tests, live synthetic dispatch, review recheck |
+| Episode ledger agent | Main schema 3, reservations, receipts, recovery, clock and lease | Implementation complete; 82 isolated checks pass, including real SIGKILL/reopen | Whole-app invocation fencing and provider/retrieval composition |
+| Episode provider agent | Discovery/tokenizer/calibration/answer handoffs and fixtures | 49 unit and 166 HTTP checks pass; final dispatch-suppression fix underway | Final source freeze and shared GUI/CLI episode verification |
+| Metered retrieval agent | Metadata-first candidates, bounded literal continuation, recent/source/semantic accounting | Source frozen; 64 context and 76 semantic checks pass, including large sources and real SQLite interruption | Whole-app composition; manual-browser contract and evaluation adoption remain separate work |
+| Episode backup agent | Schema-3 recognition, journal inventory and restore | Source frozen; 100 isolated checks pass, including legacy compatibility, corruption and SIGKILL/reopen | Whole-app backup/restore composition |
+| Independent review agent | Read-only adversarial review of lifecycle, provider receipts and ledger gates | Three reproducible findings reported; fixes implemented or finishing | Independent recheck after final source freeze |
 
 Evaluation review identified timing contamination, incomplete category validation, malformed gate/economic inputs, an overbroad power interpretation and a probe/span label. Corrections passed 41 tests and focused independent recheck. Original frozen reports are retained as historical evidence; v4 measures the lexical-only helper branch explicitly.
 
@@ -47,7 +46,7 @@ The development evaluation measures source coverage without an answerer. V4's le
 
 ## Verification
 
-Results describe their recorded source snapshots. The current frozen integration passed the combined suite after review fixes. Counts overlap and must not be added together.
+Results describe their recorded source snapshots. The 478-check suite belongs to the pushed checkpoint, before the current episode-budget wave. Counts overlap and must not be added together.
 
 | Check | Recorded result | What it establishes |
 |---|---|---|
@@ -62,13 +61,18 @@ Results describe their recorded source snapshots. The current frozen integration
 | Backup/restore and process recovery | 60 isolated checks passed | Corruption, foreign-source recognition, concurrent writes, restore/reopen, no-clobber and SIGKILL |
 | Evaluation contracts | 41 tests passed | Reviewed validation/statistics corrections and v4 development source snapshot |
 | Development bundle signature | Strict deep verification passed | Final frozen integration bundle |
+| Current episode ledger and process recovery | 82 isolated checks passed | Reservations, receipts, accounting invariants and actual SIGKILL/reopen in the current working tree |
+| Current episode provider | 49 unit and 166 HTTP checks passed; final narrow fix pending | Metered handoffs, conservative unknown outcomes, late usage and model-mismatch quarantine |
+| Current metered context and semantic retrieval | 64 context and 76 semantic checks passed | Shared allowances, explicit incomplete results, source sealing and SQLite deadline/Stop interruption |
+| Current schema-3 backup and recovery | 100 isolated checks passed | Legacy compatibility, journal corruption rejection, preserved unknown reservations and SIGKILL/reopen |
+| Current episode whole-app integration | Pending | Frozen-source compilation, GUI/CLI lifecycle composition, live synthetic smoke and signature verification |
 | Final visual recheck | Pending | Last UI-control correction passed automated checks but has not been visually rechecked |
 
 These checks do not establish general model competence, production long-history recall, latency reliability or cost improvements. Historical v1 retrieval timings included scoring work; v4 separates that measurement. Full details and limitations are in [IMPLEMENTATION.md](IMPLEMENTATION.md) and [EVALUATION.md](EVALUATION.md).
 
 ## Next checkpoint
 
-Continue with the [episode-budget contract](EPISODE-BUDGET.md), durable preflight accounting and scoped disclosure after the verified integration checkpoint. Opaque encoder token usage, raw work behind clipped excerpts and the matched recent-token cap remain explicit contract questions. Policy mutation, deletion, external actions and the optional tree require their own contracts and verification gates. The phase mapping below follows the plan's milestones.
+Finish the current episode-budget integration: freeze provider sources, compile the whole app, run the GUI/CLI lifecycle regressions, recheck the review findings and perform a synthetic local-provider smoke test. Commit and push that wave only after those gates pass. Then extend metering to manual source browsing and the evaluation harness, define the recent/evidence token allocations, and add background-index budgets. Apple encoder input tokens remain opaque; development mode records that fact and strict known-input mode skips the encoder. Raw-source charges are conservative logical work bounds. Policy mutation, deletion, external actions and the optional tree require their own contracts and verification gates. The phase mapping below follows the plan's milestones.
 
 | Plan phase | Status | Outstanding exit criteria |
 |---|---|---|
