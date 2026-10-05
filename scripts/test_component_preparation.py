@@ -150,12 +150,19 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        result = subprocess.run([str(binary), "--component-preparation-integration-test",
-                                 f"http://127.0.0.1:{server.server_port}/v1"],
-                                capture_output=True, text=True, timeout=100)
-        checks = json.loads(result.stdout)
-        if not isinstance(checks, dict) or not checks or not all(isinstance(value, bool) for value in checks.values()):
-            raise ValueError("Invalid content-free preparation check report.")
+        checks = {}
+        failed_process = False
+        for suite in ("--component-preparation-integration-test", "--retrieval-strategy-integration-test",
+                      "--answer-coordinator-integration-test"):
+            result = subprocess.run([str(binary), suite, f"http://127.0.0.1:{server.server_port}/v1"],
+                                    capture_output=True, text=True, timeout=100)
+            suite_checks = json.loads(result.stdout)
+            if not isinstance(suite_checks, dict) or not suite_checks or not all(isinstance(value, bool) for value in suite_checks.values()):
+                raise ValueError("Invalid content-free preparation check report.")
+            if checks.keys() & suite_checks.keys():
+                raise ValueError("Duplicate preparation check identity.")
+            checks.update(suite_checks)
+            failed_process |= bool(result.returncode)
         with LOCK:
             checks["component_preparation_fixture_created_varies_every_model_observation"] = len(OBSERVED["created"]) > 3 and all(
                 earlier < later for earlier, later in zip(OBSERVED["created"], OBSERVED["created"][1:]))
@@ -169,7 +176,7 @@ def main():
                 value in OBSERVED["full_counts"] for value in (100, 9100, 4100, 20100))
         failed = [name for name, passed in checks.items() if passed is not True]
         print(json.dumps({"suite": "component-preparation", "checks": len(checks), "failed": failed}))
-        return int(bool(result.returncode or failed))
+        return int(bool(failed_process or failed))
     finally:
         for _, release in BARRIERS.values():
             release.set()

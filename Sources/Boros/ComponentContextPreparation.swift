@@ -36,6 +36,7 @@ final class ComponentContextPreparationOperation {
     private let settings: GenerationSettings
     private let conversation: Conversation
     private let semanticIndex: SemanticIndex?
+    private let retrievalStrategy: ContextRetrievalStrategy
     private let lease: EpisodeLease
     private let queue = DispatchQueue(label: "Boros.context.components", qos: .userInitiated)
     private let lock = NSLock()
@@ -48,10 +49,12 @@ final class ComponentContextPreparationOperation {
 
     init(store: MemoryStore, conversationID: String, projectID: String, humanEventID: String,
          prompt: String, settings: GenerationSettings, conversation: Conversation, semanticIndex: SemanticIndex?,
+         retrievalStrategy: ContextRetrievalStrategy = .hybrid,
          episodeLease: EpisodeLease, completion: @escaping (Result<PreparedComponentContext, Error>) -> Void) {
         self.store = store; self.conversationID = conversationID; self.projectID = projectID
         self.humanEventID = humanEventID; self.prompt = prompt; self.settings = settings
         self.conversation = conversation; self.semanticIndex = semanticIndex; self.lease = episodeLease
+        self.retrievalStrategy = retrievalStrategy
         self.completion = completion
     }
 
@@ -153,7 +156,8 @@ final class ComponentContextPreparationOperation {
                                 let candidate = try ChatContextPreparation.prepareEvidence(recent: snapshot,
                                     store: self.store, conversationID: self.conversationID, projectID: self.projectID,
                                     prompt: self.prompt, excludingEventID: self.humanEventID,
-                                    semanticIndex: self.semanticIndex, episodeLease: self.lease)
+                                    semanticIndex: self.semanticIndex, retrievalStrategy: self.retrievalStrategy,
+                                    episodeLease: self.lease)
                                 self.countEvidence(candidate, recentReceipt: receipt)
                             } else { self.countEvidence(snapshot, recentReceipt: receipt) }
                         }

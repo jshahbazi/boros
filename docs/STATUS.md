@@ -14,17 +14,17 @@ The design goal is evidence-backed continuity within bounded context and resourc
 
 | Snapshot | Status |
 |---|---|
-| Latest reviewed code checkpoint | `af48f03`: lexical excerpt placement and imported-chat page selection fixes |
+| Latest verified code wave | Shared selected-Qwen GUI/diagnostic coordinator, explicit retrieval strategies and pinned public answering driver; exact source hashes in the verification record |
 | Latest preceding evidence documentation | `9ea5c90`: traced failures and controlled long-chat results |
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
-| Latest recorded application verification | 1,700 checks passed in an isolated tracked-source snapshot containing the intended import/retrieval changes; strict deep development signature verification passed |
+| Latest recorded application verification | **2,162 checks passed** on a copied source snapshot matching the current Swift sources; strict deep development signature verification passed |
 | Latest imported-chat result | Lexical, hybrid, and exact-page paths each recovered 12/12 selected answerable probes in warm and process-restart profiles |
-| Answering model | The user reported Qwen stopped for now. This documentation update makes no new endpoint availability check |
-| Running GUI/build freshness | Latest retrieval fixes were verified in a separate snapshot bundle. The currently running GUI's code revision has not been rechecked |
-| Additional answering work | Two modified and four untracked Swift files exist; they are outside the recorded 1,700-check snapshot |
+| Answering model | Configured Qwen completed the public paired diagnostic on October 5; one initial admission failure and two partial outputs retained |
+| Running GUI/build freshness | `.build/boros/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
+| Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
-**Recommended next milestone:** finish the shared answering path and run the first paired production-path answering diagnostic. This is the shortest route to evidence about whether Boros's memory selection improves actual answers. Implementation can proceed while Qwen is off; real-model execution requires the configured server to be available.
+**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **Next:** N3 independent developer-history cases and frozen correction/cross-message/abstention/citation rubrics, then N4 failure-driven improvements and N5 workload scaling. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
 
 ### Status labels
 
@@ -138,27 +138,28 @@ Background defaults are 512 MiB logical source work, 4,096 encoder calls, 16 MiB
 
 These are separate contracts. Local storage, provenance and retrieval journals do not establish deletion safety, policy enforcement, action recovery or downstream control over an unmanaged client. See [plan sections 3, 6, 7, 10 and 12](../tracechat-plan.md).
 
-## 3. Uncommitted answering work
+## 3. Shared answering implementation
 
-These artifacts were present when this page was written. Earlier status recorded focused strategy checks and coordinator review; this page does not recertify those results or imply current agent assignments.
+Ordinary selected-Qwen Send and the diagnostic use `AnswerAttemptCoordinator`. Atomic acceptance, source preparation, provider counts/calibration, invocation linkage, commit-before-visible streaming, Stop, transport drain and durable finalization share one original lease. Host preference-save failures close accepted episodes without dispatch. Native profiles retain their existing lifecycle.
 
-| Files in `Sources/Boros/` | Workstream | Required before relying on it |
+| Surface | Verified behavior | Boundary |
 |---|---|---|
-| `ContextRetrievalStrategy.swift`, `RetrievalStrategyChecks.swift` | Explicit recent-only/hybrid controls | Confirm source-access checks; integrate measurement and GUI paths |
-| Modified `ChatContextPreparation.swift`, `ComponentContextPreparation.swift` | Strategy-aware preparation | Verify parity, exclusions, reductions, count proofs and original lease |
-| `AnswerAttemptCoordinator.swift`, `AnswerAttemptCoordinatorChecks.swift` | Shared answer lifecycle | Finish cancellation/drain/runner-ownership review and GUI integration |
+| `ContextRetrievalStrategy` and preparation | Explicit recent-only avoids historical payload, metadata/vector and query-encoder work; hybrid retains the current scoped selector | Recent-only still reads bounded recent messages; nil semantic index remains lexical retrieval |
+| Shared coordinator and GUI | Controlled success, incomplete/cancelled output, stale callbacks, runner ownership, post-acceptance host-save failure and Stop after the first durable visible chunk | Client cancellation cannot prove immediate server compute cancellation |
+| `AnswerEvaluationCommand` and Python scorer | Exact pinned public corpus, all 18 paired attempts, restored overlays, per-hybrid Apple construction, quiescent measurement, oracle separation and content-free reports | One development history; literal factual-marker rubric; broader categories and representative quality gates remain unfinished |
 
-The intended contract is in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md). `semanticIndex:nil` is a lexical path, not a valid recent-only control. Recent-only must avoid historical reads and query encoding. No paired model-answer report exists; the offline runner does not complete this workstream.
+The contract and invocation are in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md). The first paired Qwen diagnostic completed; controlled transport is verified. A wrong task answer remains an operationally complete captured invocation. Fatal/missing/timeout attempts retain their declared denominators with explicit unknown accounting.
 
 ## 4. Recorded evidence
 
 ### Verification checkpoints
 
-These are recorded historical results. No application tests or model calls were run to author this page. Counts overlap and must not be summed.
+The answering wave was rebuilt and tested on October 5, 2026. Older results retain their original boundaries. Counts overlap and must not be summed.
 
 | Surface | Recorded result | Evidence boundary |
 |---|---|---|
-| Latest intended import/retrieval source snapshot | **1,700 application checks passed**; strict deep signature verification | Tracked-source closure plus intended changes; unrelated answering edits excluded |
+| Shared answering source wave | **2,162 application checks passed**; strict deep signature verification | Copied source matches current Swift files; includes 517 preparation/strategy/coordinator checks, 93 GUI self-checks and 20 answering contracts |
+| Earlier intended import/retrieval source snapshot | **1,700 application checks passed**; strict deep signature verification | Tracked-source closure plus intended changes; unrelated answering edits excluded |
 | Public-chat importer | **12 focused tests passed**, no skips | Strict formats, bytes/roles/statuses, provenance, refused replacement and staging SIGKILL |
 | Imported-chat runner after fixes | **10 focused tests passed**, no skips | Source-bound scoring, isolation, budgets, restart and excerpt/page regression fixtures |
 | Schema-5 `b006b6a` | **1,673 application checks passed** | Foundation before importer/diagnostic additions |
@@ -168,7 +169,30 @@ These are recorded historical results. No application tests or model calls were 
 | Historical live Qwen smoke | Two public arithmetic turns passed at `b006b6a` | Connectivity, admission, capture/accounting; no long-history quality evidence |
 | Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
 
-Latest log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. Verification bundle: `.build/retrieval-fix-checkpoint/.build/boros/Boros.app`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+Latest verification record: `.build/evaluation/answer-wave-verification-20261005.json`. Verified bundle: `.build/boros/Boros.app`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+
+### First paired production answering diagnostic
+
+The pinned public development corpus contains one history, 31 events, 123,572 source bytes and nine probes. Both strategies ran every probe through the shared coordinator in separate restored overlays. Hybrid rebuilt the real Apple index nine times before answering. Fixed order, one replicate and uncontrolled caches limit interpretation.
+
+| Observed result | Recent-only | Hybrid |
+|---|---|---|
+| Declared attempts | 9 | 9 |
+| Operational completions | 7 | 8 |
+| Literal factual-marker successes | 1/6 | 6/6 |
+| All required spans delivered for scored probes | 1/6 | 6/6 |
+| Unscored probes | 3 | 3 |
+| Charged known input tokens, including calibration | 2,090 | 18,959 |
+| Charged output tokens, including calibration | 412 | 573 |
+| Foreground model calls, including opaque query encoding | 17 | 27 |
+
+The first recent-only rare-fact attempt failed during admission with `provider_admission_unavailable`, after five HTTP attempts and one charged calibration call. Its one-token output hold remains unknown. No historical source work occurred. This report establishes the host failure code; it does not determine whether startup, load or transport caused the admission failure. The hybrid whole-record probe and recent-only absence probe ended with `incomplete_result` and durable partial output; each reached the 128-token generation cap. These unscored dimensions remain in the nine-attempt operational denominators.
+
+Literal scoring requires exact expected markers with identifier boundaries. It does not judge prose negation, complete-record reproduction, citation correctness, quoted-policy attribution or abstention. Delivered coverage does not prove that sufficient evidence fits the provider budget. The five-category quality gate remains **inconclusive**; no tree-benefit, representative accuracy, latency or economics claim follows.
+
+Report: `.build/evaluation/public-answer-pilot-20261005.json`, SHA-256 `84302b2bd8e1b44050d072c1d9aac743206a39db1b23921c3e58253315039b1a`. It retains all 18 attempts and exact copied source/compiler/binary, generator, corpus and configuration hashes. Its captured implementation hashes matched the worktree when recorded. Runtime answers/stores were discarded after scoring; the report is content-free.
+
+Next work follows the identified limits: N3 independent developer histories and explicit rubrics, N4 admission failure attribution and baseline fixes from independent cases, and N5 scaling/cap evidence. Increasing an output cap to obtain a better score is not a feasibility test. Keep the pinned pilot and old registered protocols unchanged; declare amendments before future comparisons.
 
 ### Imported long-chat diagnostic
 
@@ -219,12 +243,12 @@ The [design mapping](../tracechat-plan.md#2-how-the-original-plan-and-review-inf
 
 ## 6. Dependency-ordered next work
 
-This is a proposed backlog for choosing work. It does not start the listed implementation tasks. Dates depend on the selected scope and acceptance criteria.
+The user authorized completion of the full planned architecture on October 5, 2026, keeping optional features gated by evidence. Work follows this dependency order. N1–N2 reached their first diagnostic acceptance milestone; N3–N5 are next. Subsequent architecture and release packages remain unfinished. Dates depend on verified dependencies and acceptance criteria.
 
 | Order | Work package | Dependencies and purpose | Completion evidence |
 |---|---|---|---|
-| N1 | Finish/integrate shared Qwen coordinator and retrieval strategies | Existing artifacts prerequisite for production-path comparison | One original lease; GUI/runner preparation parity; controlled transport, durable delivery, Stop/late-callback/ownership checks; intended source committed and app rebuilt |
-| N2 | Implement first paired answering driver/scorer | Depends on N1; measures actual answers | All probes from one public development history, recent-only/hybrid; runner receives no oracle; post-terminal scoring; all failures/unknowns retained; content-free report |
+| N1 | Shared Qwen coordinator and retrieval strategies integrated | Prerequisite for production-path comparison implemented | 2,162 passing checks and rebuilt matching-source app; original lease, controlled GUI/runner parity, durable delivery, Stop/late callbacks and ownership verified |
+| N2 | First paired answering driver/scorer implemented and executed | N1 verified; all 18 attempts from the pinned public development history | 15/18 operational completions; hybrid 6/6 and recent-only 1/6 literal factual successes; every failure retained; complete quality gate inconclusive |
 | N3 | Add independent developer-history/imported-chat answering cases | Current probes targeted and mixed-domain; N2 initially uses public synthetic fixtures | Provenance, timestamp treatment, isolated questions, source/answer rubrics and sufficient-evidence feasibility; factual, temporal, follow-up, cross-message and absence cases supported by current contracts |
 | N4 | Improve baseline where N2/N3 expose failures | Semantic exclusions and query/excerpt limits are concrete risks | Distinguish retrieval/preparation/answerer/budget failures; independent confirmation after fixes; lexical/hybrid support comparison; preserve metering |
 | N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
@@ -243,12 +267,12 @@ N7 also includes the supplemental LongMemEval and LongMemEval-V2 adapters named 
 
 ### First milestone acceptance checklist
 
-- Finish coordinator/strategy review and integrate the same Qwen lifecycle into GUI and diagnostic.
-- Establish actual absence of historical reads/encoding in recent-only; empty evidence is insufficient.
-- Implement isolated attempts, runner/oracle separation and content-free reporting.
-- Complete controlled-transport contract checks before real-model calls.
-- Run/retain the paired public development diagnostic when Qwen is available.
-- Attribute failures and choose subsequent fixes from the report. A one-history pilot cannot pass the product-quality gate.
+- [x] Finish coordinator/strategy review and integrate the same Qwen lifecycle into GUI and diagnostic.
+- [x] Establish actual absence of historical reads/encoding in recent-only; empty evidence is insufficient.
+- [x] Implement isolated attempts, runner/oracle separation and content-free reporting.
+- [x] Complete controlled-transport contract checks before real-model calls.
+- [x] Run/retain the paired public development diagnostic when Qwen is available.
+- [x] Attribute failures and choose subsequent fixes from the report. A one-history pilot cannot pass the product-quality gate.
 
 ## 7. Remaining plan and evaluation gates
 
@@ -270,8 +294,8 @@ The first useful read-only prototype ends at phase 2. Its service/API and measur
 
 | Arm | Planned purpose | Execution status |
 |---|---|---|
-| A | Recent exact context only | Offline diagnostic exists; paired production answering pending |
-| B | Recent plus raw hybrid retrieval | Substantial native baseline; full permitted operations and representative evaluation incomplete |
+| A | Recent exact context only | First public paired production diagnostic executed; representative evaluation pending |
+| B | Recent plus raw hybrid retrieval | First public paired production diagnostic executed; full permitted operations and representative evaluation incomplete |
 | C | Tree/zoom, raw search disabled | Tree/answering arm unimplemented |
 | D | B plus tree/zoom | Tree/answering arm unimplemented |
 | E | Sufficient gold evidence supplied directly | Provider-feasibility/oracle answering arm pending |
@@ -300,15 +324,15 @@ All confidence bounds above are the specified 95% bounds. Replicates and tree bu
 
 | Decision | Current position | Needed choice/evidence |
 |---|---|---|
-| Immediate milestone | Recommend N1–N2 | Choose acceptance scope before unrelated capabilities |
-| Answering runtime | Verified Qwen; user-reported off | Use configured adapter when available; model changes need verification |
+| Immediate milestone | N1–N2 first diagnostic complete; N3–N5 next | Independent histories/rubrics, admission reliability attribution and representative scaling; retain optional feature gates |
+| Answering runtime | Configured Qwen executed the first paired diagnostic | Retain initial admission failure and unknown output hold; establish startup/warm reliability before representative measurements |
 | Representative histories | Generated mixed-domain import and synthetic fixtures | Public/sanitized developer histories, provenance/times and independent questions |
 | Rubrics | Factual contract exists; other dimensions incomplete | Correction, cross-message, citation and abstention scoring before claiming results |
 | Semantic direction | Narrow Apple support on import | Measure code/paraphrase needs before choosing new encoder, lexical chunks or reranker |
 | Caps/machine envelope | Development defaults exist | Archive/capture/query frequency, backlog, contention and hardware measurements |
 | Client/authority scope | One native owner | Decide when another client or durable policy state warrants service/gate contracts |
 | Tree go/no-go | Optional/gated | Accept measured baseline before tree implementation |
-| Release scope | Development-only | Select capabilities and apply corresponding exit criteria |
+| Completion scope | Full planned architecture authorized; current bundle remains development-only | Complete required phases and release gates; optional tree/actions remain evidence-gated |
 
 Hidden reasoning capture, unrestricted orchestration, universal exactly-once actions, automatic policy activation from prose and guaranteed secure SSD erasure are outside the current promise. Richer hosting, all-history export, natural-language policy suggestions, semantic secret discovery, advanced vector selection and alternate tree shapes are later options with their own evidence/contracts.
 

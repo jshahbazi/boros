@@ -21,7 +21,7 @@ def main():
     total = 0
     with tempfile.TemporaryDirectory(prefix="boros-checks-") as directory:
         env = {**os.environ, "BOROS_DATA_DIR": directory}
-        suites = ["--background-budget-self-test", "--background-ledger-self-test", "--background-worker-self-test", "--episode-self-test", "--local-read-self-test", "--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test", "--context-admission-self-test", "--semantic-self-test", "--backup-self-test"]
+        suites = ["--retrieval-strategy-self-test", "--background-budget-self-test", "--background-ledger-self-test", "--background-worker-self-test", "--episode-self-test", "--local-read-self-test", "--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test", "--context-admission-self-test", "--semantic-self-test", "--backup-self-test"]
         for suite in suites:
             run = subprocess.run([str(binary), suite], capture_output=True, text=True, env=env, timeout=90)
             checks = json.loads(run.stdout)
@@ -46,11 +46,18 @@ def main():
             fixture.terminate()
             fixture.wait(timeout=5)
         component = subprocess.run([sys.executable, str(ROOT / "scripts/test_component_preparation.py"),
-                                    "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=110)
+                                    "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=240)
         component_report = json.loads(component.stdout)
         print(json.dumps(component_report))
         total += component_report["checks"]
         if component.returncode or component_report["failed"]:
+            return 1
+        answering = subprocess.run([sys.executable, str(ROOT / "scripts/test_answer_evaluation.py"),
+                                    "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=420)
+        answering_report = json.loads(answering.stdout)
+        print(json.dumps({"suite": "answer-evaluation", **answering_report}))
+        total += answering_report["checks"]
+        if answering.returncode or answering_report["failed"] or answering_report["errors"] or answering_report["skipped"]:
             return 1
         importer = subprocess.run([sys.executable, str(ROOT / "scripts/test_chat_import.py"),
                                    "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=90)

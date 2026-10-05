@@ -11,10 +11,17 @@ enum ChatContextPreparation {
         system: String,
         excludingEventID: String,
         semanticIndex: SemanticIndex? = nil,
+        retrievalStrategy: ContextRetrievalStrategy = .hybrid,
         episodeLease: EpisodeLease? = nil
     ) throws -> ContextSnapshot {
         _ = try episodeLease?.checkActive(projectID: projectID)
         return try MeteredRetrieval.operation(lease: episodeLease) {
+            if retrievalStrategy == .recentOnly {
+                let recent = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
+                    prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
+                    maximumEvidenceBytes: 0, episodeLease: episodeLease, operationIsNested: true)
+                return try recentOnlySnapshot(recent)
+            }
             let lexical = historicalQuery(prompt)
             guard let semanticIndex else {
                 var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
@@ -95,7 +102,8 @@ enum ChatContextPreparation {
     /// adapter counts and keeps the same original lease across every stage.
     static func prepareEvidence(recent: ContextSnapshot, store: MemoryStore, conversationID: String,
         projectID: String, prompt: String, excludingEventID: String,
-        semanticIndex: SemanticIndex? = nil, episodeLease: EpisodeLease? = nil) throws -> ContextSnapshot {
+        semanticIndex: SemanticIndex? = nil, retrievalStrategy: ContextRetrievalStrategy = .hybrid,
+        episodeLease: EpisodeLease? = nil) throws -> ContextSnapshot {
         _ = try episodeLease?.checkActive(projectID: projectID)
         return try MeteredRetrieval.operation(lease: episodeLease) {
             _ = try recent.componentAssignments()
@@ -103,6 +111,9 @@ enum ChatContextPreparation {
                   episodeIdentifierEqual(binding.projectID, projectID), episodeIdentifierEqual(binding.conversationID, conversationID),
                   episodeIdentifierEqual(binding.acceptedHumanEventID, excludingEventID),
                   episodeIdentifierEqual(recent.messages.last?.content, prompt), recent.evidence.isEmpty else { throw ContextError.sourceMismatch }
+            if retrievalStrategy == .recentOnly {
+                return try recentOnlySnapshot(recent)
+            }
             let lexical = historicalQuery(prompt)
             let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
             func lexicalSnapshot(fallback: Bool) throws -> ContextSnapshot {
@@ -188,6 +199,16 @@ enum ChatContextPreparation {
             }
             return result
         }
+    }
+
+    private static func recentOnlySnapshot(_ recent: ContextSnapshot) throws -> ContextSnapshot {
+        var result = recent
+        result.retrievalManifestID = nil
+        result.retrievalManifestJSON = nil
+        result.retrievalNotice = nil
+        result.retrievalAuditJSON = try JSONSerialization.data(
+            withJSONObject: ["mode": ContextRetrievalStrategy.recentOnly.rawValue], options: [.sortedKeys])
+        return result
     }
 
     private static func appendAudit(to snapshot: inout ContextSnapshot, fields: [String: Any]) throws {

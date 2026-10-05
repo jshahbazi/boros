@@ -1,6 +1,6 @@
 # Production-path answering evaluation
 
-Status: implementation in progress, October 5, 2026. The preceding application checkpoint is `b006b6a`; its arithmetic smoke establishes connectivity, capture and admission. This document defines the next development diagnostic. No answering comparison has run, and no new registered quality protocol is frozen.
+Status: shared GUI lifecycle and public development diagnostic implemented and verified, October 5, 2026. The first paired Qwen diagnostic completed; all 18 attempts and failures are retained. No new registered quality protocol is frozen. The full architecture and release gates remain unfinished in [STATUS.md](STATUS.md).
 
 ## Implementation contract
 
@@ -8,16 +8,27 @@ Run paired `recent_only` and `hybrid` attempts through the shared selected-Qwen 
 
 | Surface | Owner | Contract |
 |---|---|---|
-| Retrieval strategy | Worker agent | Immutable `ContextRetrievalStrategy`; recent-only skips historical search/read/query encoding while retaining mandatory input, recent preparation, reductions and proofs |
-| Answer attempt coordinator | Ledger agent | Atomic acceptance, original lease, shared preparation, proof-bound invocation, commit-before-delivery streaming, cancellation and operational finalization |
-| GUI and diagnostic integration | Coordinating agent | Use the same selected-Qwen coordinator; preserve visible behavior and private capture; drive isolated public fixtures |
-| Orchestration and scoring | Coordinating agent, with independent review | Exclude oracle data from runner input; retain every attempt; produce content-free reports and explicit unknowns |
+| Retrieval strategy | `ContextRetrievalStrategy` | Immutable `ContextRetrievalStrategy`; recent-only skips historical search/read/query encoding while retaining mandatory input, recent preparation, reductions and proofs |
+| Answer attempt coordinator | `AnswerAttemptCoordinator` | Atomic acceptance, original lease, shared preparation, proof-bound invocation, commit-before-delivery streaming, cancellation and operational finalization |
+| GUI and diagnostic integration | Ordinary Send and `AnswerEvaluationCommand` | Use the same selected-Qwen coordinator; preserve visible behavior and private capture; drive isolated public fixtures |
+| Orchestration and scoring | `scripts/evaluate_answers.py` | Exclude oracle data from runner input; retain every attempt; produce content-free reports and explicit unknowns |
 
 `semanticIndex:nil` still retrieves lexical evidence. Recent-only must therefore be an explicit preparation strategy. Its checks must establish the absence of historical source work and query encoding, including when a usable semantic index exists. Empty returned evidence alone is insufficient evidence of that behavior.
 
 The coordinator accepts synchronously before preparation starts. The host can finish draft/preference persistence and establish transcript callbacks, then call `start()`. Its original lease and identifiers remain available for Stop/deadline fencing. Cancelling or failing host persistence before start terminalizes the accepted attempt without dispatching inference. Stale prepared bodies, receipts and answer work cannot carry into a new attempt.
 
 Every visible delta commits to the invocation journal before the host receives it. Cancellation and failures preserve armed unknown charges and output holds. Operational completion depends on transport, accounting and durable capture. A complete incorrect answer remains a completed captured answer with a separate task score of zero. Scoring cannot change episode or invocation state.
+
+## Execution
+
+```sh
+python3 scripts/test_answer_evaluation.py --binary "$PWD/.build/boros/Boros.app/Contents/MacOS/Boros"
+python3 scripts/evaluate_answers.py --output .build/evaluation/public-answer-pilot.json
+```
+
+The first command uses controlled transport. The second compiles an immutable copied source inventory, then uses the configured local Qwen endpoint. The output must be new. An exact configuration JSON may change the supported generation settings and loopback endpoint; credentials are not accepted. The system instruction defaults to the production GUI instruction. All source/compiler/binary, generator, corpus, instruction and configuration hashes are retained.
+
+The native driver accepts only the pinned oracle-free projection of one public development history: 31 events, 123,572 source bytes, nine probes and both strategies, totaling 18 attempts. The projection digest is `6ca035c6bb87f23b75c59c8529a0181667e8ece0cc838056139d009f0c501bb4`. Direct CLI invocation cannot substitute arbitrary chat text, remove probes or introduce oracle fields. Runtime histories and answer IPC stay in private temporary directories and are discarded after scoring; the final report contains no prompts, answers or expected values.
 
 ## Diagnostic scope
 
@@ -68,3 +79,11 @@ Before model calls, verify shared preparation parity, actual source access, one 
 Integrate the coordinator into the GUI and diagnostic before claiming a production-path comparison. Rebuild and run the applicable app/archive checks. Then run the one-history paired diagnostic against the configured Qwen endpoint, preserving the exact report and all failures. Review the diagnostic before expanding or registering a quality comparison.
 
 The optional summary tree remains gated by the complete measured baseline and the original decision criteria in [EVALUATION.md](EVALUATION.md).
+
+## Recorded pilot
+
+The matching-source application passed 2,162 checks and strict deep development signature verification. The controlled native driver passed all 18 isolated attempts with deliberately wrong answers remaining operationally complete; GUI success and Stop after a durable chunk also passed.
+
+The live report `.build/evaluation/public-answer-pilot-20261005.json` retains all 18 attempts: recent-only completed 7/9 operationally and hybrid completed 8/9. Literal factual successes and delivered gold coverage were 1/6 for recent-only and 6/6 for hybrid. Each arm also retains three unscored probes. The first recent-only calibration/admission failed with `provider_admission_unavailable` and an unknown one-token output hold. Hybrid whole-record and recent-only absence attempts reached the generation cap and preserved partial output as `incomplete_result`.
+
+This one-history, one-replicate diagnostic uses fixed strategy order and uncontrolled caches. Literal expected-marker presence is narrower than semantic answer correctness. The full quality gate remains inconclusive. The next packages are independent developer-history cases, frozen missing rubrics, admission failure attribution and representative scaling; [STATUS.md](STATUS.md) records details and exact report identity.

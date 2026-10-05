@@ -69,6 +69,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var pendingAdmissionReceipt: EndpointAdmissionReceipt?
     private var pendingNativeConfiguration: Data?
     private var pendingEpisode: EpisodeLease?
+    private var pendingSharedAttempt: AnswerAttemptCoordinator?
+    private var pendingRetrievalNotice: String?
     private var pendingAnswerWork: EpisodeWorkRecord?
     private var preparingContext = false
     private let preparationQueue = DispatchQueue(label: "Boros.episode.preparation", qos: .userInitiated)
@@ -105,6 +107,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var pendingPrompt = ""
     private var pendingResponse = ""
     private var preparedSendObserverForChecks: ((ContextSnapshot) -> Void)?
+    private var sharedAttemptObserverForChecks: ((AnswerAttemptCoordinator) -> Void)?
+    private var sharedCompletionObserverForChecks: ((AnswerAttemptCompletion) -> Void)?
+    private var sharedVisibleObserverForChecks: (() -> Void)?
     private var selectedProfile = ModelProfile.customLocal
     private var sessions: [ModelProfile: ChatSession] = [:]
 
@@ -182,7 +187,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         restoreActiveConversation()
         window.center()
         window.makeFirstResponder(promptView)
-        if !CommandLine.arguments.contains("--ui-self-test") {
+        if !CommandLine.arguments.contains("--ui-self-test") && !CommandLine.arguments.contains("--ui-shared-answer-integration-test") {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
@@ -730,6 +735,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             }
             settings.endpointContextLimit = cap
         }
+        if selectedProfile == .customLocal && preparedSendObserverForChecks == nil {
+            sendSharedAttempt(prompt: prompt, settings: settings, store: store, chat: activeChat)
+            return
+        }
         let turnID = UUID().uuidString
         let humanID = UUID().uuidString
         let assistantID = UUID().uuidString
@@ -799,29 +808,6 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let frozenConversation = conversation
         let index = semanticIndex
         let scope = projectID
-        if frozenSettings.profile == .customLocal {
-            let operation = ComponentContextPreparationOperation(store: store, conversationID: activeChat.id,
-                projectID: scope, humanEventID: humanID, prompt: prompt, settings: frozenSettings,
-                conversation: frozenConversation, semanticIndex: index, episodeLease: lease) { [weak self] outcome in
-                guard let self, self.generating, self.pendingInvocationID == invocationID else { return }
-                self.pendingComponentPreparation = nil; self.preparingContext = false
-                switch outcome {
-                case .success(let prepared):
-                    self.pendingContextSnapshot = prepared.snapshot
-                    self.pendingRequestBody = prepared.body
-                    self.pendingProviderIdentity = prepared.receipt.endpoint
-                    self.pendingAdmissionReceipt = prepared.receipt
-                    if let accounting = prepared.receipt.accounting { self.pendingAdmissionAccounting.append(accounting) }
-                    self.dispatchPreparedGeneration(prompt: prompt, settings: prepared.settings)
-                case .failure(let error):
-                    self.completeGeneration(GenerationResult(elapsed: Date().timeIntervalSince(self.started),
-                        tokensPerSecond: nil, failure: ComponentContextPreparationOperation.failureCode(error), stopped: false))
-                }
-            }
-            pendingComponentPreparation = operation
-            operation.start()
-            return
-        }
         preparationQueue.async { [weak self] in
             let outcome: Result<PreparedEpisodeContext, Error>
             do {
@@ -957,6 +943,74 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         })
     }
 
+    private func sendSharedAttempt(prompt: String, settings: GenerationSettings, store: MemoryStore, chat: StoredConversation) {
+        let attempt = AnswerAttemptCoordinator(store: store, conversationID: chat.id, projectID: projectID,
+            prompt: prompt, settings: settings, conversation: conversation, semanticIndex: semanticIndex,
+            runner: runner, onStage: { [weak self] stage, preparation in
+                guard let self, self.generating else { return }
+                self.preparingContext = stage == .preparing
+                self.pendingInvocationStarted = stage == .answering
+                self.pendingRetrievalNotice = preparation?.retrievalNotice
+            }, onText: { [weak self] text in
+                // The shared host has already committed this visible delta.
+                guard let self, self.generating, self.pendingSharedAttempt != nil else { return }
+                self.appendVisibleGenerationText(text)
+                self.sharedVisibleObserverForChecks?()
+            }, onComplete: { [weak self] completion, text in
+                guard let self, self.pendingSharedAttempt?.identifiers == completion.identifiers else { return }
+                self.pendingSharedAttempt = nil
+                if !completion.captureHealthy || !completion.accountingHealthy {
+                    self.memoryHealthy = false
+                    self.status.stringValue = "Response capture or accounting failed. Restart Boros to recover committed output."
+                }
+                guard self.generating else { return }
+                self.timer?.invalidate(); self.timer = nil
+                self.pendingResponse = text
+                self.pendingCaptureFailure = !completion.captureHealthy
+                self.scheduleSemanticMaintenance()
+                self.presentGenerationCompletion(completion.generation, captureStatus: completion.captureStatus ?? .failed)
+                self.sharedCompletionObserverForChecks?(completion)
+            })
+        pendingSharedAttempt = attempt
+        do {
+            _ = try attempt.accept()
+            if CommandLine.arguments.contains("--ui-self-test") || CommandLine.arguments.contains("--ui-shared-answer-integration-test") {
+                sharedAttemptObserverForChecks?(attempt)
+            }
+            try store.saveDraft(conversationID: chat.id, text: "")
+            preferences.endpointURL = settings.endpointURL
+            preferences.endpointModel = settings.endpointModel
+            preferences.endpointTokenBudget = settings.endpointContextLimit
+            preferences.profile = selectedProfile.rawValue
+            try preferences.save(in: store.directory)
+        } catch {
+            attempt.terminate(reason: .failed, failure: "host_settings_failure")
+            pendingSharedAttempt = nil
+            restoreActiveConversation()
+            status.stringValue = "The request could not be accepted or prepared. Check its size and local store."
+            return
+        }
+        let ids = attempt.identifiers
+        pendingTurnID = ids.turnID; pendingHumanID = ids.humanEventID; pendingAssistantID = ids.assistantEventID
+        pendingInvocationID = ids.invocationID; pendingChunkSequence = 0; pendingCaptureFailure = false
+        pendingInvocationStarted = false; pendingRequestBody = nil; pendingProviderIdentity = ""
+        pendingAdmissionAccounting = []; pendingAdmissionReceipt = nil
+        pendingContextSnapshot = nil; pendingNativeConfiguration = nil; pendingRetrievalNotice = nil
+        pendingEpisode = attempt.lease; pendingAnswerWork = nil; preparingContext = true
+        pendingPrompt = prompt; pendingResponse = ""
+        appendTranscript("You", body: prompt)
+        appendTranscript(selectedProfile.speakerName, body: "")
+        replaceDraft(""); setGenerating(true); started = Date()
+        status.stringValue = "Preparing context…"
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            guard let self, self.generating else { return }
+            let stage = self.preparingContext ? "Preparing context" : "Generating"
+            self.status.stringValue = String(format: "%@ · %.1f s", stage, Date().timeIntervalSince(self.started))
+        }
+        do { try attempt.start() }
+        catch { attempt.terminate(reason: .failed, failure: "context_preparation_failed") }
+    }
+
     private struct AdmissionAudit: Codable {
         let version: Int
         let receipt: EndpointAdmissionReceipt?
@@ -989,6 +1043,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             runner.cancel()
             return
         }
+        appendVisibleGenerationText(text)
+    }
+
+    private func appendVisibleGenerationText(_ text: String) {
         let scroll = responseView.enclosingScrollView!
         let atBottom = scroll.contentView.bounds.maxY >= responseView.bounds.maxY - 24
         pendingResponse += text
@@ -1008,7 +1066,6 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             do { resolved = result.reconcilingEpisodeState(try lease.finish(reason: terminal).state) }
             catch { memoryHealthy = false }
         }
-        let hasAnswer = !selectedProfile.finalAnswer(pendingResponse).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let captureStatus: CaptureStatus = pendingCaptureFailure ? (pendingResponse.isEmpty ? .failed : .partial)
             : resolved.stopped ? (pendingResponse.isEmpty ? .cancelled : .partial)
             : resolved.failure != nil || pendingResponse.isEmpty ? (pendingResponse.isEmpty ? .failed : .partial) : .complete
@@ -1039,10 +1096,15 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 status.stringValue = "Response finalization failed. Restart Boros to recover its committed output."
             }
         }
+        presentGenerationCompletion(resolved, captureStatus: captureStatus)
+    }
+
+    private func presentGenerationCompletion(_ resolved: GenerationResult, captureStatus: CaptureStatus) {
+        let hasAnswer = !selectedProfile.finalAnswer(pendingResponse).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         setGenerating(false)
         if memoryHealthy {
             status.stringValue = (pendingCaptureFailure ? "Response capture failed." : resolved.message) + " Captured as " + captureStatus.rawValue + "."
-                + (pendingContextSnapshot?.retrievalNotice.map { " " + $0 } ?? "")
+                + ((pendingRetrievalNotice ?? pendingContextSnapshot?.retrievalNotice).map { " " + $0 } ?? "")
         }
         if !pendingCaptureFailure && (resolved.failure == nil || resolved.stopped) && hasAnswer && !pendingResponse.isEmpty {
             conversation.append(user: pendingPrompt, assistant: pendingResponse)
@@ -1061,6 +1123,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         pendingAdmissionAccounting = []; pendingAdmissionReceipt = nil
         pendingNativeConfiguration = nil
         pendingEpisode = nil; pendingAnswerWork = nil; preparingContext = false
+        pendingRetrievalNotice = nil
         window.makeFirstResponder(promptView)
         if quitting { NSApplication.shared.reply(toApplicationShouldTerminate: true) }
     }
@@ -1080,6 +1143,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
 
     private func endActiveEpisode(reason: EpisodeState, failure: String?, stopped: Bool) {
         guard generating else { return }
+        if let attempt = pendingSharedAttempt {
+            attempt.terminate(reason: reason, failure: failure)
+            return
+        }
         // Close further reservations/handoffs before signalling cancellation.
         // Unknown server work remains held in the durable ledger.
         do { _ = try pendingEpisode?.finish(reason: reason) }
@@ -1267,6 +1334,39 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         ]
     }
 
+    private func sharedHostSaveFailureChecks(store: MemoryStore) throws -> [String: Bool] {
+        let priorChat = activeChat, priorDraft = promptView.string
+        let destination = store.directory.appendingPathComponent("settings.json")
+        let saved = try Data(contentsOf: destination)
+        var attemptedEpisodeID: String?
+        sharedAttemptObserverForChecks = { attemptedEpisodeID = $0.identifiers.episodeID }
+        defer {
+            sharedAttemptObserverForChecks = nil
+            try? FileManager.default.removeItem(at: destination)
+            try? saved.write(to: destination, options: .atomic)
+            activeChat = priorChat; replaceDraft(priorDraft); restoreActiveConversation()
+        }
+        let chat = try store.createConversation(projectID: projectID, title: "Synthetic host save failure")
+        activeChat = chat
+        let prompt = "Public synthetic accepted request before host save failure."
+        replaceDraft(prompt)
+        try FileManager.default.removeItem(at: destination)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+        sendPrompt()
+        let events = try store.events(conversationID: chat.id)
+        let human = events.first { $0.role == .human }
+        let receipt = try attemptedEpisodeID.map { try store.episodeReceipt(id: $0, clock: SystemEpisodeClock().now()) }
+        return [
+            "gui_shared_host_save_failure_preserves_complete_accepted_request": human?.text == prompt && human?.status == .complete,
+            "gui_shared_host_save_failure_records_empty_failed_assistant": events.count == 2 && events.last?.role == .assistant
+                && events.last?.status == .failed && events.last?.text.isEmpty == true,
+            "gui_shared_host_save_failure_leaves_ui_ready_and_no_pending_attempt": !generating && pendingSharedAttempt == nil
+                && pendingEpisode == nil && memoryHealthy,
+            "gui_shared_host_save_failure_terminalizes_without_provider_work": receipt?.state == .failed
+                && receipt?.charged.modelCalls == 0 && receipt?.charged.httpAttempts == 0
+        ]
+    }
+
     private final class FinalizationClockForChecks: EpisodeClockSource {
         var ticks: UInt64 = 1_000_000
         func now() throws -> EpisodeClockSnapshot {
@@ -1362,6 +1462,82 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
 
     // Exercise the actual controls in an undisplayed window. No system input,
     // clipboard changes, model calls, or conversation text leave this process.
+    func sharedAnswerIntegrationChecks(baseURL: String, completion: @escaping ([String: Bool]) -> Void) {
+        guard let store else { completion(["gui_shared_fixture_store": false]); return }
+        var checks: [String: Bool] = [:]
+        var deliveredCount = 0
+        var firstDeltaDurable = true
+        var stopFenced = false
+        var stopped = false
+        func next(cancel: Bool) {
+            do {
+                let chat = try store.createConversation(projectID: projectID, title: "Public shared GUI fixture")
+                activeChat = chat
+                _ = try store.append(conversationID: chat.id, role: .human, text: "Public historical GUI fixture value.",
+                    status: .complete, turnID: UUID().uuidString, eventID: UUID().uuidString)
+                restoreActiveConversation()
+                endpointField.stringValue = baseURL
+                credentialOrigin = try LocalCredentialStore.origin(for: baseURL)
+                keyField.stringValue = ""
+                servedModelField.stringValue = Qwen38TextAdapter.modelID
+                maximumOutput.selectItem(withTitle: "128")
+                endpointTokenLimit.stringValue = "32768"
+                seedField.stringValue = "42"
+                replaceDraft("Give a concise answer for the public GUI fixture.")
+                sharedAttemptObserverForChecks = { attempt in
+                    checks["gui_shared_\(cancel ? "stop" : "success")_accepted_original_lease"] = attempt.lease.episodeID == attempt.identifiers.episodeID
+                    checks["gui_shared_\(cancel ? "stop" : "success")_human_committed_before_preparation"] = (try? store.events(conversationID: chat.id))?
+                        .contains { $0.id == attempt.identifiers.humanEventID && $0.status == .complete } == true
+                }
+                sharedVisibleObserverForChecks = { [self] in
+                    deliveredCount += 1
+                    if let invocation = try? store.invocation(id: pendingInvocationID) {
+                        firstDeltaDurable = firstDeltaDurable && invocation.observedBytes == pendingResponse.utf8.count
+                            && invocation.chunkCount == deliveredCount
+                    } else { firstDeltaDurable = false }
+                    if cancel && !stopped {
+                        stopped = true
+                        let attempt = pendingSharedAttempt
+                        stopGeneration()
+                        stopFenced = (try? store.episodeReceipt(id: attempt!.identifiers.episodeID,
+                            clock: SystemEpisodeClock().now()).state) == .cancelled
+                    }
+                }
+                sharedCompletionObserverForChecks = { [self] result in
+                    let prefix = "gui_shared_" + (cancel ? "stop" : "success")
+                    checks[prefix + "_committed_delta_precedes_visible_text"] = deliveredCount > 0 && firstDeltaDurable
+                    checks[prefix + "_shared_admission_and_selection_proof"] = result.preparation?.admission.componentProof != nil
+                        && result.preparation?.sourceSelectionWorkID != nil
+                    checks[prefix + "_terminal_capture_and_accounting_healthy"] = result.captureHealthy && result.accountingHealthy
+                    checks[prefix + "_terminal_ui_ready_after_transport_drain"] = !generating && !runner.isRunning && send.isEnabled
+                        && pendingSharedAttempt == nil && pendingEpisode == nil
+                    let assistant = (try? store.events(conversationID: chat.id))?.first { $0.id == result.identifiers.assistantEventID }
+                    checks[prefix + "_durable_text_matches_visible_transcript"] = assistant?.text.isEmpty == false
+                        && responseView.string.contains(assistant!.text) && assistant?.status == result.captureStatus
+                    checks[prefix + "_operational_outcome"] = result.episode?.state == (cancel ? .cancelled : .completed)
+                        && result.captureStatus == (cancel ? .partial : .complete)
+                    if cancel {
+                        checks[prefix + "_stop_fences_original_lease"] = stopFenced
+                        sharedAttemptObserverForChecks = nil; sharedVisibleObserverForChecks = nil
+                        sharedCompletionObserverForChecks = nil
+                        completion(checks)
+                    } else {
+                        deliveredCount = 0; firstDeltaDurable = true
+                        DispatchQueue.main.async { next(cancel: true) }
+                    }
+                }
+                sendPrompt()
+                checks["gui_shared_\(cancel ? "stop" : "success")_ordinary_send_selects_shared_coordinator"] = pendingSharedAttempt != nil
+                    && pendingEpisode === pendingSharedAttempt?.lease && generating
+                if !generating {
+                    checks["gui_shared_fixture_send_refused"] = false
+                    completion(checks)
+                }
+            } catch { checks["gui_shared_fixture_setup"] = false; completion(checks) }
+        }
+        next(cancel: false)
+    }
+
     func uiChecks() -> [String: Bool] {
         let frame = window.frame
         let scroll = responseView.enclosingScrollView!
@@ -1510,6 +1686,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 self.activeChat = activeChat; restoreActiveConversation()
                 checks["conversation_reload_restores_full_history"] = responseView.string.contains(human.text) && responseView.string.contains(partial.text)
                 checks.merge(try coordinatorStopChecks(store: store)) { _, new in new }
+                checks.merge(try sharedHostSaveFailureChecks(store: store)) { _, new in new }
                 checks.merge(try finalizationDeadlineChecks(store: store)) { _, new in new }
                 checks.merge(try nativeCleanupChecks(store: store)) { _, new in new }
                 let cases: [(String, String?, Bool, CaptureStatus)] = [
@@ -1864,6 +2041,30 @@ private enum BonsaiPlayground {
         _ = ReasoningSupervisor.runIfRequested()
         if let code = ChatImportCommand.run(arguments: CommandLine.arguments) { exit(code) }
         if let code = BackupCommand.run(arguments: CommandLine.arguments) { exit(code) }
+        if let code = AnswerEvaluationCommand.run(arguments: CommandLine.arguments) { exit(code) }
+        if CommandLine.arguments.contains("--retrieval-strategy-self-test") {
+            do {
+                let checks = try RetrievalStrategyChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"retrieval_strategy_self_test\":false}"); exit(1) }
+        }
+        for flag in ["--answer-coordinator-integration-test", "--retrieval-strategy-integration-test"] {
+            if let index = CommandLine.arguments.firstIndex(of: flag), index + 1 < CommandLine.arguments.count {
+                let completion: ([String: Bool]) -> Void = { checks in
+                    if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) {
+                        print(String(decoding: data, as: UTF8.self))
+                    }
+                    exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+                }
+                if flag == "--answer-coordinator-integration-test" {
+                    AnswerAttemptCoordinatorChecks.run(baseURL: CommandLine.arguments[index + 1], completion: completion)
+                } else {
+                    RetrievalStrategyChecks.runIntegration(baseURL: CommandLine.arguments[index + 1], completion: completion)
+                }
+                dispatchMain()
+            }
+        }
         if CommandLine.arguments.contains("--background-budget-self-test") {
             do {
                 let checks = try BackgroundIndexBudgetChecks.run()
@@ -1960,6 +2161,25 @@ private enum BonsaiPlayground {
             exit(checks.values.allSatisfy { $0 } ? 0 : 1)
         }
         if CommandLine.arguments.contains("--smoke-test") || CommandLine.arguments.contains("--greeting-test") { SmokeTest.run() }
+        if let index = CommandLine.arguments.firstIndex(of: "--ui-shared-answer-integration-test"), index + 1 < CommandLine.arguments.count {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-ui-shared-" + UUID().uuidString, isDirectory: true)
+            setenv("BOROS_DATA_DIR", directory.path, 1)
+            let app = NSApplication.shared
+            app.setActivationPolicy(.prohibited)
+            let delegate = ApplicationDelegate()
+            app.delegate = delegate
+            delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+            delegate.sharedAnswerIntegrationChecks(baseURL: CommandLine.arguments[index + 1]) { checks in
+                if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) {
+                    print(String(decoding: data, as: UTF8.self))
+                }
+                try? FileManager.default.removeItem(at: directory)
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            }
+            // Launch was invoked explicitly above. Starting NSApplication's
+            // launch sequence again would reopen the already-owned store.
+            withExtendedLifetime(delegate) { RunLoop.main.run() }
+        }
         var testDirectory: URL?
         if CommandLine.arguments.contains("--ui-self-test") {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-ui-" + UUID().uuidString, isDirectory: true)
