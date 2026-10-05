@@ -29,6 +29,9 @@ The native interface preserves the earlier editor, scrolling transcript, streami
 ```sh
 python3 scripts/check.py
 python3 scripts/test_memory.py
+python3 scripts/test_episode.py
+python3 scripts/test_local_read.py
+python3 scripts/test_background_index.py --full-source
 python3 scripts/test_semantic_recovery.py
 python3 scripts/test_backup.py
 python3 scripts/test_evaluation.py
@@ -38,9 +41,9 @@ Use New Chat to start another retained conversation, the chat picker to reopen o
 
 Accepted messages persist before dispatch; received answer chunks commit before display and interrupted attempts recover with an explicit incomplete status. Ordinary Send includes recent history and scoped lexical/semantic archive excerpts, excluding recent sources before candidate limits. Semantic retrieval uses an installed Apple English sentence encoder; unavailable or unsupported inputs retain lexical retrieval. Coverage gaps are recorded and surfaced. Search Memory provides scoped literal/lexical search and exact source pages.
 
-File → Create Backup produces a verified archive of complete sources and invocation journals. File → Restore Backup to New Folder creates a separate restored store. Command-line create/verify/restore is also available; see [backup and restore](docs/BACKUP-RESTORE.md). Credentials and the derived semantic sidecar are excluded; semantic indexing rebuilds when a restored store opens.
+File → Create Backup produces a verified archive of complete sources and durable journals. File → Restore Backup to New Folder creates a separate restored store. Command-line create/verify/restore is also available; see [backup and restore](docs/BACKUP-RESTORE.md). Credentials and the derived semantic sidecar are excluded; semantic indexing rebuilds under the archived background allowance when a restored store opens. File → Background Indexing Status shows maintenance accounting and why indexing has paused.
 
-Current limits include byte-bounded context assembly, synchronous source selection, unimplemented total episode budgets and background-index budgets, and pending policy lifecycle, deletion, summary trees and external actions. Manual literal scans have unknown scan accounting. Whole matching payloads are currently loaded for lexical excerpt selection. The installed semantic encoder's quality and the full hybrid GUI path remain unevaluated. See [project status](docs/STATUS.md) and [implementation status](docs/IMPLEMENTATION.md) for verified boundaries.
+Answering and standalone reads share durable episode allowances and deadlines. Selected-Qwen recent context and evidence have independent token caps. Schema 5 adds global background-index limits across projects, retries and rebuilds, with conservative crash/restore accounting. Scoped lexical selection loads one bounded complete candidate at a time; literal scans use metered pages. Raw-work counters describe logical source work rather than physical disk I/O. Apple/native input tokens remain opaque. Policy lifecycle, deletion, summary trees and external actions remain pending, and installed-encoder quality and hybrid answer quality remain unmeasured. See [project status](docs/STATUS.md) and [implementation status](docs/IMPLEMENTATION.md) for verified boundaries.
 
 ## Local verification
 

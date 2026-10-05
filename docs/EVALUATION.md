@@ -1,10 +1,10 @@
 # Boros evaluation contracts and development evidence
 
-Updated October 4, 2026. This is executable groundwork for the read-only baseline in [the plan](../tracechat-plan.md#13-evaluation-that-decides-the-design). Full Arm B, provider-answer evaluation, production economics, and held-out confirmation remain incomplete.
+Updated October 5, 2026. This is executable groundwork for the read-only baseline in [the plan](../tracechat-plan.md#13-evaluation-that-decides-the-design). Full Arm B, provider-answer evaluation, production economics, and held-out confirmation remain incomplete.
 
 ## Available evaluation
 
-`scripts/evaluate_retrieval.py` compiles a standalone Swift harness against copied store, context, semantic and episode dependencies. It writes public synthetic histories into isolated temporary stores, executes declared retrieval protocols, verifies original byte pages and gold spans, and removes those stores. Each protocol attempt creates a durable schema 4 `localRead` episode with a `syntheticEvaluation` binding and supplies its lease through context selection, search and paging. Attempts create no chat input or invocations. The JSON report contains source IDs, digests, terminal receipts, coverage and timings. It contains no prompts, answers, source text, credentials or private history. It contacts no model server.
+`scripts/evaluate_retrieval.py` compiles a standalone Swift harness against copied store, context, semantic and episode dependencies. It writes public synthetic histories into isolated temporary stores, executes declared retrieval protocols, verifies original byte pages and gold spans, and removes those stores. Each protocol attempt creates a durable schema 5 `localRead` episode with a `syntheticEvaluation` binding and supplies its lease through context selection, search and paging. Attempts create no chat input or invocations. The JSON report contains source IDs, digests, terminal receipts, coverage and timings. It contains no prompts, answers, source text, credentials or private history. It contacts no model server.
 
 Run from the repository root:
 
@@ -137,7 +137,7 @@ The default primary mode is quality-first. A result must satisfy every gate. Inc
 
 Freeze the current initial caps before held-out execution: 1,000,000 input tokens across all model calls including repeated/cached prefixes; 16,000 generated tokens including reported billed reasoning; 12 model calls; 24 memory service calls; 256 MiB raw scan work; and a 120-second deadline. B, D and E share 12,000 raw-evidence tokens and a frozen recent-context cap. Per-request admission still applies. Search planning/reformulation, reranking, reads, zoom, checkpoints and answering consume the same episode. An exceeded cap scores failure. Hidden computation that cannot be counted is reported as unknown.
 
-The application's [episode implementation](EPISODE-BUDGET.md) durably enforces its development limits across GUI/CLI answering, standalone browser reads, synthetic protocol attempts and metered core retrieval. Daily background-index budgets, exact opaque encoder/native token accounting and matched component-token allocations remain explicit configuration work before a new registered comparison. Evaluation ledger adoption establishes the current read contracts; it does not establish registered retrieval quality, model-episode feasibility or economics.
+The application's [episode implementation](EPISODE-BUDGET.md) durably enforces its development limits across GUI/CLI answering, standalone browser reads, synthetic protocol attempts and metered core retrieval. Schema-5 background-index budgets and selected-Qwen recent/evidence allocations are integrated at `b006b6a`. A new registered protocol is required before comparison; Apple/native input-token usage remains opaque and must be reported as unknown. Evaluation ledger adoption establishes the current read contracts; it does not establish registered retrieval quality, model-episode feasibility or economics.
 
 Freeze warm, process-restart/cold-cache and paused-beyond-short-TTL schedules for each adapter. Measure complete memory-path latency, first useful answer and full episode completion in addition to search latency. Provider TTL and provider-answer runs remain pending here.
 
