@@ -12,6 +12,8 @@ python3 scripts/evaluate_imported_chat.py \
 
 The output path must be new; reports are written with mode `0600`. Keep imported stores, probe files, and generated reports outside Git. The runner opens the original store read-only, verifies the import manifest and event digests, copies committed SQLite state into a private temporary directory, and re-ingests only the manifest-listed imported messages into a separate diagnostic store. Later application turns, runtime ledgers, existing vectors, and other conversations are excluded.
 
+For an unattended macOS run, prefix the command with `caffeinate -i` to prevent idle sleep for that process. System sleep counts against the unchanged 120-second continuous-clock episode deadline. A sleep-interrupted attempt remains a failure in its report; a repeat uses a new report path. The tool does not change system power settings or extend episode allowances.
+
 Use `--profile warm` for one process or the default `--profile both` for a warm run followed by a fresh-process restart using the retained diagnostic index. The runner evaluates four protocols: `recent_only`, `lexical_context`, `hybrid_context`, and `raw_pages`.
 
 | Protocol | Measured path |
@@ -50,7 +52,7 @@ Private probes use this JSON shape:
 
 `message` is a zero-based imported-message ordinal. `offset` and `bytes` are UTF-8 byte positions and lengths. `prompt` is limited to 16,384 UTF-8 bytes. `query` defaults to `prompt` and is limited to 1,024 bytes; supply it explicitly for a longer prompt. `literal` is optional. `query` and `literal` affect only `raw_pages`; context protocols derive terms from the complete prompt. Gold spans are validated against the imported event bytes before execution. A result is covered only when returned ranges from the expected event recover every required byte and SHA-256. Prompt text, a coincidental copy in another message, and prompt echoes do not count as evidence. Empty `gold` marks an expected-absence probe. Files allow 1–200 probes and up to 16 gold spans each.
 
-Per-span `goldDiagnostics` are computed after the read episode finishes. They record the imported-message ordinal, expected byte range, delivered ranges, coverage, and a failure stage. Raw page attempts also record the expected source's candidate rank. These diagnostics never supply gold offsets to retrieval, change the query, or direct page reads. Query text and source text remain absent from reports.
+Per-span `goldDiagnostics` are computed after the read episode finishes. They record the imported-message ordinal, expected byte range, delivered ranges, coverage, and a failure stage. For raw page attempts, `searchCandidateRank` is the first matching hit window's position in the combined candidate list; distinct windows from one source can occupy multiple positions. These diagnostics never supply gold offsets to retrieval, change the query, or direct page reads. Query text and source text remain absent from reports.
 
 ## Semantic and accounting limits
 
@@ -60,7 +62,7 @@ The chunk flag bounds requested worker capacity; published records and failed at
 
 `semanticReportedHoleReasons` counts only the holes included in the bounded manifest. When `holesTruncated` is true, these counts are a subset of unsupported ranges and must not be treated as corpus totals.
 
-Context preparation uses byte bounds of 65,536 serialized context bytes, 24,000 recent bytes, and 12,000 evidence bytes. The runner does not perform staged Qwen token counting, provider admission, or answer generation. Results are unregistered diagnostics and must not be presented as official benchmark or model-quality evidence. No measurements are asserted here; inspect the generated report and its coverage fields for the actual run.
+Context preparation uses byte bounds of 65,536 serialized context bytes, 24,000 recent bytes, and 12,000 evidence bytes. The runner does not perform staged Qwen token counting, provider admission, or answer generation. Results are unregistered diagnostics and must not be presented as official benchmark or model-quality evidence. Inspect the generated report and its coverage fields for the actual run.
 
 The harness copies and hashes its source dependencies before compilation and uses the application's `-O -swift-version 5 -parse-as-library` settings. Reports identify the captured code, including uncommitted edits. Fixed protocol order warms later attempts; a process restart does not clear the operating system's disk cache. Whole-store verification runs before and after the probes. Gold scoring and returned-range verification occur after read-episode terminalization; recent-message delivery checks add diagnostic work inside the selection timer. These timers do not establish product latency. Original import IDs, roles, statuses, turn IDs and text are retained; diagnostic store timestamps record reingestion and cannot establish original chronology.
 
@@ -103,3 +105,20 @@ The byte intervals above are half-open UTF-8 ranges. Metadata-only inspection of
 Production metered and unmetered lexical retrieval now share a bounded excerpt selector. It considers the first occurrence of each distinct term, selects the 560-character window with the most complete term matches, breaks ties by matched bytes and earliest start, and caps the exact UTF-8 excerpt at 4,096 bytes. Literal search retains its first exact match. Metered lexical reads reserve `source_bytes × (3 + 3 × query_term_count)` before loading: materialization, digest, per-term search/window walks, and final excerpt materialization. The higher conservative charge can reach a resource frontier earlier; it never renews the episode allowance. The semantic ranking fingerprint includes the new excerpt contract; embeddings and support guards are unchanged.
 
 The selector inspects first occurrences rather than every repeated occurrence. Candidate, evidence, page and semantic coverage limits remain. Correcting these omissions does not establish general developer-chat recall or model answer quality.
+
+### Verification after the corrections
+
+The intended changes were applied to a tracked-source verification snapshot, excluding the unrelated working-tree answering changes. Its rebuilt application passed 1,700 integrated checks and strict deep signature verification. The imported-chat suite passed 10 tests, including dense-term excerpt recovery, a 13th-ranked candidate receiving a page under the original allowance, distinct lexical/literal windows in one source, and warm/restart coverage. The memory suite's five additional checks cover term ordering, exact Unicode ranges, literal first-match preservation, and a real UTF-8 cap boundary. Accounting fixtures retain their allowances and now assert the increased conservative source charges.
+
+The final repeat used `caffeinate -i` for the duration of the offline command. Its private report is `.build/evaluation/beam-retrieval-fixes-awake-20261005.json`. Import provenance and the exact 12 answerable probes plus one absence probe match the original optimized run; no questions or gold spans changed. All captured source hashes match the evaluated working-tree dependencies. All 104 local-read attempts completed, verified originals before and after each profile, stayed within their frozen resource caps, and recorded zero HTTP attempts. The raw page protocol stayed within 12,000 returned bytes and 19 page calls; its absence probe returned no hits.
+
+| Protocol | Original warm/restart | Corrected warm | Corrected restart |
+|---|---|---|---|
+| Recent-only context | 1/12 | 1/12 | 1/12 |
+| Lexical context | 8/12 | 12/12 | 12/12 |
+| Hybrid context | 8/12 | 12/12 | 12/12 |
+| Exact source pages | 10/12 | 12/12 | 12/12 |
+
+The retained `.build/evaluation/beam-retrieval-fixes-20261005.json` run encountered host sleep during warm hybrid probe 7. That attempt recorded 136.9 seconds on the continuous clock and 5.5 seconds on the execution timer, exhausted the unchanged 120-second deadline, and remains a failure in its denominator: warm hybrid scored 11/12. Its restart profile recovered 12/12 on all archive paths. The controlled repeat above is a separate report; the interrupted measurement was not replaced or discarded.
+
+Semantic coverage remains 51 complete and 745 unsupported sources, with 118 supported and 2,117 unsupported chunks. Among the first 128 reported holes, 117 are `codeLike`, 10 `ambiguousLanguage`, and one `nonEnglish`; the report truncates the remaining holes. The hybrid improvement follows corrected lexical excerpts. These reused development probes establish recovery of the six traced omissions under these bounds, with no claim about independent question recall, provider-token feasibility, answer quality, or product latency.
