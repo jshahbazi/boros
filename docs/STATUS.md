@@ -1,8 +1,8 @@
 # Boros project status
 
-Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Verified implementation checkpoint: `1f8e0a6`, pushed to GitHub. The preceding implementation checkpoint is `22c3402`. The complete [plan](../tracechat-plan.md) remains in progress.
+Updated October 4, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`. Verified implementation checkpoint: `1f8e0a6`, pushed to GitHub; the subsequent pushed documentation checkpoint is `beee510`. The preceding implementation checkpoint is `22c3402`. The complete [plan](../tracechat-plan.md) remains in progress. The component-token wave described below is uncommitted and has not passed combined application verification.
 
-The native prototype now combines durable text capture, exact selected-provider admission, hybrid source retrieval, shared answering/read accounting and verified backup/restore. The current whole-app integration passed **1,016 checks**. These checks establish the tested contracts. Installed hybrid answer quality, production latency and comparative economics remain unmeasured. No completion percentages or delivery dates are assigned.
+The native prototype now combines durable text capture, exact selected-provider admission, hybrid source retrieval, shared answering/read accounting and verified backup/restore. The last pushed implementation passed **1,016 whole-app checks**. These checks establish the tested contracts. Installed hybrid answer quality, production latency and comparative economics remain unmeasured. No completion percentages or delivery dates are assigned.
 
 ## Work status
 
@@ -17,8 +17,8 @@ The native prototype now combines durable text capture, exact selected-provider 
 | Standalone read episodes | Implemented and verified | Schema-4 chat/read origins; immutable scope and descriptor; indexed initiation replay; shared allowance, continuous deadline and recovery | Future read CLI/MCP adapters need explicit ownership and disclosure contracts |
 | Source-browser accounting | Implemented and verified | Search plus initial page share a lease; explicit paging is bounded; worker queue, Stop/supersession/close/deadline fences and incomplete results | Visual verification; explicit continuation UX only after its compatibility contract |
 | Evaluation accounting | Implemented; contracts verified | Isolated read episode per fixture/protocol; authoritative charges/holds/time/outcome; capped attempts retained in denominators; structured coverage | New registered development amendment after component-budget freeze |
-| Context assembly | Partial; provider admission verified | Complete mandatory request, bounded recent/evidence context, exact Qwen whole-prompt counts and immutable request bytes | [Exact recent/evidence token allocations](CONTEXT-COMPONENTS.md), more verified adapters |
-| Episode accounting | Answering and foreground reads verified | Durable reservations/receipts, shared deadline, unknown outcomes retained, migration and kill/reopen checks | Daily background-index budgets; opaque Apple/native token usage remains explicit |
+| Context assembly | Component-token wave awaiting integration | Pushed baseline preserves mandatory content and verifies exact Qwen whole-prompt admission; working tree adds staged selection, individual counts, reductions and proofs | Combined GUI/CLI and journal verification for [recent/evidence token allocations](CONTEXT-COMPONENTS.md); more verified adapters |
+| Episode accounting | Answering and foreground reads verified | Durable reservations/receipts, shared deadline, unknown outcomes retained, migration and kill/reopen checks | [Daily background-index ledger](BACKGROUND-INDEX-BUDGET.md) implementation; opaque Apple/native token usage remains explicit |
 | Semantic retrieval | Core protocol verified | Installed Apple English encoder; sealed sources, durable jobs, coverage holes, frozen continuations and manifests | Whole-corpus coverage, installed-encoder quality and daily budget |
 | Backup and restore | Schema-4 compatibility verified | Explicit schema 1–4 recognition; chat/read inventories, no-clobber restore, exact-byte identity and unknown-bound preservation | Deletion-aware restore, retention/purge and polished restored-store opening |
 | Service, MCP and imports | Deferred | Single-process native app owns the store | Multi-client service when justified, read-only MCP interface and authenticated imports |
@@ -30,6 +30,17 @@ The native prototype now combines durable text capture, exact selected-provider 
 | Local release | Development build only | Buildable app with verified ad hoc signature | Release gates, packaging, diagnostics, recovery validation and user documentation |
 
 ## Parallel implementation assignments
+
+The next wave is in progress in the working tree. The verified checkpoint above remains the standalone-read source pin until this wave passes integration and review.
+
+| Owner | Surface | State and evidence |
+|---|---|---|
+| Context agent | Attributed recent/evidence preparation, geometric reductions and exact-byte source exclusions | Production files frozen; 49 component checks passed, with two additional checks awaiting integration; 77 local-read, 108 memory and six semantic recovery checks passed. End-to-end coordinator fixtures in progress |
+| Provider agent | Verified counting session, attributed renderer, immutable count proof and continuous-clock freshness | Production files frozen; copied snapshot passed 58 pure and 232 HTTP checks. Final combined app verification pending |
+| Coordinating agent | Frozen component policy, GUI/CLI handoff and durable proof validation | Integration in progress; whole-app build, proof/archive regressions, live smoke and independent integration review remain |
+| Unassigned implementation | Daily background-index ledger | Contract recorded; schema migration, worker adoption, recovery and archive verification not implemented |
+
+These targeted results are agent-reported for the specified surfaces. They do not replace a passing combined build or the pushed implementation checkpoint. The context review reproduced Unicode source-ID collapse that could hide older evidence behind recent candidates; the staged fix preserves exact UTF-8 identities through selection, metering and semantic replay.
 
 The standalone-read wave is integrated. Source owners are frozen after verification; no implementation assignment below remains active.
 
@@ -65,15 +76,15 @@ The live smoke establishes dispatch and history forwarding only. The historical 
 
 ## Next checkpoint
 
-The next implementation work is exact recent/evidence token allocation and durable daily background-index budgets. These can proceed in parallel against separate contracts. Freeze a new development measurement amendment only after those implementations and their shared baseline stabilize. Apple encoder input tokens remain opaque; development mode records the uncertainty and strict known-input mode skips the encoder.
+Finish the component-token integration first. Its source owners are frozen so the coordinator can validate the combined application and durable proofs. The daily background-index ledger follows that checkpoint; its read-only contract work is already recorded. Freeze a new development measurement amendment only after both implementations and their shared baseline stabilize. Apple encoder input tokens remain opaque; development mode records the uncertainty and strict known-input mode skips the encoder.
 
-| Next work | Status | Completion evidence |
-|---|---|---|
-| Exact recent/evidence token allocations | Contract recorded; implementation pending | Attributed selected-model component counts and final request snapshots agree; mandatory content remains intact |
-| Background indexing budgets | Not started | Durable daily limits, preflight, unknown outcomes and recovery verified |
-| Hybrid answering quality and economics | Unmeasured | Frozen development protocol, representative workloads, answerer and comparative results before held-out confirmation |
-| External continuation compatibility | Partial internal contract | Explicit ranking/scanner identities and resume policy before client ingestion |
-| Final GUI visual recheck | Pending Mac unlock | Inspect rebuilt app using isolated synthetic data |
+| Priority | Next work | Status | Required completion evidence |
+|---|---|---|---|
+| 1 | Exact recent/evidence token allocations | Components frozen; root integration and coordinator fixtures in progress | Combined app, GUI/CLI dispatch, durable proof/archive validation, independent review and live smoke pass; mandatory request and output reserve remain intact |
+| 2 | Background indexing budgets | [Contract recorded](BACKGROUND-INDEX-BUDGET.md); implementation pending | Durable global daily limits, preflight, unknown outcomes, migration, backup/restore and crash recovery verified |
+| 3 | Hybrid answering quality and economics | Unmeasured | Frozen development protocol, representative workloads, answerer and comparative results before held-out confirmation |
+| Before external clients | External continuation compatibility | Partial internal contract | Explicit ranking/scanner identities and resume policy before client ingestion |
+| Before release | Final GUI visual recheck | Pending Mac unlock | Inspect rebuilt app using isolated synthetic data |
 
 ## Plan phases
 
