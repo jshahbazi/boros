@@ -41,9 +41,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private let endpointField = NSTextField(string: "http://localhost:11234/v1/")
     private let servedModelField = NSTextField(string: "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
     private let keyField = NSSecureTextField(string: "")
+    private let endpointTokenLimit = NSTextField(string: "32768")
     private let memoryButton = NSButton(title: "Search Memory", target: nil, action: nil)
     private var credentialOrigin: String?
     private var store: MemoryStore?
+    private var semanticIndex: SemanticIndex?
+    private var archiveOperationInProgress = false
     private var storedChats: [StoredConversation] = []
     private var activeChat: StoredConversation?
     private var memoryBrowser: MemoryBrowser?
@@ -52,6 +55,17 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var pendingTurnID = ""
     private var pendingHumanID = ""
     private var pendingAssistantID = ""
+    private var pendingInvocationID = ""
+    private var pendingChunkSequence = 0
+    private var pendingCaptureFailure = false
+    private var pendingInvocationStarted = false
+    private var pendingRequestBody: Data?
+    private var pendingProviderIdentity = ""
+    private var pendingAdmission: ProviderAdmissionOperation?
+    private var pendingContextSnapshot: ContextSnapshot?
+    private var pendingAdmissionAccounting: [ProviderAdmissionAccounting] = []
+    private var pendingAdmissionReceipt: EndpointAdmissionReceipt?
+    private var pendingNativeConfiguration: Data?
     private var restoringDraft = false
     private var draftValidationFailed = false
     private var memoryHealthy = false
@@ -225,7 +239,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         configureTokenControls(for: selectedProfile)
         context.target = self; context.action = #selector(contextBudgetChanged)
         maximumOutput.target = self; maximumOutput.action = #selector(responseBudgetChanged)
-        context.toolTip = "GGUF runtime token capacity. API context uses a conservative 64 KiB serialized-byte cap; exact model token admission is not implemented yet."
+        context.toolTip = "GGUF runtime token capacity. The local API has a separate verified token budget below."
         maximumOutput.toolTip = "Maximum generated tokens, including thinking and the final answer."
         runtimeField.toolTip = "Choose llama-completion. The other models also require the sibling llama-server executable in this directory."
         thinking.target = self; thinking.action = #selector(thinkingChanged)
@@ -267,6 +281,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         servedModelField.delegate = self
         endpointField.stringValue = preferences.endpointURL
         servedModelField.stringValue = preferences.endpointModel
+        endpointTokenLimit.stringValue = String(preferences.endpointTokenBudget ?? 32768)
         endpointField.placeholderString = "http://localhost:11234/v1/"
         servedModelField.placeholderString = "Served model ID from /v1/models"
         keyField.placeholderString = "Optional API key · stored in macOS Keychain"
@@ -274,12 +289,14 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let endpointRow = row([label("API address"), endpointField])
         let servedRow = row([label("Served model"), servedModelField])
         let keyRow = row([label("API key"), keyField, saveEndpoint])
-        for item in [endpointRow, servedRow, keyRow] {
+        endpointTokenLimit.toolTip = "Maximum total prompt and response tokens. Admission also respects the server's current safe capacity and reserves a safety margin."
+        let tokenRow = row([label("API token budget"), endpointTokenLimit])
+        for item in [endpointRow, servedRow, keyRow, tokenRow] {
             panel.addArrangedSubview(item)
             item.widthAnchor.constraint(equalTo: panel.widthAnchor).isActive = true
         }
         for field in [endpointField, servedModelField, keyField] { field.setContentHuggingPriority(.defaultLow, for: .horizontal) }
-        settingsControls += [endpointField, servedModelField, keyField, saveEndpoint]
+        settingsControls += [endpointField, servedModelField, keyField, endpointTokenLimit, saveEndpoint]
         if !CommandLine.arguments.contains("--ui-self-test") { reloadCredential() }
         else { credentialOrigin = try? LocalCredentialStore.origin(for: endpointField.stringValue) }
         modelField.stringValue = selectedProfile.defaultModelPath
@@ -429,6 +446,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         do {
             let memory = try MemoryStore(directory: dataDirectory)
             store = memory
+            semanticIndex = try? SemanticIndex(store: memory)
+            if !CommandLine.arguments.contains("--ui-self-test") { semanticIndex?.schedule(projectID: projectID) }
             preferences = LocalSettings.load(in: memory.directory)
             selectedProfile = ModelProfile(rawValue: preferences.profile) ?? .customLocal
             storedChats = try memory.listConversations(projectID: projectID)
@@ -489,6 +508,63 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         memoryBrowser?.show()
     }
 
+    @objc private func createBackup() {
+        guard let store, memoryHealthy, !archiveOperationInProgress else { return }
+        persistDraft()
+        guard memoryHealthy else { return }
+        let panel = NSSavePanel()
+        panel.title = "Create Boros Backup"
+        panel.nameFieldStringValue = "Boros-" + String(Int(Date().timeIntervalSince1970)) + ".borosbackup"
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let destination = panel.url else { return }
+            self.runArchiveOperation(success: "Backup created and verified.") {
+                _ = try BackupArchive.create(from: store, at: destination)
+            }
+        }
+    }
+
+    @objc private func restoreBackup() {
+        guard memoryHealthy, !archiveOperationInProgress else { return }
+        let source = NSOpenPanel()
+        source.title = "Choose Boros Backup"
+        source.canChooseFiles = false; source.canChooseDirectories = true
+        source.allowsMultipleSelection = false; source.treatsFilePackagesAsDirectories = true
+        source.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let archive = source.url else { return }
+            let destination = NSSavePanel()
+            destination.title = "Restore Backup to a New Folder"
+            destination.nameFieldStringValue = "Boros-Restored-" + String(Int(Date().timeIntervalSince1970))
+            destination.canCreateDirectories = true
+            destination.beginSheetModal(for: self.window) { [weak self] response in
+                guard let self, response == .OK, let folder = destination.url else { return }
+                self.runArchiveOperation(success: "Restored a separate archive copy in the selected folder.") {
+                    _ = try BackupArchive.restore(from: archive, to: folder, authority: .unmanagedNoDeletion)
+                }
+            }
+        }
+    }
+
+    private func runArchiveOperation(success: String, operation: @escaping () throws -> Void) {
+        guard !archiveOperationInProgress else { return }
+        archiveOperationInProgress = true
+        status.stringValue = "Verifying archive operation…"
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let message: String
+            do { try operation(); message = success }
+            catch BackupError.publicationDurabilityUnknown {
+                message = "The verified folder was published; directory sync failed and its durability is unknown."
+            } catch {
+                message = "Archive operation failed. Use a new folder in an existing local directory and check archive integrity."
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.archiveOperationInProgress = false
+                self.status.stringValue = message
+            }
+        }
+    }
+
     private func persistDraft() {
         guard !restoringDraft, let store, let activeChat, promptView != nil else { return }
         do {
@@ -537,6 +613,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             if !CommandLine.arguments.contains("--ui-self-test") { try LocalCredentialStore.write(keyField.stringValue, for: endpointField.stringValue) }
             preferences.endpointURL = endpointField.stringValue
             preferences.endpointModel = servedModelField.stringValue
+            guard let budget = Int(endpointTokenLimit.stringValue), budget > 0, budget <= 262144 else {
+                status.stringValue = "API token budget must be an integer between 1 and 262144."; return
+            }
+            preferences.endpointTokenBudget = budget
             savePreferences()
             if memoryHealthy { status.stringValue = "API settings saved. Credentials use macOS Keychain." }
         } catch { status.stringValue = "API settings could not be saved. Use a loopback HTTP address and an available Keychain." }
@@ -585,32 +665,65 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             }
             guard !settings.endpointModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status.stringValue = "Enter the served model ID in Settings."; return }
             settings.endpointAPIKey = keyField.stringValue
+            guard let cap = Int(endpointTokenLimit.stringValue), cap > 0, cap <= 262144 else {
+                status.stringValue = "API token budget must be an integer between 1 and 262144."; return
+            }
+            settings.endpointContextLimit = cap
         }
         let turnID = UUID().uuidString
         let humanID = UUID().uuidString
+        let assistantID = UUID().uuidString
+        let invocationID = UUID().uuidString
+        var requestBody: Data?
+        var providerIdentity = ""
         do {
             // Capture the full human message before preparing or dispatching any model request.
             _ = try store.append(conversationID: activeChat.id, role: .human, text: prompt, status: .complete, turnID: turnID, eventID: humanID)
+            if !CommandLine.arguments.contains("--ui-self-test") { semanticIndex?.schedule(projectID: projectID) }
             let snapshot = try ChatContextPreparation.prepare(store: store, conversationID: activeChat.id, projectID: projectID,
-                                                             prompt: prompt, system: settings.system, excludingEventID: humanID)
+                prompt: prompt, system: settings.system, excludingEventID: humanID, semanticIndex: semanticIndex)
             settings.messagesOverride = snapshot.messages.map { ["role": $0.role, "content": $0.content] }
             if CommandLine.arguments.contains("--ui-self-test"), let observe = preparedSendObserverForChecks {
                 observe(snapshot)
                 return
             }
+            pendingContextSnapshot = snapshot
+            let body: Data
+            if selectedProfile == .customLocal {
+                body = try EndpointRequest.build(prompt: prompt, settings: settings, conversation: conversation)
+                settings.preparedEndpointBody = body
+                guard let url = LocalEndpoint.chatURL(settings.endpointURL) else { throw MemoryError.invalid("local endpoint") }
+                providerIdentity = url.absoluteString
+            } else {
+                body = selectedProfile == .bonsai
+                    ? try NativeRequest.completionEvidence(prompt: prompt, settings: settings, conversation: conversation)
+                    : try NativeRequest.reasoningBody(prompt: prompt, settings: settings, conversation: conversation)
+                if selectedProfile != .bonsai { settings.preparedNativeBody = body }
+                pendingNativeConfiguration = try NativeRequest.configuration(settings: settings)
+                providerIdentity = "native:" + selectedProfile.rawValue
+            }
+            requestBody = body
             try store.saveDraft(conversationID: activeChat.id, text: "")
             if selectedProfile == .customLocal {
                 preferences.endpointURL = settings.endpointURL
                 preferences.endpointModel = settings.endpointModel
+                preferences.endpointTokenBudget = settings.endpointContextLimit
             }
             preferences.profile = selectedProfile.rawValue
             try preferences.save(in: store.directory)
         } catch {
+            // A captured invocation that failed before dispatch is terminal too.
+            if (try? store.invocation(id: invocationID)) != nil {
+                _ = try? store.finalizeInvocation(invocationID: invocationID, status: .failed, reason: .captureFailure)
+            }
             restoreActiveConversation()
             status.stringValue = "The message was not dispatched because memory capture or context preparation failed. Check its size and local store."
             return
         }
-        pendingTurnID = turnID; pendingHumanID = humanID; pendingAssistantID = UUID().uuidString
+        pendingTurnID = turnID; pendingHumanID = humanID; pendingAssistantID = assistantID
+        pendingInvocationID = invocationID; pendingChunkSequence = 0; pendingCaptureFailure = false
+        pendingInvocationStarted = false; pendingRequestBody = requestBody; pendingProviderIdentity = providerIdentity
+        pendingAdmissionAccounting = []; pendingAdmissionReceipt = nil
         pendingPrompt = prompt
         pendingResponse = ""
         appendTranscript("You", body: prompt)
@@ -618,43 +731,142 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         replaceDraft("")
         setGenerating(true)
         started = Date()
-        status.stringValue = "Starting…"
+        status.stringValue = selectedProfile == .customLocal ? "Checking the model's token budget…" : "Starting…"
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.status.stringValue = String(format: "Generating · %.1f s", Date().timeIntervalSince(self.started))
-        }
-        runner.start(prompt: prompt, settings: settings, conversation: conversation, onText: { [weak self] text in
-            guard let self = self else { return }
-            let scroll = self.responseView.enclosingScrollView!
-            let atBottom = scroll.contentView.bounds.maxY >= self.responseView.bounds.maxY - 24
-            self.pendingResponse += text
-            self.responseView.textStorage?.append(NSAttributedString(string: text, attributes: self.bodyAttributes))
-            if atBottom {
-                self.responseView.scrollRangeToVisible(NSRange(location: self.responseView.string.utf16.count, length: 0))
+            if !self.pendingCaptureFailure {
+                self.status.stringValue = String(format: "%@ · %.1f s", self.pendingInvocationStarted ? "Generating" : "Checking token budget", Date().timeIntervalSince(self.started))
             }
+        }
+        if selectedProfile == .customLocal, let body = requestBody {
+            prepareEndpointAdmission(prompt: prompt, settings: settings, body: body)
+        } else { dispatchPreparedGeneration(prompt: prompt, settings: settings) }
+    }
+
+    private func prepareEndpointAdmission(prompt: String, settings: GenerationSettings, body: Data) {
+        let invocationID = pendingInvocationID
+        pendingAdmission = ProviderAdmission.prepare(requestBody: body, address: settings.endpointURL,
+            apiKey: settings.endpointAPIKey, contextLimit: settings.endpointContextLimit, safetyTokens: settings.endpointSafetyTokens) { [weak self] outcome in
+            DispatchQueue.main.async {
+                guard let self, self.generating, self.pendingInvocationID == invocationID else { return }
+                if let operation = self.pendingAdmission { self.pendingAdmissionAccounting.append(operation.accounting) }
+                self.pendingAdmission = nil
+                switch outcome {
+                case .success(let receipt):
+                    var admittedSettings = settings
+                    admittedSettings.endpointAdmission = receipt
+                    self.pendingAdmissionReceipt = receipt
+                    self.dispatchPreparedGeneration(prompt: prompt, settings: admittedSettings)
+                case .failure(let error):
+                    if error.failureCode == "context_full", let snapshot = self.pendingContextSnapshot,
+                       let reduced = try? snapshot.reducedForTokenAdmission() {
+                        var reducedSettings = settings
+                        reducedSettings.messagesOverride = reduced.messages.map { ["role": $0.role, "content": $0.content] }
+                        if let reducedBody = try? EndpointRequest.build(prompt: prompt, settings: reducedSettings, conversation: self.conversation) {
+                            reducedSettings.preparedEndpointBody = reducedBody
+                            self.pendingContextSnapshot = reduced
+                            self.pendingRequestBody = reducedBody
+                            self.prepareEndpointAdmission(prompt: prompt, settings: reducedSettings, body: reducedBody)
+                            return
+                        }
+                    }
+                    self.completeGeneration(GenerationResult(elapsed: Date().timeIntervalSince(self.started), tokensPerSecond: nil,
+                        failure: error.failureCode, stopped: false))
+                }
+            }
+        }
+    }
+
+    private func dispatchPreparedGeneration(prompt: String, settings: GenerationSettings) {
+        guard generating, let store, let activeChat, let body = pendingRequestBody, !pendingInvocationStarted else { return }
+        do {
+            let admission = try admissionAudit()
+            _ = try store.beginInvocation(invocationID: pendingInvocationID, conversationID: activeChat.id, turnID: pendingTurnID,
+                humanEventID: pendingHumanID, assistantEventID: pendingAssistantID, providerIdentity: pendingProviderIdentity,
+                requestBody: body, admissionJSON: admission)
+            pendingInvocationStarted = true
+        } catch {
+            pendingCaptureFailure = true
+            completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: "capture_failure", stopped: false))
+            return
+        }
+        let invocationID = pendingInvocationID
+        runner.start(prompt: prompt, settings: settings, conversation: conversation, onText: { [weak self] text in
+            guard let self, self.pendingInvocationID == invocationID else { return }
+            self.receiveGenerationText(text)
         }, onComplete: { [weak self] result in
-            self?.completeGeneration(result)
+            guard let self, self.pendingInvocationID == invocationID else { return }
+            self.completeGeneration(result)
         })
+    }
+
+    private struct AdmissionAudit: Codable {
+        let version: Int
+        let receipt: EndpointAdmissionReceipt?
+        let attempts: [ProviderAdmissionAccounting]
+        let nativeConfiguration: Data?
+        let context: Data?
+    }
+
+    private func admissionAudit() throws -> Data? {
+        return try JSONEncoder().encode(AdmissionAudit(version: 2, receipt: pendingAdmissionReceipt,
+            attempts: pendingAdmissionAccounting, nativeConfiguration: pendingNativeConfiguration,
+            context: try pendingContextSnapshot?.deliveryAudit()))
+    }
+
+    private func receiveGenerationText(_ text: String) {
+        guard generating, !pendingInvocationID.isEmpty, !pendingCaptureFailure, !text.isEmpty, let store else { return }
+        do {
+            // A visible delta is acknowledged only after its durable journal
+            // commit. Failed capture cannot leave unsaved text in the transcript.
+            _ = try store.appendInvocationChunk(invocationID: pendingInvocationID, sequence: pendingChunkSequence, text: text)
+            pendingChunkSequence += 1
+        } catch {
+            pendingCaptureFailure = true
+            status.stringValue = "Response capture failed. Stopping; committed output will be recovered on restart."
+            runner.cancel()
+            return
+        }
+        let scroll = responseView.enclosingScrollView!
+        let atBottom = scroll.contentView.bounds.maxY >= responseView.bounds.maxY - 24
+        pendingResponse += text
+        responseView.textStorage?.append(NSAttributedString(string: text, attributes: bodyAttributes))
+        if atBottom { responseView.scrollRangeToVisible(NSRange(location: responseView.string.utf16.count, length: 0)) }
     }
 
     private func completeGeneration(_ result: GenerationResult) {
         guard !pendingAssistantID.isEmpty else { return }
         timer?.invalidate(); timer = nil
         let hasAnswer = !selectedProfile.finalAnswer(pendingResponse).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let captureStatus: CaptureStatus = result.stopped ? (pendingResponse.isEmpty ? .cancelled : .partial)
-            : result.failure != nil ? (pendingResponse.isEmpty ? .failed : .partial) : .complete
-        if let store, let activeChat, !pendingAssistantID.isEmpty {
+        let captureStatus: CaptureStatus = pendingCaptureFailure ? (pendingResponse.isEmpty ? .failed : .partial)
+            : result.stopped ? (pendingResponse.isEmpty ? .cancelled : .partial)
+            : result.failure != nil || pendingResponse.isEmpty ? (pendingResponse.isEmpty ? .failed : .partial) : .complete
+        let reason: InvocationTerminalReason = pendingCaptureFailure ? .captureFailure
+            : result.stopped ? .cancelled : result.failure == "incomplete_result" ? .upstreamIncomplete
+            : !pendingInvocationStarted && result.failure != nil ? .admissionFailure
+            : captureStatus == .complete ? .completed : .transportFailure
+        if let store, !pendingInvocationID.isEmpty {
             do {
-                _ = try store.append(conversationID: activeChat.id, role: .assistant, text: pendingResponse, status: captureStatus,
-                                     turnID: pendingTurnID, eventID: pendingAssistantID)
+                if !pendingInvocationStarted, let activeChat, let body = pendingRequestBody {
+                    _ = try store.beginInvocation(invocationID: pendingInvocationID, conversationID: activeChat.id, turnID: pendingTurnID,
+                        humanEventID: pendingHumanID, assistantEventID: pendingAssistantID, providerIdentity: pendingProviderIdentity, requestBody: body,
+                        admissionJSON: try admissionAudit())
+                    pendingInvocationStarted = true
+                }
+                let usage = try result.providerUsage.map { try JSONEncoder().encode($0) }
+                _ = try store.finalizeInvocation(invocationID: pendingInvocationID, status: captureStatus, reason: reason, usageJSON: usage)
+                if !CommandLine.arguments.contains("--ui-self-test") { semanticIndex?.schedule(projectID: projectID) }
             } catch {
                 memoryHealthy = false
-                status.stringValue = "Assistant capture failed. Its visible output has not been saved; copy it before closing Boros."
+                status.stringValue = "Response finalization failed. Restart Boros to recover its committed output."
             }
         }
         setGenerating(false)
-        if memoryHealthy { status.stringValue = result.message + " Captured as " + captureStatus.rawValue + "." }
-        if (result.failure == nil || result.stopped) && hasAnswer && !pendingResponse.isEmpty {
+        if memoryHealthy {
+            status.stringValue = (pendingCaptureFailure ? "Response capture failed." : result.message) + " Captured as " + captureStatus.rawValue + "."
+                + (pendingContextSnapshot?.retrievalNotice.map { " " + $0 } ?? "")
+        }
+        if !pendingCaptureFailure && (result.failure == nil || result.stopped) && hasAnswer && !pendingResponse.isEmpty {
             conversation.append(user: pendingPrompt, assistant: pendingResponse)
         } else { replaceDraft(pendingPrompt) }
         persistDraft()
@@ -663,6 +875,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         }
         responseView.textStorage?.append(NSAttributedString(string: "\n\n", attributes: bodyAttributes))
         pendingPrompt = ""; pendingResponse = ""; pendingTurnID = ""; pendingHumanID = ""; pendingAssistantID = ""
+        pendingInvocationID = ""; pendingChunkSequence = 0; pendingCaptureFailure = false
+        pendingInvocationStarted = false; pendingRequestBody = nil; pendingProviderIdentity = ""
+        pendingAdmission = nil
+        pendingContextSnapshot = nil
+        pendingAdmissionAccounting = []; pendingAdmissionReceipt = nil
+        pendingNativeConfiguration = nil
         window.makeFirstResponder(promptView)
         if quitting { NSApplication.shared.reply(toApplicationShouldTerminate: true) }
     }
@@ -681,7 +899,14 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     }
 
     @objc private func stopGeneration() {
-        if generating { status.stringValue = "Stopping…"; runner.cancel() }
+        if generating {
+            status.stringValue = "Stopping…"
+            if let admission = pendingAdmission {
+                pendingAdmission = nil; admission.cancel()
+                pendingAdmissionAccounting.append(admission.accounting)
+                completeGeneration(GenerationResult(elapsed: Date().timeIntervalSince(started), tokensPerSecond: nil, failure: nil, stopped: true))
+            } else { runner.cancel() }
+        }
     }
 
     @objc private func clearPrompt() {
@@ -723,6 +948,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     @objc private func redoEdit(_ sender: Any?) { activeUndoManager?.redo() }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(createBackup) || menuItem.action == #selector(restoreBackup) {
+            return memoryHealthy && !archiveOperationInProgress
+        }
         if menuItem.action == #selector(undoEdit(_:)) { return !generating && activeUndoManager?.canUndo == true }
         if menuItem.action == #selector(redoEdit(_:)) { return !generating && activeUndoManager?.canRedo == true }
         return true
@@ -809,12 +1037,23 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let scrollHeight = scroll.bounds.height
         var checks: [String: Bool] = [:]
         promptView.insertText("synthetic draft", replacementRange: NSRange(location: 0, length: 0))
+        let fileMenu = NSApplication.shared.mainMenu?.items.first(where: { $0.title == "File" })?.submenu
+        let backupItem = fileMenu?.items.first(where: { $0.action == #selector(createBackup) })
+        let restoreItem = fileMenu?.items.first(where: { $0.action == #selector(restoreBackup) })
+        checks["backup_restore_menu_available"] = backupItem != nil && restoreItem != nil
+        if let backupItem, let restoreItem {
+            checks["backup_restore_menu_requires_healthy_store"] = validateMenuItem(backupItem) && validateMenuItem(restoreItem)
+            archiveOperationInProgress = true
+            checks["archive_work_excludes_second_operation_and_quit"] = !validateMenuItem(backupItem)
+                && !validateMenuItem(restoreItem) && applicationShouldTerminate(NSApplication.shared) == .terminateCancel
+            archiveOperationInProgress = false
+        }
         checks["draft_registers_undo"] = promptView.undoManager?.canUndo == true
         undoEdit(nil)
         checks["undo_restores_draft"] = promptView.string.isEmpty
         redoEdit(nil)
         checks["redo_restores_draft"] = promptView.string == "synthetic draft"
-        let editMenu = NSApplication.shared.mainMenu?.item(at: 1)?.submenu
+        let editMenu = NSApplication.shared.mainMenu?.items.first(where: { $0.title == "Edit" })?.submenu
         checks["undo_shortcut"] = editMenu?.item(at: 0)?.keyEquivalent == "z"
             && editMenu?.item(at: 0)?.keyEquivalentModifierMask == [.command]
         checks["redo_shortcut"] = editMenu?.item(at: 1)?.keyEquivalent == "z"
@@ -951,9 +1190,18 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     let text = "Synthetic accepted request \(index)"
                     let before = try store.events(conversationID: activeChat.id).count
                     _ = try store.append(conversationID: activeChat.id, role: .human, text: text, status: .complete, turnID: turn, eventID: humanID)
-                    pendingPrompt = text; pendingResponse = item.0; pendingTurnID = turn
+                    pendingPrompt = text; pendingResponse = ""; pendingTurnID = turn
                     pendingHumanID = humanID; pendingAssistantID = assistantID
+                    pendingInvocationID = UUID().uuidString; pendingChunkSequence = 0; pendingCaptureFailure = false
+                    pendingRequestBody = Data("{\"messages\":[]}".utf8); pendingProviderIdentity = "native:synthetic"
+                    _ = try store.beginInvocation(invocationID: pendingInvocationID, conversationID: activeChat.id, turnID: turn,
+                        humanEventID: humanID, assistantEventID: assistantID, providerIdentity: pendingProviderIdentity, requestBody: pendingRequestBody!)
+                    pendingInvocationStarted = true
                     setGenerating(true)
+                    receiveGenerationText(item.0)
+                    let journal = try store.invocation(id: pendingInvocationID)
+                    checks["stream_\(index)_journal_precedes_completion"] = journal?.observedBytes == item.0.utf8.count
+                        && journal?.finalStatus == nil && pendingResponse == item.0
                     completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: item.1, stopped: item.2))
                     let captured = try store.events(conversationID: activeChat.id)
                     checks["completion_\(index)_captures_exact_human_and_status"] = captured.count == before + 2
@@ -962,6 +1210,28 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: nil, stopped: false))
                     checks["completion_\(index)_duplicate_callback_adds_no_event"] = try store.events(conversationID: activeChat.id).count == before + 2
                 }
+                let failureTurn = UUID().uuidString
+                let failureHuman = UUID().uuidString
+                _ = try store.append(conversationID: activeChat.id, role: .human, text: "Synthetic capture failure request", status: .complete,
+                    turnID: failureTurn, eventID: failureHuman)
+                pendingPrompt = "Synthetic capture failure request"; pendingResponse = ""; pendingTurnID = failureTurn
+                pendingHumanID = failureHuman; pendingAssistantID = UUID().uuidString; pendingInvocationID = UUID().uuidString
+                pendingChunkSequence = 0; pendingCaptureFailure = false; pendingInvocationStarted = true
+                pendingRequestBody = Data("{\"messages\":[]}".utf8); pendingProviderIdentity = "native:synthetic"
+                _ = try store.beginInvocation(invocationID: pendingInvocationID, conversationID: activeChat.id, turnID: failureTurn,
+                    humanEventID: failureHuman, assistantEventID: pendingAssistantID, providerIdentity: pendingProviderIdentity, requestBody: pendingRequestBody!)
+                setGenerating(true)
+                receiveGenerationText("Synthetic committed prefix")
+                let visiblePrefix = responseView.string
+                pendingChunkSequence += 1 // Force a real out-of-order journal rejection.
+                receiveGenerationText("Synthetic uncommitted suffix")
+                checks["failed_stream_capture_never_displays_unsaved_delta"] = pendingCaptureFailure
+                    && responseView.string == visiblePrefix && pendingResponse == "Synthetic committed prefix"
+                let failedInvocationID = pendingInvocationID
+                completeGeneration(GenerationResult(elapsed: 0, tokensPerSecond: nil, failure: nil, stopped: true))
+                checks["failed_stream_capture_finalizes_committed_prefix"] = try store.events(conversationID: activeChat.id).last?.text == "Synthetic committed prefix"
+                    && store.invocation(id: failedInvocationID)?.terminalReason == .captureFailure
+                checks["api_token_budget_is_explicit_and_enabled"] = endpointTokenLimit.stringValue == "32768" && endpointTokenLimit.isEnabled
             } catch { checks["durable_ui_checks"] = false }
         } else { checks["durable_store_available"] = false }
         checks["new_chat_has_unique_identifier"] = priorChatID != nil
@@ -971,6 +1241,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         checks["generation_restores_model_and_chat_switch"] = modelSelector.isEnabled && conversationSelector.isEnabled
         let expectedID = activeChat?.id
         let expectedTranscript = responseView.string
+        semanticIndex = nil
         store = nil
         let restarted = ApplicationDelegate()
         restarted.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
@@ -979,6 +1250,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             && restarted.responseView.string.contains("Synthetic stopped bytes")
         checks["restart_initializer_restores_saved_draft"] = restarted.promptView.string == promptView.string
         store = restarted.store
+        restarted.semanticIndex = nil
         restarted.store = nil
         checks["restart_test_preserves_visible_window"] = responseView.string == expectedTranscript
         return checks
@@ -987,10 +1259,14 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if archiveOperationInProgress {
+            status.stringValue = "Wait for the archive operation to finish before quitting."
+            return .terminateCancel
+        }
         if generating {
             quitting = true
             timer?.invalidate()
-            runner.cancel()
+            DispatchQueue.main.async { [weak self] in self?.stopGeneration() }
             return .terminateLater
         }
         persistDraft()
@@ -1005,6 +1281,13 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         appMenu.addItem(withTitle: "Quit Boros", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         menu.addItem(appItem)
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        let backup = fileMenu.addItem(withTitle: "Create Backup…", action: #selector(createBackup), keyEquivalent: "")
+        backup.target = self
+        let restore = fileMenu.addItem(withTitle: "Restore Backup to New Folder…", action: #selector(restoreBackup), keyEquivalent: "")
+        restore.target = self
+        fileItem.title = "File"; fileItem.submenu = fileMenu; menu.addItem(fileItem)
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         let undo = editMenu.addItem(withTitle: "Undo", action: #selector(undoEdit(_:)), keyEquivalent: "z")
@@ -1117,6 +1400,21 @@ private enum BonsaiPlayground {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
         _ = ReasoningSupervisor.runIfRequested()
+        if let code = BackupCommand.run(arguments: CommandLine.arguments) { exit(code) }
+        if CommandLine.arguments.contains("--backup-self-test") {
+            do {
+                let checks = try BackupChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"backup_self_test\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--semantic-self-test") {
+            do {
+                let checks = try SemanticChecks.run()
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"semantic_self_test\":false}"); exit(1) }
+        }
         if CommandLine.arguments.contains("--memory-self-test") {
             do {
                 let checks = try MemoryChecks.run()
@@ -1128,6 +1426,13 @@ private enum BonsaiPlayground {
             let checks = EndpointChecks.run()
             if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) { print(String(decoding: data, as: UTF8.self)) }
             exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+        }
+        if CommandLine.arguments.contains("--context-admission-self-test") {
+            do {
+                let checks = try ContextAdmissionChecks.run()
+                let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"context_admission_self_test\":false}"); exit(1) }
         }
         if let index = CommandLine.arguments.firstIndex(of: "--endpoint-integration-test"), index + 1 < CommandLine.arguments.count {
             let checks = EndpointChecks.runIntegration(baseURL: CommandLine.arguments[index + 1])

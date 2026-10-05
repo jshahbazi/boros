@@ -71,6 +71,8 @@ struct EndpointResponseState {
     private(set) var finishReason: String?
     private(set) var done = false
     private(set) var failure: String?
+    private(set) var usage: ProviderUsage?
+    private(set) var observedModel: String?
     private let maximumAnswerBytes = 4 * 1_048_576
 
     mutating func consume(_ payload: String) -> String? {
@@ -81,6 +83,16 @@ struct EndpointResponseState {
             failure = "invalid_stream"; return nil
         }
         if object["error"] != nil { failure = "process_failed"; return nil }
+        if let model = object["model"] as? String {
+            if let observedModel, observedModel != model { failure = "provider_count_mismatch"; return nil }
+            observedModel = model
+        }
+        if let rawUsage = object["usage"], !(rawUsage is NSNull) {
+            guard let value = ProviderUsage.parse(rawUsage), usage == nil || usage == value else {
+                failure = "provider_count_mismatch"; return nil
+            }
+            usage = value
+        }
         guard let choices = object["choices"] as? [[String: Any]] else {
             failure = "invalid_stream"; return nil
         }
@@ -139,29 +151,51 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
     private var wireBytes = 0
     private var receivedResponse = false
     private var cancelled = false
+    private var admissionOperation: ProviderAdmissionOperation?
+    private var admission: EndpointAdmissionReceipt?
 
     func start(prompt: String, settings: GenerationSettings, conversation: Conversation,
                onText: @escaping (String) -> Void, onComplete: @escaping (GenerationResult) -> Void) {
         stateQueue.async {
             self.onText = onText; self.onComplete = onComplete; self.started = Date()
-            guard let url = LocalEndpoint.chatURL(settings.endpointURL),
-                  !settings.endpointModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  settings.maximumOutput > 0, settings.temperature.isFinite else {
-                self.finish("invalid_endpoint"); return
+            let bytes: Data
+            do { bytes = try EndpointRequest.build(prompt: prompt, settings: settings, conversation: conversation) }
+            catch let error as ProviderAdmissionError { self.finish(error.failureCode); return }
+            catch { self.finish("invalid_endpoint"); return }
+            if let prepared = settings.preparedEndpointBody, prepared != bytes {
+                self.finish("provider_count_mismatch"); return
             }
-            var body: [String: Any] = [
-                "model": settings.endpointModel, "messages": settings.messages(prompt, conversation: conversation),
-                "stream": true, "max_tokens": settings.maximumOutput, "temperature": settings.temperature,
-                "seed": settings.seed,
-            ]
-            // mlx-serve documents this option for the selected model. Other local adapters
-            // receive only the common Chat Completions fields.
-            if settings.endpointModel == "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit" {
-                body["enable_thinking"] = settings.thinkingEnabled
+            if let receipt = settings.endpointAdmission {
+                guard receipt.accepts(body: bytes, address: settings.endpointURL),
+                      receipt.outputReserve == settings.maximumOutput,
+                      receipt.safetyTokens == settings.endpointSafetyTokens,
+                      receipt.effectiveContextLimit <= settings.endpointContextLimit else {
+                    self.finish("provider_count_mismatch"); return
+                }
+                self.dispatch(body: bytes, settings: settings, receipt: receipt)
+            } else {
+                self.admissionOperation = ProviderAdmission.prepare(requestBody: bytes, address: settings.endpointURL,
+                    apiKey: settings.endpointAPIKey, contextLimit: settings.endpointContextLimit,
+                    safetyTokens: settings.endpointSafetyTokens) { result in
+                    self.stateQueue.async {
+                        guard !self.ended else { return }
+                        self.admissionOperation = nil
+                        switch result {
+                        case .success(let receipt): self.dispatch(body: bytes, settings: settings, receipt: receipt)
+                        case .failure(let error): self.finish(error.failureCode, stopped: error == .cancelled)
+                        }
+                    }
+                }
             }
-            guard let bytes = try? JSONSerialization.data(withJSONObject: body), bytes.count <= 2 * 1_048_576 else {
-                self.finish("context_full"); return
+        }
+    }
+
+    private func dispatch(body bytes: Data, settings: GenerationSettings, receipt: EndpointAdmissionReceipt) {
+            guard !ended, !cancelled, let url = LocalEndpoint.chatURL(settings.endpointURL),
+                  receipt.accepts(body: bytes, address: settings.endpointURL) else {
+                finish(cancelled ? nil : "provider_count_mismatch", stopped: cancelled); return
             }
+            admission = receipt
             var request = URLRequest(url: url)
             request.httpMethod = "POST"; request.httpBody = bytes; request.timeoutInterval = 180
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -180,7 +214,6 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
             self.session = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
             self.task = self.session!.dataTask(with: request)
             if self.cancelled { self.finish(nil, stopped: true) } else { self.task!.resume() }
-        }
     }
 
     func cancel() {
@@ -216,7 +249,7 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
                     DispatchQueue.main.async { callback(chunk) }
                 }
                 if let failure = self.responseState.failure { self.finish(failure); return }
-                if self.responseState.done { self.finish(self.responseState.completedFailure); return }
+                if self.responseState.done { self.finish(self.completionFailure); return }
             }
             if self.decoder.failed { self.finish("invalid_stream") }
         }
@@ -231,7 +264,7 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
             guard self.receivedResponse, !self.decoder.failed, !self.decoder.hasUnfinishedEvent else {
                 self.finish("invalid_stream"); return
             }
-            self.finish(self.responseState.completedFailure)
+            self.finish(self.completionFailure)
         }
     }
 
@@ -248,9 +281,19 @@ final class EndpointRunner: NSObject, URLSessionDataDelegate, URLSessionTaskDele
         let callback = onComplete
         onText = nil; onComplete = nil
         let result = GenerationResult(elapsed: Date().timeIntervalSince(started), tokensPerSecond: nil,
-                                      failure: failure, stopped: stopped)
+                                      failure: failure, stopped: stopped,
+                                      providerUsage: responseState.usage, providerAdmission: admission)
+        admissionOperation?.cancel(); admissionOperation = nil
         task?.cancel(); task = nil
         session?.invalidateAndCancel(); session = nil
         if let callback { DispatchQueue.main.async { callback(result) } }
+    }
+
+    private var completionFailure: String? {
+        if let failure = responseState.completedFailure { return failure }
+        guard let admission, let usage = responseState.usage,
+              usage.promptTokens == admission.promptTokens, usage.completionTokens <= admission.outputReserve,
+              responseState.observedModel == admission.modelID else { return "provider_count_mismatch" }
+        return nil
     }
 }

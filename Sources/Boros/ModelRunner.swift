@@ -21,6 +21,13 @@ struct GenerationSettings {
     // Runtime-only secret. It is never part of the durable memory/settings schema.
     var endpointAPIKey = ""
     var messagesOverride: [[String: String]]?
+    // The coordinator freezes this canonical, credential-free body before
+    // durable capture. The endpoint validates it against the same builder.
+    var preparedEndpointBody: Data?
+    var endpointContextLimit = 32768
+    var endpointSafetyTokens = 256
+    var endpointAdmission: EndpointAdmissionReceipt?
+    var preparedNativeBody: Data?
 
     func messages(_ prompt: String, conversation: Conversation) -> [[String: String]] {
         messagesOverride ?? profile.chatMessages(system: system, prompt: prompt, conversation: conversation)
@@ -59,6 +66,8 @@ struct GenerationResult {
     let tokensPerSecond: Double?
     let failure: String?
     let stopped: Bool
+    var providerUsage: ProviderUsage? = nil
+    var providerAdmission: EndpointAdmissionReceipt? = nil
 
     var message: String {
         if stopped && failure != "incomplete_result" { return "Stopped." }
@@ -79,6 +88,11 @@ struct GenerationResult {
         case "redirect_rejected": return "The local API redirected the request. Enter its direct loopback address."
         case "invalid_stream": return "The local API returned an invalid or unfinished response stream."
         case "output_limit": return "The local response exceeded Boros's safety size limit."
+        case "provider_admission_unavailable": return "Exact token admission is unavailable for this server or model. Check its tokenizer and chat-template support."
+        case "provider_adapter_unverified": return "Boros has no verified tokenizer adapter for this model. Choose the configured Qwen model."
+        case "provider_template_mismatch": return "The server's chat template changed. Its token adapter must be verified before sending."
+        case "admission_mismatch": return "The prepared request changed after token admission. Retry the request."
+        case "provider_count_mismatch": return "The server's prompt token count disagreed with admission. The response is incomplete."
         case .some: return "The model could not complete this prompt."
         case .none:
             if let speed = tokensPerSecond {
@@ -222,14 +236,7 @@ private final class CompletionRunner {
             }
             self.active = job
             job.process.executableURL = URL(fileURLWithPath: runtime)
-            job.process.arguments = [
-                "-m", model, "-f", "/dev/stdin", "-c", String(settings.context),
-                "-n", String(settings.maximumOutput), "-ngl", "99", "-fa", "on", "-t", "6",
-                "--no-conversation", "--no-jinja", "--no-display-prompt", "--simple-io",
-                "--no-context-shift", "--no-escape",
-                "--color", "off", "--seed", String(settings.seed), "--temp", String(settings.temperature),
-                "--top-k", "40", "--top-p", "0.95", "--min-p", "0.0"
-            ] + settings.profile.runtimeArguments
+            job.process.arguments = NativeRequest.completionArguments(settings: settings)
             job.process.standardInput = job.input
             job.process.standardOutput = job.output
             job.process.standardError = job.errors

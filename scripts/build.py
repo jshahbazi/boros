@@ -21,7 +21,7 @@ def main() -> int:
     (contents / 'Resources').mkdir(exist_ok=True)
     subprocess.run([
         '/usr/bin/swiftc', '-O', '-swift-version', '5', '-parse-as-library',
-        '-target', 'arm64-apple-macos14.0', '-framework', 'AppKit', '-framework', 'Foundation', '-framework', 'Security', '-framework', 'LocalAuthentication',
+        '-target', 'arm64-apple-macos14.0', '-framework', 'AppKit', '-framework', 'Foundation', '-framework', 'Security', '-framework', 'LocalAuthentication', '-framework', 'NaturalLanguage',
         *map(str, sorted((ROOT.parent / 'Sources' / 'Boros').glob('*.swift'))),
         '-I', str(ROOT.parent / 'Sources' / 'CSQLite'), '-lsqlite3', '-o', str(binary),
     ], check=True)

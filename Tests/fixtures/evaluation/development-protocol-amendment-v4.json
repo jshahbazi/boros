@@ -1,0 +1,73 @@
+{
+  "basePreregistrationSHA256": "b03cacdeed5a53593c1d80c4ceaae4cead5c5c965c62268c1c7d741569df1c74",
+  "compiler": {
+    "frameworks": [
+      "NaturalLanguage"
+    ],
+    "semanticAdapterInstantiated": false
+  },
+  "createdUTC": "2026-10-04",
+  "denominators": {
+    "developmentEligibleProbes": 224,
+    "developmentEligibleRequiredSpans": 256,
+    "success": "all required spans present in an eligible probe; macro average remains category/history weighted"
+  },
+  "frozenEvaluationImplementationSHA256": {
+    "Sources/Boros/ChatContextPreparation.swift": "a9d8bbc74bdfb662b6c1c87b69f864394e54c3db2c260eb628d8f08639c26903",
+    "Sources/Boros/ContextAssembler.swift": "e85fb76c4e028206cd5dd58f93d44e90f8db2f7f06250ba588e0e9148f052880",
+    "Sources/Boros/MemoryStore.swift": "ba72e69720ce51dd0c2f6b223f88627fbc78e3ba55c5a0224219bcbbce8ccd6d",
+    "Sources/Boros/SemanticIndex.swift": "48945e3ba6f851381a96ccf2400e04d545f4b3b10156a4bca1873552894ed20f",
+    "Sources/CSQLite/module.modulemap": "bbfe59a972a3e8e09e347c04bc22c0eacd2544881af8a4b6068bfc30b38466e8",
+    "Sources/CSQLite/shim.h": "b052d8e561e942f97b503033ecd2eaa2b35213bdbf374983efe9e68eabdfc024",
+    "Tests/Evaluation/RetrievalHarness.swift": "439d9d3ae8650d8391df21e4ae71265f5340080f0445cc670741cc8c5796766c",
+    "scripts/evaluate_retrieval.py": "d369af6ffeb8af30bb9cfc28485697c58d1b2cb852556852e8afe7e4b7ffc3d5",
+    "scripts/evaluation_fixtures.py": "771bcb167139040856d6d54dff9f0a0f2067f15786f7dfe64deb3c301ca840fe",
+    "scripts/evaluation_statistics.py": "328b1a747e4a496217f065d4ded2019efabfa1ae369b0aa2c702c49a0fe8f813"
+  },
+  "gateDecisionVersion": 2,
+  "heldOutAuthorization": false,
+  "preserved": [
+    "original fixture generator/seeds/splits/hashes",
+    "original preregistration-v1.json",
+    "existing v1 reports as historical measurement-limited records",
+    "initial product thresholds from plan",
+    "development-protocol-amendment-v2.json and its preliminary35-test contract evidence",
+    "development-protocol-amendment-v3.json and development-v3.json as historical source-snapshot evidence"
+  ],
+  "previousAmendmentSHA256": "a6199631eb33619907982c52ddb7499eab6881a2ca81ad412f436dd9aac42e0d",
+  "protocols": {
+    "current_prompt_lexical": "full natural-language prompt as an all-term lexical query; API diagnostic",
+    "gui_lexical_anyterm": {
+      "capture": "no writes; excludes an absent synthetic current event ID, equivalent for prior-evidence selection to excluding newly captured request; human capture latency pending",
+      "implementation": "ChatContextPreparation.prepare",
+      "limitation": "the GUI may pass an installed index; that automatic hybrid path is unmeasured here",
+      "query": "at most eight non-stopword any-term lexical query; semanticIndex explicitly nil",
+      "sourceRevision": "exact source hashes below; includes optional SemanticIndex type dependency"
+    },
+    "raw_source_probe": "unchanged literal-first source union and bounded original pages",
+    "recent_only": "historical recent-only behavior and Arm A context-selection diagnostic",
+    "targeted_lexical": "explicit frozen lexicalQuery; API diagnostic"
+  },
+  "retrievalCorrection": "recent/current source exclusions apply before lexical rank and LIMIT; semantic fallback uses same exclusion semantics; no fixture generator change",
+  "runOrder": [
+    "recent_only",
+    "current_prompt_lexical",
+    "targeted_lexical",
+    "gui_lexical_anyterm",
+    "raw_source_probe"
+  ],
+  "scope": "development-only; validation and held-out execution blocked",
+  "statisticalCorrections": {
+    "allNumericContracts": "statistics percentiles/proportions/amounts/weights/SDs/power inputs reject bools, text and non-finite values; query/sample/resample counts require positive exact integers and seeds nonnegative exact integers; numeric aggregation starts only after a strict boolean coverage-outcome check",
+    "gateInputValidation": "strict booleans, finite ranged task/recall/latency evidence, nonnegative cost/episode ratios; infinite cost upper bound is retained and fails",
+    "pairedTaskCategories": "fixed five plan categories; missing category yields undefined overall point/interval rather than renormalization",
+    "power": "individual lower-bound significance helper does not estimate joint point>=.05 AND lower95>0 gate power; joint planning requires assumed true effect above .05 and full paired cluster simulation"
+  },
+  "timingDefinition": {
+    "applicationIntegrityChecks": "MemoryStore checks remain inside API latency",
+    "historicalV1Limitation": "raw-source path included interleaved oracle hashing/verification; it is not comparable to assembler selection timing",
+    "memoryPathMilliseconds": "ends at actual context selection or search/page collection, before oracle fixture byte/hash verification and gold scoring",
+    "oracleScoringMilliseconds": "separate post-selection fixture/hash/span/source-ID verification; excluded from memory latency"
+  },
+  "version": "boros-development-protocol-amendment-v4"
+}

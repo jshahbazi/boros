@@ -7,6 +7,40 @@ enum MemoryRole: String, Codable { case human, assistant }
 enum CaptureStatus: String, Codable { case complete, partial, failed, cancelled }
 enum LexicalMatchMode { case allTerms, anyTerm }
 
+enum InvocationTerminalReason: String, Codable {
+    case completed, cancelled, upstreamIncomplete, transportFailure, captureFailure, admissionFailure, interrupted
+}
+
+/// Exact provider body is private evidence. HTTP headers and credentials are
+/// excluded. This journal records received, committed visible-text chunks;
+/// bytes never delivered by the provider cannot be recovered.
+struct StoredInvocation: Identifiable, Codable {
+    let id: String
+    let conversationID: String
+    let projectID: String
+    let turnID: String
+    let humanEventID: String
+    let assistantEventID: String
+    let providerIdentity: String
+    let requestBody: Data
+    let requestDigest: String
+    let admissionJSON: Data?
+    let usageJSON: Data?
+    let createdAt: String
+    let chunkCount: Int
+    let observedBytes: Int
+    let finalStatus: CaptureStatus?
+    let terminalReason: InvocationTerminalReason?
+    let finalizedAt: String?
+    let recovered: Bool
+}
+
+struct InvocationChunkReceipt {
+    let sequence: Int
+    let byteCount: Int
+    let replayed: Bool
+}
+
 struct StoredConversation: Identifiable, Codable {
     let id: String
     let projectID: String
@@ -43,6 +77,21 @@ struct MemoryHit: Identifiable, Codable {
     var preview: String { excerpt }
 }
 
+/// Payload-free source references for bounded asynchronous indexing. Sequence
+/// is the store publication order, not an index coverage watermark.
+struct MemorySourceReference: Identifiable, Codable, Equatable {
+    var id: String { eventID }
+    let sequence: Int
+    let eventID: String
+    let conversationID: String
+    let projectID: String
+    let role: MemoryRole
+    let status: CaptureStatus
+    let createdAt: String
+    let digest: String
+    let byteCount: Int
+}
+
 struct PayloadPage: Codable {
     let eventID: String
     let offset: Int
@@ -76,6 +125,7 @@ enum MemoryError: LocalizedError {
 final class MemoryStore: @unchecked Sendable {
     static let maximumPayloadBytes = 4 * 1024 * 1024
     static let maximumPageBytes = 4096
+    static let maximumStreamChunks = 65536
     let directory: URL
     private var database: OpaquePointer?
     private var ownerFD: Int32 = -1
@@ -102,7 +152,7 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard version == 0 || version == 1 else { throw MemoryError.invalid("unsupported database schema version") }
+            guard (0...2).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
             try transaction {
                 try execute("""
                     CREATE TABLE IF NOT EXISTS conversations (
@@ -126,8 +176,39 @@ final class MemoryStore: @unchecked Sendable {
                 try execute("CREATE VIRTUAL TABLE IF NOT EXISTS event_fts USING fts5(text, content='')")
                 try execute("CREATE TABLE IF NOT EXISTS drafts (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), payload BLOB NOT NULL)")
                 try execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, payload BLOB NOT NULL)")
-                try execute("PRAGMA user_version=1")
+                try execute("""
+                    CREATE TABLE IF NOT EXISTS invocations (
+                      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                      project_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                      human_event_id TEXT NOT NULL REFERENCES events(id), assistant_event_id TEXT NOT NULL UNIQUE,
+                      provider_identity TEXT NOT NULL, request_body BLOB NOT NULL,
+                      request_digest TEXT NOT NULL, admission_json BLOB NOT NULL DEFAULT X'',
+                      admission_digest TEXT NOT NULL DEFAULT '', usage_json BLOB NOT NULL DEFAULT X'',
+                      usage_digest TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                      chunk_count INTEGER NOT NULL DEFAULT 0 CHECK(chunk_count >= 0 AND chunk_count <= 65536),
+                      observed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(observed_bytes >= 0 AND observed_bytes <= 4194304),
+                      final_status TEXT NOT NULL DEFAULT '' CHECK(final_status IN ('','complete','partial','failed','cancelled')),
+                      terminal_reason TEXT NOT NULL DEFAULT '' CHECK(terminal_reason IN ('','completed','cancelled','upstreamIncomplete','transportFailure','captureFailure','admissionFailure','interrupted')),
+                      finalized_at TEXT NOT NULL DEFAULT '', recovered INTEGER NOT NULL DEFAULT 0 CHECK(recovered IN (0,1)),
+                      CHECK(length(request_body) > 0 AND length(request_body) <= 4194304),
+                      CHECK((final_status = '' AND terminal_reason = '' AND finalized_at = '') OR
+                            (final_status != '' AND terminal_reason != '' AND finalized_at != ''))
+                    )
+                    """)
+                try execute("""
+                    CREATE TABLE IF NOT EXISTS invocation_chunks (
+                      invocation_id TEXT NOT NULL REFERENCES invocations(id),
+                      chunk_sequence INTEGER NOT NULL CHECK(chunk_sequence >= 0 AND chunk_sequence < 65536),
+                      byte_count INTEGER NOT NULL CHECK(byte_count > 0 AND byte_count <= 4194304),
+                      digest TEXT NOT NULL, payload BLOB NOT NULL CHECK(length(payload) = byte_count),
+                      PRIMARY KEY(invocation_id, chunk_sequence)
+                    ) WITHOUT ROWID
+                    """)
+                try execute("PRAGMA user_version=2")
             }
+            // The exclusive process lock is already held. Publish interrupted
+            // attempts before any caller can read history or start a request.
+            try recoverInterruptedInvocations()
             try secureSidecars()
         } catch {
             if let database { sqlite3_close(database); self.database = nil }
@@ -208,6 +289,49 @@ final class MemoryStore: @unchecked Sendable {
         }
     }
 
+    func sourceFrontier(projectID: String) throws -> Int {
+        try locked {
+            try validateIdentifier(projectID, name: "project ID")
+            return try query("SELECT coalesce(max(sequence),0) FROM events WHERE project_id=?", [.text(projectID)]) {
+                Int(sqlite3_column_int64($0, 0))
+            }.first ?? 0
+        }
+    }
+
+    /// Source bytes are read separately using read(eventID:offset:length:).
+    /// A fixed upper frontier prevents later publications changing a scan.
+    func sourceManifest(projectID: String, afterSequence: Int, throughSequence: Int? = nil, limit: Int) throws -> [MemorySourceReference] {
+        try locked {
+            try validateIdentifier(projectID, name: "project ID")
+            guard afterSequence >= 0, (throughSequence ?? 0) >= 0, (1...1000).contains(limit) else {
+                throw MemoryError.invalid("source manifest requires nonnegative bounds and 1–1000 rows")
+            }
+            var bindings: [Value] = [.text(projectID), .integer(afterSequence)]
+            var upperBound = ""
+            if let throughSequence { upperBound = " AND sequence<=?"; bindings.append(.integer(throughSequence)) }
+            bindings.append(.integer(limit))
+            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE project_id=? AND sequence>?" + upperBound + " ORDER BY sequence LIMIT ?", bindings, map: sourceReference)
+        }
+    }
+
+    func sourceReference(eventID: String, projectID: String) throws -> MemorySourceReference? {
+        try locked {
+            try validateIdentifier(eventID, name: "event ID")
+            try validateIdentifier(projectID, name: "project ID")
+            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE id=? AND project_id=?",
+                [.text(eventID), .text(projectID)], map: sourceReference).first
+        }
+    }
+
+    private func sourceReference(_ statement: OpaquePointer) throws -> MemorySourceReference {
+        guard let role = MemoryRole(rawValue: string(statement, 4)), let status = CaptureStatus(rawValue: string(statement, 5)) else {
+            throw MemoryError.database("invalid source metadata")
+        }
+        return MemorySourceReference(sequence: Int(sqlite3_column_int64(statement, 0)), eventID: string(statement, 1),
+            conversationID: string(statement, 2), projectID: string(statement, 3), role: role, status: status,
+            createdAt: string(statement, 6), digest: string(statement, 7), byteCount: Int(sqlite3_column_int64(statement, 8)))
+    }
+
     /// Repeating an identical stable event ID returns the original event. Any
     /// changed role, scope, turn, completion status, or payload is a conflict.
     func append(conversationID: String, role: MemoryRole, text: String, status: CaptureStatus, turnID: String, eventID: String) throws -> MemoryEvent {
@@ -217,6 +341,9 @@ final class MemoryStore: @unchecked Sendable {
             let payload = try validatePayload(text)
             let digest = Self.digest(payload)
             let scope = try conversation(conversationID)
+            guard try query("SELECT id FROM invocations WHERE assistant_event_id=?", [.text(eventID)], map: { string($0, 0) }).isEmpty else {
+                throw MemoryError.conflict("assistant event ID belongs to a durable invocation")
+            }
             if let existing = try findEvent(eventID) {
                 guard existing.conversationID == conversationID, existing.projectID == scope.projectID,
                       existing.role == role, existing.status == status, existing.turnID == turnID,
@@ -228,37 +355,152 @@ final class MemoryStore: @unchecked Sendable {
             let now = Self.timestamp()
             let result = MemoryEvent(id: eventID, conversationID: conversationID, projectID: scope.projectID, role: role, text: text, status: status, turnID: turnID, createdAt: now, digest: digest, byteCount: payload.count)
             try transaction {
-                try execute("INSERT INTO events (id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload) VALUES (?,?,?,?,?,?,?,?,?,?)", [.text(eventID), .text(conversationID), .text(scope.projectID), .text(role.rawValue), .text(status.rawValue), .text(turnID), .text(now), .text(digest), .integer(payload.count), .blob(payload)])
-                let rowID = sqlite3_last_insert_rowid(database)
-                try execute("INSERT INTO event_fts(rowid,text) VALUES (?,?)", [.integer(Int(rowID)), .text(text)])
-                try execute("UPDATE conversations SET updated_at=? WHERE id=?", [.text(now), .text(conversationID)])
+                try insertEvent(result, payload: payload)
             }
             return result
+        }
+    }
+
+    /// Commit the exact credential-free provider request before dispatch.
+    /// An identical begin replay returns the same attempt, including its
+    /// terminal state; beginning again never automatically dispatches it.
+    func beginInvocation(invocationID: String, conversationID: String, turnID: String, humanEventID: String, assistantEventID: String, providerIdentity: String, requestBody: Data, admissionJSON: Data? = nil) throws -> StoredInvocation {
+        try locked {
+            for (value, name) in [(invocationID, "invocation ID"), (turnID, "turn ID"), (humanEventID, "human event ID"), (assistantEventID, "assistant event ID")] {
+                try validateIdentifier(value, name: name)
+            }
+            try validateProviderIdentity(providerIdentity)
+            try validateRequestBody(requestBody)
+            if let admissionJSON {
+                guard admissionJSON.count <= 65536 else { throw MemoryError.invalid("admission receipt exceeds the metadata limit") }
+                try validateRequestBody(admissionJSON)
+            }
+            let scope = try conversation(conversationID)
+            if let existing = try findInvocation(invocationID) {
+                guard existing.conversationID == conversationID, existing.projectID == scope.projectID,
+                      existing.turnID == turnID, existing.humanEventID == humanEventID,
+                      existing.assistantEventID == assistantEventID, existing.providerIdentity == providerIdentity,
+                      existing.requestBody == requestBody, existing.admissionJSON == admissionJSON else {
+                    throw MemoryError.conflict("invocation ID was already used for different request or scope")
+                }
+                return existing
+            }
+            guard let human = try findEvent(humanEventID), human.role == .human,
+                  human.status == .complete, human.conversationID == conversationID,
+                  human.projectID == scope.projectID, human.turnID == turnID else {
+                throw MemoryError.invalid("invocation requires its committed complete human event in the same turn and scope")
+            }
+            guard humanEventID != assistantEventID, try findEvent(assistantEventID) == nil,
+                  try query("SELECT id FROM invocations WHERE assistant_event_id=?", [.text(assistantEventID)], map: { string($0, 0) }).isEmpty else {
+                throw MemoryError.conflict("assistant event ID was already used or reserved")
+            }
+            try transaction {
+                try execute("INSERT INTO invocations (id,conversation_id,project_id,turn_id,human_event_id,assistant_event_id,provider_identity,request_body,request_digest,admission_json,admission_digest,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [.text(invocationID), .text(conversationID), .text(scope.projectID), .text(turnID), .text(humanEventID), .text(assistantEventID), .text(providerIdentity), .blob(requestBody), .text(Self.digest(requestBody)), .blob(admissionJSON ?? Data()), .text(admissionJSON.map(Self.digest) ?? ""), .text(Self.timestamp())])
+            }
+            guard let result = try findInvocation(invocationID) else { throw MemoryError.database("invocation publication failed") }
+            return result
+        }
+    }
+
+    func invocation(id: String) throws -> StoredInvocation? {
+        try locked {
+            try validateIdentifier(id, name: "invocation ID")
+            return try findInvocation(id)
+        }
+    }
+
+    /// Call this before making received text visible. Sequence starts at zero,
+    /// grows contiguously, and identifies exactly one nonempty UTF-8 chunk.
+    /// An identical retry is safe even after finalization; new late chunks fail.
+    func appendInvocationChunk(invocationID: String, sequence: Int, text: String) throws -> InvocationChunkReceipt {
+        try locked {
+            try validateIdentifier(invocationID, name: "invocation ID")
+            guard (0..<Self.maximumStreamChunks).contains(sequence) else { throw MemoryError.invalid("stream chunk sequence is outside the supported limit") }
+            let payload = try validatePayload(text)
+            guard !payload.isEmpty else { throw MemoryError.invalid("stream chunks must contain received text") }
+            let digest = Self.digest(payload)
+            return try transaction {
+                let rows = try query("SELECT chunk_count,observed_bytes,final_status FROM invocations WHERE id=?", [.text(invocationID)]) {
+                    (Int(sqlite3_column_int64($0, 0)), Int(sqlite3_column_int64($0, 1)), string($0, 2))
+                }
+                guard let (count, bytes, status) = rows.first else { throw MemoryError.missing("invocation") }
+                let existing = try query("SELECT byte_count,digest,payload FROM invocation_chunks WHERE invocation_id=? AND chunk_sequence=?", [.text(invocationID), .integer(sequence)]) {
+                    (Int(sqlite3_column_int64($0, 0)), string($0, 1), blob($0, 2))
+                }.first
+                if let (storedBytes, storedDigest, storedPayload) = existing {
+                    guard storedBytes == payload.count, storedDigest == digest, storedPayload == payload else {
+                        throw MemoryError.conflict("stream chunk sequence was already used for different text")
+                    }
+                    return InvocationChunkReceipt(sequence: sequence, byteCount: payload.count, replayed: true)
+                }
+                guard status.isEmpty else { throw MemoryError.conflict("invocation is already terminal") }
+                guard sequence == count else { throw MemoryError.conflict("stream chunks must arrive in contiguous order") }
+                guard bytes <= Self.maximumPayloadBytes - payload.count else { throw MemoryError.invalid("stream exceeds the 4 MiB capture limit; previous chunks remain committed") }
+                try execute("INSERT INTO invocation_chunks (invocation_id,chunk_sequence,byte_count,digest,payload) VALUES (?,?,?,?,?)", [.text(invocationID), .integer(sequence), .integer(payload.count), .text(digest), .blob(payload)])
+                try execute("UPDATE invocations SET chunk_count=?,observed_bytes=? WHERE id=?", [.integer(count + 1), .integer(bytes + payload.count), .text(invocationID)])
+                return InvocationChunkReceipt(sequence: sequence, byteCount: payload.count, replayed: false)
+            }
+        }
+    }
+
+    /// Atomically publish all committed chunks as one immutable assistant
+    /// event and its FTS row, then terminalize the origin invocation.
+    func finalizeInvocation(invocationID: String, status: CaptureStatus, reason: InvocationTerminalReason? = nil, usageJSON: Data? = nil) throws -> MemoryEvent {
+        try locked {
+            try validateIdentifier(invocationID, name: "invocation ID")
+            let reason = reason ?? Self.defaultTerminalReason(status)
+            try validateTerminal(status: status, reason: reason)
+            if let usageJSON {
+                guard usageJSON.count <= 65536 else { throw MemoryError.invalid("usage receipt exceeds the metadata limit") }
+                try validateRequestBody(usageJSON)
+            }
+            return try transaction {
+                guard let attempt = try findInvocation(invocationID) else { throw MemoryError.missing("invocation") }
+                return try publishInvocation(attempt, status: status, reason: reason, recovered: false, usageJSON: usageJSON)
+            }
         }
     }
 
     /// Queries are converted to quoted lexical terms, never interpolated into
     /// SQL or accepted as raw FTS syntax. Manual search requires all terms;
     /// automatic context retrieval may explicitly request any-term matching.
-    func search(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms) throws -> [MemoryHit] {
+    func search(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms, throughSequence: Int? = nil, excludingEventIDs: Set<String> = []) throws -> [MemoryHit] {
         try locked {
             try validateSearch(query: query, projectID: projectID, limit: limit)
+            if let throughSequence, throughSequence < 0 { throw MemoryError.invalid("source frontier must be nonnegative") }
+            guard excludingEventIDs.count <= 10000 else { throw MemoryError.invalid("search excludes at most 10000 sources") }
+            for id in excludingEventIDs { try validateIdentifier(id, name: "excluded source ID") }
             let terms = Self.searchTerms(query)
             guard terms.count <= 32 else { throw MemoryError.invalid("lexical search accepts at most 32 terms") }
             guard !terms.isEmpty else { return [] }
             let expression = terms.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: matching == .allTerms ? " AND " : " OR ")
-            let sql = "SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=? ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?"
-            return try queryEvents(sql, [.text(expression), .text(projectID), .integer(limit)]).map { Self.hit($0, terms: terms) }
+            let upperBound = throughSequence == nil ? "" : " AND e.sequence<=?"
+            let exclusions = excludingEventIDs.isEmpty ? "" : " AND e.id NOT IN (SELECT value FROM json_each(?))"
+            let sql = "SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upperBound + exclusions + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?"
+            var bindings: [Value] = [.text(expression), .text(projectID)]
+            if let throughSequence { bindings.append(.integer(throughSequence)) }
+            if !excludingEventIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingEventIDs.sorted()), as: UTF8.self))) }
+            bindings.append(.integer(limit))
+            return try queryEvents(sql, bindings).map { Self.hit($0, terms: terms) }
         }
     }
 
     /// Literal search is case-sensitive over original UTF-8 payload bytes.
-    func literalSearch(query: String, projectID: String, limit: Int = 8) throws -> [MemoryHit] {
+    func literalSearch(query: String, projectID: String, limit: Int = 8, throughSequence: Int? = nil, excludingEventIDs: Set<String> = []) throws -> [MemoryHit] {
         try locked {
             try validateSearch(query: query, projectID: projectID, limit: limit)
+            if let throughSequence, throughSequence < 0 { throw MemoryError.invalid("source frontier must be nonnegative") }
+            guard excludingEventIDs.count <= 10000 else { throw MemoryError.invalid("search excludes at most 10000 sources") }
+            for id in excludingEventIDs { try validateIdentifier(id, name: "excluded source ID") }
             guard !query.isEmpty else { return [] }
-            let sql = "SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload FROM events WHERE project_id=? AND instr(payload,?) > 0 ORDER BY sequence DESC LIMIT ?"
-            return try queryEvents(sql, [.text(projectID), .blob(Data(query.utf8)), .integer(limit)]).map { Self.hit($0, terms: [query], literal: true) }
+            let upperBound = throughSequence == nil ? "" : " AND sequence<=?"
+            let exclusions = excludingEventIDs.isEmpty ? "" : " AND id NOT IN (SELECT value FROM json_each(?))"
+            let sql = "SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload FROM events WHERE project_id=? AND instr(payload,?) > 0" + upperBound + exclusions + " ORDER BY sequence DESC LIMIT ?"
+            var bindings: [Value] = [.text(projectID), .blob(Data(query.utf8))]
+            if let throughSequence { bindings.append(.integer(throughSequence)) }
+            if !excludingEventIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingEventIDs.sorted()), as: UTF8.self))) }
+            bindings.append(.integer(limit))
+            return try queryEvents(sql, bindings).map { Self.hit($0, terms: [query], literal: true) }
         }
     }
 
@@ -330,6 +572,148 @@ final class MemoryStore: @unchecked Sendable {
             let mode = try query("PRAGMA journal_mode") { string($0, 0) }.first ?? ""
             return (mode, try scalarInteger("PRAGMA synchronous"))
         }
+    }
+
+    private func insertEvent(_ event: MemoryEvent, payload: Data) throws {
+        try execute("INSERT INTO events (id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload) VALUES (?,?,?,?,?,?,?,?,?,?)", [.text(event.id), .text(event.conversationID), .text(event.projectID), .text(event.role.rawValue), .text(event.status.rawValue), .text(event.turnID), .text(event.createdAt), .text(event.digest), .integer(payload.count), .blob(payload)])
+        let rowID = sqlite3_last_insert_rowid(database)
+        try execute("INSERT INTO event_fts(rowid,text) VALUES (?,?)", [.integer(Int(rowID)), .text(event.text)])
+        try execute("UPDATE conversations SET updated_at=? WHERE id=?", [.text(event.createdAt), .text(event.conversationID)])
+    }
+
+    private func findInvocation(_ id: String) throws -> StoredInvocation? {
+        try query("SELECT id,conversation_id,project_id,turn_id,human_event_id,assistant_event_id,provider_identity,request_body,request_digest,created_at,chunk_count,observed_bytes,final_status,terminal_reason,finalized_at,recovered,admission_json,admission_digest,usage_json,usage_digest FROM invocations WHERE id=?", [.text(id)]) { statement in
+            let body = blob(statement, 7)
+            let digest = string(statement, 8)
+            guard !body.isEmpty, body.count <= Self.maximumPayloadBytes, Self.digest(body) == digest else { throw MemoryError.database("invocation request failed integrity verification") }
+            let statusText = string(statement, 12)
+            let reasonText = string(statement, 13)
+            let finalizedText = string(statement, 14)
+            let status = CaptureStatus(rawValue: statusText)
+            let reason = InvocationTerminalReason(rawValue: reasonText)
+            guard (statusText.isEmpty && reasonText.isEmpty && finalizedText.isEmpty) ||
+                  (status != nil && reason != nil && !finalizedText.isEmpty) else {
+                throw MemoryError.database("invalid invocation terminal state")
+            }
+            if let status, let reason { try validateTerminal(status: status, reason: reason) }
+            let admission = blob(statement, 16)
+            let usage = blob(statement, 18)
+            guard admission.count <= 65536, usage.count <= 65536,
+                  (admission.isEmpty ? "" : Self.digest(admission)) == string(statement, 17),
+                  (usage.isEmpty ? "" : Self.digest(usage)) == string(statement, 19) else { throw MemoryError.database("invocation metadata receipt failed integrity verification") }
+            return StoredInvocation(id: string(statement, 0), conversationID: string(statement, 1), projectID: string(statement, 2), turnID: string(statement, 3), humanEventID: string(statement, 4), assistantEventID: string(statement, 5), providerIdentity: string(statement, 6), requestBody: body, requestDigest: digest, admissionJSON: admission.isEmpty ? nil : admission, usageJSON: usage.isEmpty ? nil : usage, createdAt: string(statement, 9), chunkCount: Int(sqlite3_column_int64(statement, 10)), observedBytes: Int(sqlite3_column_int64(statement, 11)), finalStatus: status, terminalReason: reason, finalizedAt: finalizedText.isEmpty ? nil : finalizedText, recovered: sqlite3_column_int(statement, 15) == 1)
+        }.first
+    }
+
+    private func invocationPayload(_ attempt: StoredInvocation) throws -> Data {
+        var payload = Data()
+        payload.reserveCapacity(attempt.observedBytes)
+        var sequence = 0
+        _ = try query("SELECT chunk_sequence,byte_count,digest,payload FROM invocation_chunks WHERE invocation_id=? ORDER BY chunk_sequence", [.text(attempt.id)]) { statement in
+            let chunk = blob(statement, 3)
+            guard Int(sqlite3_column_int64(statement, 0)) == sequence,
+                  Int(sqlite3_column_int64(statement, 1)) == chunk.count,
+                  Self.digest(chunk) == string(statement, 2),
+                  String(data: chunk, encoding: .utf8) != nil,
+                  payload.count <= Self.maximumPayloadBytes - chunk.count else {
+                throw MemoryError.database("invocation chunk failed integrity verification")
+            }
+            payload.append(chunk)
+            sequence += 1
+        }
+        guard sequence == attempt.chunkCount, payload.count == attempt.observedBytes else { throw MemoryError.database("invocation chunk manifest failed integrity verification") }
+        return payload
+    }
+
+    /// Caller already owns a write transaction. Never deletes the recovery
+    /// journal before the event and search publication have committed.
+    private func publishInvocation(_ attempt: StoredInvocation, status: CaptureStatus, reason: InvocationTerminalReason, recovered: Bool, usageJSON: Data? = nil) throws -> MemoryEvent {
+        let payload = try invocationPayload(attempt)
+        guard let text = String(data: payload, encoding: .utf8) else { throw MemoryError.database("invalid invocation text encoding") }
+        if let existingStatus = attempt.finalStatus {
+            guard existingStatus == status, attempt.terminalReason == reason, attempt.usageJSON == usageJSON,
+                  let existing = try findEvent(attempt.assistantEventID),
+                  existing.conversationID == attempt.conversationID, existing.projectID == attempt.projectID,
+                  existing.role == .assistant, existing.turnID == attempt.turnID,
+                  existing.status == status, existing.text == text else {
+                throw MemoryError.conflict("invocation was already finalized with a different terminal result")
+            }
+            return existing
+        }
+        let now = Self.timestamp()
+        let result = MemoryEvent(id: attempt.assistantEventID, conversationID: attempt.conversationID, projectID: attempt.projectID, role: .assistant, text: text, status: status, turnID: attempt.turnID, createdAt: now, digest: Self.digest(payload), byteCount: payload.count)
+        try insertEvent(result, payload: payload)
+        try execute("UPDATE invocations SET final_status=?,terminal_reason=?,finalized_at=?,recovered=?,usage_json=?,usage_digest=? WHERE id=?", [.text(status.rawValue), .text(reason.rawValue), .text(now), .integer(recovered ? 1 : 0), .blob(usageJSON ?? Data()), .text(usageJSON.map(Self.digest) ?? ""), .text(attempt.id)])
+        return result
+    }
+
+    private func recoverInterruptedInvocations() throws {
+        try transaction {
+            let ids = try query("SELECT id FROM invocations WHERE final_status='' ORDER BY created_at,id") { string($0, 0) }
+            for id in ids {
+                guard let attempt = try findInvocation(id) else { throw MemoryError.database("interrupted invocation disappeared") }
+                _ = try publishInvocation(attempt, status: attempt.observedBytes == 0 ? .failed : .partial, reason: .interrupted, recovered: true)
+            }
+        }
+    }
+
+    private func validateProviderIdentity(_ identity: String) throws {
+        guard identity.utf8.count <= 2048 else { throw MemoryError.invalid("provider identity exceeds the metadata limit") }
+        if identity.hasPrefix("native:") {
+            let profile = identity.dropFirst(7)
+            guard !profile.isEmpty, profile.utf8.count <= 200,
+                  profile.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-").contains($0) }) else {
+                throw MemoryError.invalid("native provider identity must contain a safe profile ID")
+            }
+            return
+        }
+        guard let parts = URLComponents(string: identity), parts.scheme?.lowercased() == "http",
+              let host = parts.host?.lowercased(), ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host),
+              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
+              parts.port == nil || (1...65535).contains(parts.port!), parts.url != nil else {
+            throw MemoryError.invalid("provider identity must be a credential-free loopback HTTP URL or safe native profile")
+        }
+    }
+
+    private func validateRequestBody(_ body: Data) throws {
+        guard !body.isEmpty, body.count <= Self.maximumPayloadBytes,
+              String(data: body, encoding: .utf8) != nil else { throw MemoryError.invalid("provider request must be bounded UTF-8 JSON") }
+        let parsed: Any
+        do { parsed = try JSONSerialization.jsonObject(with: body) }
+        catch { throw MemoryError.invalid("provider request must be a JSON object") }
+        guard parsed is [String: Any] else { throw MemoryError.invalid("provider request must be a JSON object") }
+        let forbidden = Set(["apikey", "authorization", "proxyauthorization", "password", "accesstoken", "bearer", "token", "headers", "cookies"])
+        func credentialsPresent(_ value: Any) -> Bool {
+            if let object = value as? [String: Any] {
+                return object.contains { key, child in
+                    let normalized = key.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
+                    return forbidden.contains(normalized) || credentialsPresent(child)
+                }
+            }
+            if let array = value as? [Any] { return array.contains(where: credentialsPresent) }
+            return false
+        }
+        guard !credentialsPresent(parsed) else { throw MemoryError.invalid("provider request snapshots must exclude credentials and HTTP headers") }
+    }
+
+    private static func defaultTerminalReason(_ status: CaptureStatus) -> InvocationTerminalReason {
+        switch status {
+        case .complete: return .completed
+        case .cancelled: return .cancelled
+        case .partial: return .upstreamIncomplete
+        case .failed: return .transportFailure
+        }
+    }
+
+    private func validateTerminal(status: CaptureStatus, reason: InvocationTerminalReason) throws {
+        let valid: Bool
+        switch status {
+        case .complete: valid = reason == .completed
+        case .cancelled: valid = reason == .cancelled
+        case .partial: valid = reason != .completed && reason != .admissionFailure
+        case .failed: valid = reason != .completed && reason != .cancelled
+        }
+        guard valid else { throw MemoryError.invalid("capture status and invocation terminal reason disagree") }
     }
 
     private func conversation(_ id: String) throws -> StoredConversation {

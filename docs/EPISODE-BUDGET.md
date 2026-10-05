@@ -1,0 +1,162 @@
+# Durable episode budgets and preflight accounting
+
+Status: proposed next implementation wave, October 4, 2026. This document specifies work that is not enforced by the current application. It covers the phase 0 resource contract and phase 2 answering/retrieval baseline. It does not introduce a service, policy mutation, deletion, external actions, or a summary tree.
+
+## Current gaps and the next outcome
+
+The selected Qwen adapter admits an exact request against its provider context limit. It records completed admission attempts, calibration usage and an unknown-calibration flag. `ProviderAdmissionOperation` increments its counters immediately before `URLSessionDataTask.resume()`, but those counters remain in process memory. The GUI collects them in `pendingAdmissionAccounting` and writes them through `admissionAudit()` only when it starts or terminalizes the answering invocation. A process death during preflight can therefore leave accepted human input with no durable preflight attempt or usage reservation.
+
+Context overflow can initiate another admission operation. Each operation has its own 45-second preflight bound; the answer transport has its own timeout. There is no shared durable episode deadline, aggregate token allowance, model-call allowance, or retrieval-work allowance across those attempts. Stop records completed in-memory accounting and cancels transport; it cannot prove that an already submitted calibration or answer stopped computing on the server.
+
+The next outcome is one persisted episode per accepted top-level request, containing every preflight attempt, retrieval operation and answering invocation. Work reserves capacity before it runs. Network attempts are durably armed before handoff. Restart preserves spent and uncertain capacity, terminalizes interrupted episodes, and never resumes their requests automatically. One counter model governs GUI, CLI answering and evaluation paths.
+
+## Resource contract to freeze
+
+An episode begins at human submission, before context preparation or model discovery, and ends at a final answer, terminal error, Stop, interruption or its deadline. Automatic context reductions, reformulations, fallbacks and retries retain the same episode ID. An explicit new human submission creates a new episode; an implementation must not disguise an automatic retry as a fresh episode to replenish quotas.
+
+The plan and `preregistration-v1.json` already propose these aggregate limits:
+
+| Resource | Initial episode cap | Charge definition |
+|---|---:|---|
+| Model input | 1,000,000 tokens | The full provider-rendered input for every model attempt, including repeated/cached prefixes and calibration. A cached prefix remains input work. |
+| Model output | 16,000 tokens | All reported generated output, including reported reasoning. Reserve a supported upper bound before dispatch. |
+| Model calls | 12 | Every inference attempt, including calibration, planning, reranking and query embedding; no successful-answer-only counter. |
+| Memory operations | 24 | Host-facing search, source paging, neighbor lookup, context reconstruction and other logical retrieval operations. |
+| Raw source work | 256 MiB | Payload bytes loaded or examined, including unsuccessful candidates, validation and repeated reads; define the accounting version below. |
+| Wall time | 120 seconds | Submission through terminal outcome, including capture, queueing, retrieval, preflight, answering and finalization. |
+
+Add a proposed auxiliary cap of 64 provider HTTP attempts, including discovery and tokenization, so metadata retries cannot consume unbounded work without using a model-call slot. Retain current per-request body/response limits. Keep bounded candidate/metadata/vector limits, and report their consumption independently. These auxiliary limits and the raw-work counting version need a development protocol amendment before measurement; do not rewrite the original preregistration.
+
+Per-request admission remains mandatory. The current provider limit, safety margin and response reserve must fit together even when ample episode budget remains. Output headroom must not be silently reduced to make an episode pass. If an explicit smaller output request is supported, create and admit a new canonical body within the same episode and retain the previous attempt's accounting.
+
+The recent-context token cap is still null in the frozen decision sheet. A concrete starting proposal is 8,000 recent-text tokens and the plan's 12,000 evidence-text tokens, measured with the pinned answering tokenizer over the actual labeled text, including citations and source framing. Whole-request admission separately counts the exact provider rendering. These component limits replace no provider-envelope checks and require development validation before becoming the matched comparison configuration. Current 24,000/12,000 context byte bounds remain memory-allocation guards rather than token estimates.
+
+### Observable and unsupported usage
+
+`ProviderUsage.completionTokens` already contains any `reasoningTokens` reported as its subset. Do not add the reasoning field again. An adapter whose output cap excludes hidden reasoning must supply a verified bound for that extra generation before the output reservation can be treated as complete. Unknown output is not zero, and visible UTF-8 bytes are not a substitute for billed tokens.
+
+The Apple sentence encoder performs inference but does not currently expose its model tokenizer or token usage. Count each query encoding as a model call, record its exact input byte count and encoder identity, and mark its model input tokens unknown. The native GGUF/Bonsai paths also lack verified exact input admission. Neither path can be included in a claim that all model input tokens satisfy the plan's aggregate cap until it has a supported count or a documented adapter-specific conservative bound. The strict token-budget path must fail closed or use lexical retrieval when an uncountable query encoder is required. A separately labeled observable-budget mode can retain that encoder, but must not claim complete token accounting. Choosing a common normalization tokenizer for otherwise opaque encoders would change the resource estimand and needs an explicit frozen contract; it is not actual encoder usage.
+
+Background index construction is a maintenance job with its own limits and cost record. It is not free. Charge construction to the production trajectory once under the evaluation's amortization rules. If an episode explicitly waits for index construction, charges that job as a synchronous retrieval repair, or performs a query embedding, the attributable interactive work and elapsed time also belong to that episode. Do not launch unmetered synchronous indexing under a background label.
+
+## Persisted schema and API
+
+Use a schema 3 migration in the existing owner-controlled SQLite database. Keep accepted events and invocation chunks unchanged. The new records are private runtime evidence and belong in verified archives. Update backup recognition/inventory/schema handling in the same implementation wave; a schema 3 store must not become unbackable or fall through schema 2 validation.
+
+| Record | Required fields and constraints |
+|---|---|
+| `episodes` | Stable ID, conversation/project/turn/human-event IDs, creation time, deadline clock domain and ticks, display-only UTC deadline, frozen limit JSON plus digest/version, state, terminal reason, budget revision. States: `active`, `completed`, `failed`, `cancelled`, `interrupted`, `deadline_exceeded`, `budget_exceeded`. |
+| `episode_work` | Stable operation ID, episode FK, parent operation ID, kind, attempt number, state, body/source-selection digest, destination/adapter identity where applicable, request-snapshot reference, reserved resource vector, charged resource vector, nullable observed usage, receipt digest, start/end/arming timestamps. Unique stable IDs make identical replay safe and changed replay a conflict. |
+| `episode_resource_totals` | Episode/resource key, charged units, held units and cap. Integers are nonnegative and checked for overflow. A transaction updates every requested resource together; no partial reservation. |
+| `episode_request_snapshots` | Canonical credential-free candidate/calibration body, SHA-256, renderer version and bytes. Reuse one snapshot for repeated counts of the identical body. Tokenizer attempts can reference that body/render digest rather than duplicate the rendered prompt. |
+| Invocation linkage | Add `episode_id` and answering-work ID to invocations. The existing request body/usage APIs remain compatible during the first migration. Retain old schema 2 records as explicitly unmetered historical invocations. |
+
+Do not pack the complete episode journal into every invocation's bounded admission JSON. Store compact episode/work/snapshot references and the admitted request receipt there. Keep complete accounting in the episode tables. Request bodies remain private evidence; credentials and HTTP authorization headers remain outside SQLite.
+
+Proposed typed interfaces are:
+
+```swift
+acceptRequestAndBeginEpisode(request, limits, clock) -> AcceptedEpisode
+reserveWork(episodeID, operationID, kind, resources, requestSnapshot) -> WorkReservation
+armWork(reservation, expectedBudgetRevision) -> DispatchTicket
+recordWorkReceipt(operationID, receiptID, observedUsage, outcome) -> WorkSettlement
+cancelUnarmedWork(operationID, proofNoHandoff) -> WorkSettlement
+finishEpisode(episodeID, reason) -> EpisodeReceipt
+episodeReceipt(episodeID) -> EpisodeReceipt
+```
+
+`acceptRequestAndBeginEpisode` commits complete accepted human content and the episode together before context preparation. A mandatory context overflow retains that input and terminalizes the episode. The storage limit remains a separate explicit acceptance limit. Every resource mutation runs under the existing serialized owner transaction. An idempotent receipt does not charge twice; a conflicting receipt or operation replay fails.
+
+The coordinator supplies an `EpisodeLease` to all provider/retrieval adapters. It exposes reservation and cancellation/deadline checks, rather than permitting an adapter to reset its own counter. A budget revision fences late work callbacks. This revision is solely a budget lifecycle mechanism and provides no policy/deletion authority or control-epoch guarantee.
+
+## Reservations, dispatch and unknown outcomes
+
+Use the following work transitions:
+
+| State | Reservation and recovery rule |
+|---|---|
+| `prepared` | Intent and capacity are committed; handoff has not been armed. Capacity can be released after cancellation or restart establishes this state never dispatched. |
+| `dispatch_armed` | Durable before network handoff or inference start. A crash can fall on either side of handoff. Recover as unknown, retain the call charge and uncertain capacity. |
+| `submitted` | Client transport acknowledged submission. This still does not establish server computation or final usage. |
+| `completed` | A valid terminal receipt settles held output/other capacity using observed usage. |
+| `failed_confirmed` | Preserve attempts and work already incurred. Release only capacity whose nonuse the adapter actually establishes. |
+| `outcome_unknown` | Observed usage stays null. Keep the supported reservation upper bound charged/held for admission; show unknown actual cost. |
+| `cancelled_before_dispatch` | Host established no handoff; release unused held capacity. Source capture and prior operations remain recorded. |
+
+Admission checks `charged + held + newReservation <= cap` for every resource in one transaction. Arming commits the model-call slot and known prompt-input charge; output headroom remains held until a valid terminal usage receipt. Reports distinguish observed usage, conservative budget charges and unresolved reservation bounds. An unknown reservation is not evidence that those tokens were generated or billed.
+
+Before a calibration generation, the adapter has already counted its exact synthetic prompt. Persist that count, one model-call reservation and its one-token output reserve before arming the POST. Before the final answer, reserve the exact admitted prompt and the full output cap in the same way. Discovery/tokenizer requests reserve their HTTP attempt and existing bounded response capacity before `resume()`, even though they are not generative model calls. Their failure or cancellation records incurred HTTP/tokenization work; they do not erase preceding calibration costs.
+
+Context reductions produce new body digests and new tokenizer attempts under the same episode. A valid calibration cache key may avoid another calibration; it must not remove the charge for a calibration already performed. Keep the endpoint/model epoch/template/server/thinking identity in each receipt. A restart does not interpret a previously prepared probe as a completed calibration. Receipt expiry or adapter identity changes require fresh admission and consume the same remaining allowance.
+
+Default generative calibration retries should be zero. A transport error without an authoritative usage receipt is unknown; output reserve remains held. Metadata/tokenizer reads may retry under a declared bounded retry policy and remaining HTTP/deadline allowance. If a future calibration retry is enabled, freeze its limit, allocate a new attempt ID, charge the new call/input/output, and retain the unknown prior attempt. A count/template mismatch is a terminal adapter failure, never a reason to spend more calls until the mismatch disappears.
+
+## Raw source work and bounded retrieval
+
+The current candidate count is not a byte budget. `MemoryStore.search` selects complete payload BLOBs, decodes and verifies each event, and only then computes a clipped `MemoryHit`. The lexical-only assembler can load 16 complete events before delivering 12 KiB of evidence. `SemanticIndex.search` asks raw lexical and optional literal search for 100 candidates each: one branch can materialize 400 MiB at the current 4 MiB/event limit. Ordinary Send disables literal scanning, but its semantic branch still performs the 100-candidate lexical load. Fallback can repeat those loads, and the assembler revalidates delivered excerpt pages again.
+
+`literalSearch` uses SQLite `instr(payload, ...)`. Its hit limit does not bound the number or bytes of nonmatching rows inspected. Its current scan-byte report is unknown. A zero-hit query can still examine the entire project. Recent context is better bounded before BLOB loading, but must still be charged, including the repeated recent preparation in the semantic path. Semantic digest sealing may read a whole source through many pages; query-time result validation, continuation replay and source paging incur real source work too.
+
+Freeze `raw_work_v1` as a conservative logical work measure, not physical disk I/O:
+
+- Charge bytes returned/materialized from authoritative BLOB reads, including look-behind/look-ahead bytes, full candidate loads and repeated reads from cache.
+- Charge bytes examined by a raw-content matcher or full-source digest-validation pass, including candidates and rows that produce no result. If a primitive cannot observe its actual examined bytes, reserve its declared worst-case bound and report a conservative charge.
+- Count distinct passes again. Returning a small excerpt does not undo loading, matching or validation work. Do not count Swift allocation copies as independently known disk reads; record peak/materialized bytes and derived-vector work separately.
+- Keep metadata-only lookups and FTS index scoring outside the raw-payload byte metric, but bound their rows/candidates and interrupt their SQL work at cancellation/deadline checks. Their latency stays inside the episode.
+
+The exact minimal retrieval change is a metadata-first lexical candidate API. It returns scoped IDs, rank, sequence, byte count and source digest without selecting `payload`. Inspect at most the frozen candidate limit. Process candidates individually after reserving enough raw work for that candidate's full load, integrity validation and the declared preview-matching algorithm. Retain bounded excerpts and metadata, then discard the full payload before the next candidate. This removes the current 400 MiB aggregate materialization. A conservative preview bound must depend on the actual term count and algorithm; simply reserving `byte_count` while scanning that text repeatedly is insufficient.
+
+Do not call the old BLOB-selecting search from a budgeted episode. If remaining work cannot inspect another candidate, return an explicit incomplete result and a continuation tied to query digest, source frontier, scope, ranking version and episode ID. Do not skip an unaffordable highest-ranked candidate silently and claim exhaustive recall. Chunk-level lexical indexing or a streaming Unicode matcher can improve the conservative bound later; they are not prerequisites for enforcing it.
+
+Replace interactive literal `instr` scans with a host-controlled source sequence walk. Reserve each bounded read/match chunk before access, retain overlap required for the literal query across page boundaries, preserve exact UTF-8 byte offsets, and count overlapping work each time. Return searched scope/frontier, bytes examined, incomplete status and a stable continuation when the quota expires. A matching source's returned evidence still needs the supported integrity check under its own work reservation. An explicitly larger manual search is a new declared operation, not an automatic episode quota reset.
+
+Semantic search must use the metadata-first lexical path, reserve query-encoder inference, bound vector bytes/rows including its look-ahead row, and charge every raw page it verifies or returns. A semantic failure's lexical fallback uses the remaining episode budget. It cannot restart with fresh allowances. Metadata validation failures remain integrity errors. Budget/deadline errors must not be swallowed by the current broad catch and retried as a new lexical fallback.
+
+Define memory-operation slots at the host boundary: one composite context preparation, search or retrieval replay consumes a slot, and every host-requested page read/neighbor expansion consumes its own slot. Internal source-reference checks belong to their parent operation rather than consuming dozens of hidden service slots, while all underlying bytes/work remain charged. Keep this operation definition versioned. The future read-only client interface and evaluation harness must expose the same definition, so a client cannot package an unlimited scan into one apparent call.
+
+## Deadline, Stop and restart
+
+Start a continuous monotonic deadline before capture/context preparation, including queue wait. Use a verified clock backend that advances during sleep; persist its boot/clock identity and deadline ticks. UTC is display metadata. Wall-clock changes cannot replenish time. On process restart, all active episodes become terminal interrupted or deadline-exceeded; no automatic continuation is admitted. If the prior clock domain cannot be compared, elapsed time remains unknown instead of resetting to zero.
+
+Move context/retrieval preparation onto the episode coordinator so the main thread can request Stop while work is running. Stop closes further reservations and transport handoffs, increments the budget revision, cancels active transport/SQL work, and terminalizes the episode. Do not hold a SQLite transaction across network calls or slow source scanning. Use short reservations and bounded primitives; a SQL progress callback checks a cancellation token without recursively entering the owner database lock.
+
+Durably received visible chunks remain available as partial evidence. Late content callbacks cannot append or display new chunks through a terminal episode's lease. A later authoritative usage receipt may settle accounting by its original work ID without reopening the episode or publishing late answer content. Cancellation cannot establish that the server immediately stopped; unknown output reserves stay retained. A provider receipt exceeding its output reservation or disagreeing with exact prompt admission is an explicit adapter violation, preserving the receipt and blocking new work through that adapter until reverified.
+
+Startup recovery reads every active work record before new episode admission. Prepared-but-unarmed records cancel without handoff; armed/submitted records recover unknown; valid terminal receipts are replayed idempotently. The invocation journal independently recovers committed answer fragments. Episode and invocation terminal states must agree on interruption/Stop/error attribution. A process-kill fixture must distinguish preflight-only episodes from answer invocations; preflight should no longer disappear merely because the answer invocation had not started.
+
+## Implementation sequence and ownership
+
+| Workstream | Minimal deliverable | Integration dependency |
+|---|---|---|
+| Ledger | Schema 3, atomic accepted-input/episode creation, reservations, receipts, recovery and content-free diagnostics | Frozen resource/counter semantics |
+| Provider bridge | Lease-aware discovery/tokenization/calibration/answer dispatch, snapshot IDs and durable arming before every network start | Ledger APIs; preserve exact canonical body |
+| Retrieval primitives | Metadata-first lexical candidates, bounded literal continuation, charged recent/source reads, semantic/fallback lease propagation | Ledger APIs and raw-work definition |
+| Coordinator and evaluation | One submission/deadline/Stop lifecycle, GUI/CLI adoption, aggregate reports and development protocol amendment | All three adapters; explicit unsupported-token paths |
+
+These streams can proceed in parallel after the interfaces and fixtures are frozen. One owner integrates shared `MemoryStore`, GUI, schema/backup and main-entry edits. The first executable checkpoint is durable preflight plus one answered GUI episode with enforced limits. The full checkpoint also requires every enabled retrieval branch to use the same lease and all automatic reductions/fallbacks to preserve its allowance; a provider-only ledger is insufficient.
+
+## Required failure fixtures and completion evidence
+
+| Fixture | Required evidence |
+|---|---|
+| SIGKILL before first preflight call | Accepted human event and episode survive; unarmed work has no alleged usage and no replayed request. |
+| SIGKILL after arming calibration, before/after HTTP handoff | Durable unknown calibration attempt survives; model/input charge and output bound remain; no automatic resend. |
+| Lost calibration response or Stop during calibration | Fixed bounded outcome, observed usage unknown, held capacity retained, next callback cannot dispatch an answer. |
+| Many individually admissible reductions | One shared HTTP/token/model/deadline allowance applies; prior attempts remain charged. |
+| Repeated/cached prompt prefixes | Exact full input charged for each inference attempt; economic cache fields reported separately. |
+| Usage replay/conflict | Identical receipt settles once; changed usage/identity/body receipt fails without freeing capacity. |
+| Reported reasoning and missing usage | Reasoning subset is not double-counted; missing output stays unknown, never inferred from visible bytes. |
+| Concurrent reservations racing the last slot | Exactly one fits; no negative, overflowed or partially committed resource vector. |
+| One hundred 4 MiB lexical candidates | Metadata selection stays bounded; no unreserved full BLOB loads; quota exhaustion is explicit before another candidate. |
+| Literal miss across a large project | Every inspected chunk is charged; stable continuation and incomplete coverage return instead of an unmetered SQL scan. |
+| Literal crossing a page or UTF-8 boundary | Exact source span survives bounded overlapping reads; overlap work is charged. |
+| Semantic failure after raw candidates | Lexical fallback uses the remaining allowance and preserves spent work; exhaustion is not caught as an ordinary semantic outage. |
+| Recent, replay and validation rereads | Charged totals include real repeated payload work, not only the final evidence bytes. |
+| Deadline during lookup/answer; clock rollback; sleep | New work/output is fenced, durable partial output remains, elapsed time cannot reset; unknown remote computation is stated. |
+| Crash followed by repeated application restart | Episodes remain terminal; call/input/unknown-output charges are stable and recovery publishes no duplicate answer. |
+| Schema 2 to 3 and backup/restore | Old invocations remain labeled unmetered; new budget records/held unknown outcomes survive a verified restore; unsupported source schemas fail before mutation. |
+| Evaluation cap/deadline exhaustion | Episode scores failure at the recorded terminal/deadline; the arm gets no hidden retry, extra time, or omitted denominator entry. |
+
+Completion requires shared GUI/CLI/evaluation execution against this ledger, real kill/reopen tests at preflight boundaries, provider-fixture reservation/usage checks, and retrieval stress fixtures covering bytes loaded behind small excerpts. Report observed usage, conservative bound charges, remaining reservations, terminal reason, coverage limitations, memory-path time and total episode time independently. Missing exact encoder usage and production cost remain explicit limits.
+
+The immediate engineering work needs no new user permission. Maintainers must resolve the opaque embedding-input accounting mode and freeze the still-null matched recent-context token cap before claiming a complete phase 0 budget contract or running a matched held-out comparison. The proposed defaults above are starting configuration choices, not measured optimal settings.

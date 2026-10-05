@@ -2,13 +2,14 @@ import Foundation
 
 enum EndpointChecks {
     static func runIntegration(baseURL: String) -> [String: Bool] {
-        var checks: [String: Bool] = [:]
-        for mode in ["good", "http-error", "sse-error", "unfinished", "length", "redirect", "malformed", "cancel"] {
+        var checks = ProviderAdmissionChecks.runIntegration(baseURL: baseURL)
+        for (index, mode) in ["good", "http-error", "sse-error", "unfinished", "length", "redirect", "malformed", "cancel", "usage-missing", "usage-mismatch", "stream-model-mismatch"].enumerated() {
             let runner = EndpointRunner()
             var settings = GenerationSettings()
             settings.profile = .customLocal
             settings.endpointURL = baseURL
-            settings.endpointModel = "fixture-" + mode
+            settings.endpointModel = Qwen38TextAdapter.modelID
+            settings.seed = 100 + index
             settings.endpointAPIKey = "synthetic-key"
             settings.messagesOverride = [
                 ["role": "system", "content": "Synthetic test instruction."],
@@ -29,7 +30,10 @@ enum EndpointChecks {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
             checks[mode + "_completes_once"] = completions == 1
             switch mode {
-            case "good": checks["auth_and_full_role_history"] = result?.failure == nil && answer == "17日"
+            case "good":
+                checks["auth_and_full_role_history"] = result?.failure == nil && answer == "17日"
+                checks["exact_admission_and_usage_carried"] = result?.providerAdmission?.promptTokens == result?.providerUsage?.promptTokens
+                    && result?.providerUsage?.completionTokens == 2 && result?.providerUsage?.cachedTokens == 1
             case "http-error": checks["http_error_visible"] = result?.failure == "http_failed" && answer.isEmpty
             case "sse-error": checks["stream_error_visible"] = result?.failure == "process_failed"
             case "unfinished": checks["partial_eof_not_success"] = result?.failure == "invalid_stream" && answer == "partial"
@@ -37,6 +41,8 @@ enum EndpointChecks {
             case "redirect": checks["redirect_not_followed"] = result?.failure == "redirect_rejected"
             case "malformed": checks["malformed_stream_visible"] = result?.failure == "invalid_stream"
             case "cancel": checks["cancel_returns_partial_once"] = result?.stopped == true && answer == "partial"
+            case "usage-missing", "usage-mismatch", "stream-model-mismatch":
+                checks[mode + "_fails_explicit"] = result?.failure == "provider_count_mismatch" && answer == "17日"
             default: break
             }
         }
@@ -44,7 +50,7 @@ enum EndpointChecks {
     }
 
     static func run() -> [String: Bool] {
-        var checks: [String: Bool] = [:]
+        var checks = ProviderAdmissionChecks.run()
         checks["local_custom_port_base"] = LocalEndpoint.chatURL("http://localhost:11234/v1/")?.path == "/v1/chat/completions"
         checks["local_ipv6"] = LocalEndpoint.chatURL("http://[::1]:11234/v1") != nil
         checks["full_endpoint_accepted"] = LocalEndpoint.chatURL("http://127.0.0.1:11234/v1/chat/completions") != nil

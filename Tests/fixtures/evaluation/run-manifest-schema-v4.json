@@ -1,0 +1,220 @@
+{
+  "$defs": {
+    "profile": {
+      "additionalProperties": false,
+      "properties": {
+        "cacheBoundary": {
+          "type": "string"
+        },
+        "report": {
+          "type": "object"
+        },
+        "summary": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "report",
+        "summary",
+        "cacheBoundary"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:boros:evaluation:run-manifest:v4",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "diagnosticOverride": {
+      "type": "boolean"
+    },
+    "fixtureSet": {
+      "additionalProperties": false,
+      "properties": {
+        "answerableCount": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "episodeCount": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "eventCount": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "historyCount": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "prototypeByteFeasibleAnswerableCount": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceBytes": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sha256",
+        "historyCount",
+        "eventCount",
+        "sourceBytes",
+        "episodeCount",
+        "seed",
+        "answerableCount",
+        "prototypeByteFeasibleAnswerableCount"
+      ],
+      "type": "object"
+    },
+    "hardware": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture": {
+          "type": "string"
+        },
+        "concurrency": {
+          "const": 1
+        },
+        "logicalCPUCount": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "machineModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memoryBytes": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "operatingSystem": {
+          "type": "string"
+        },
+        "providerRequests": {
+          "const": 0
+        }
+      },
+      "required": [
+        "architecture",
+        "operatingSystem",
+        "machineModel",
+        "logicalCPUCount",
+        "memoryBytes",
+        "concurrency",
+        "providerRequests"
+      ],
+      "type": "object"
+    },
+    "implementation": {
+      "additionalProperties": false,
+      "properties": {
+        "gitRevision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "sourceSHA256": {
+          "additionalProperties": {
+            "$ref": "#/$defs/sha256"
+          },
+          "type": "object"
+        },
+        "sourceSnapshot": {
+          "type": "string"
+        },
+        "swiftVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "gitRevision",
+        "sourceSHA256",
+        "sourceSnapshot",
+        "swiftVersion"
+      ],
+      "type": "object"
+    },
+    "pending": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "preregistrationSHA256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "profiles": {
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "construction": {
+          "additionalProperties": false,
+          "properties": {
+            "report": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "report"
+          ],
+          "type": "object"
+        },
+        "process_restart": {
+          "$ref": "#/$defs/profile"
+        },
+        "warm": {
+          "$ref": "#/$defs/profile"
+        }
+      },
+      "type": "object"
+    },
+    "protocolAmendmentSHA256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "purpose": {
+      "const": "public synthetic partial-Arm-B retrieval groundwork; no answerer or deployment decision"
+    },
+    "recordedAtUTC": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "reportSchemaVersion": {
+      "const": 4
+    }
+  },
+  "required": [
+    "reportSchemaVersion",
+    "recordedAtUTC",
+    "purpose",
+    "preregistrationSHA256",
+    "diagnosticOverride",
+    "fixtureSet",
+    "implementation",
+    "hardware",
+    "profiles",
+    "pending",
+    "protocolAmendmentSHA256"
+  ],
+  "title": "Boros development retrieval manifest v4: SQL exclusions before LIMIT and strict numeric contracts",
+  "type": "object"
+}

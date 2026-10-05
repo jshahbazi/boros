@@ -1,0 +1,203 @@
+{
+  "cacheProfiles": {
+    "paused": null,
+    "process_restart": "separate evaluation process with retained index; OS cache uncontrolled; first probe per history distinct",
+    "providerShortTTLSeconds": null,
+    "warm": "same process as index construction; fixed probe order"
+  },
+  "createdUTC": "2026-10-04",
+  "economicAccounting": {
+    "chargeIncrementalRetriesInvalidationsAndRebuilds": true,
+    "chargeInitialProductionBuildOncePerTrajectory": true,
+    "eachArmOwnCache": true,
+    "missingUsageIsUnknown": true,
+    "researchReplicateSpendReportedSeparately": true,
+    "zeroSuccessResamples": "retain infinite cost and undefined ratios; fail/inconclusive respectively"
+  },
+  "fixtureSets": {
+    "development": {
+      "answerableCount": 256,
+      "episodeCount": 288,
+      "eventCount": 879,
+      "historyCount": 32,
+      "prototypeByteFeasibleAnswerableCount": 224,
+      "seed": 104202601,
+      "sha256": "27632a432ed6fccdd99d87d7e70820098cdfc3fedd69cab333efaf6f16d1e844",
+      "sourceBytes": 3940179
+    },
+    "held-out": {
+      "answerableCount": 1600,
+      "episodeCount": 1800,
+      "eventCount": 5510,
+      "historyCount": 200,
+      "prototypeByteFeasibleAnswerableCount": 1400,
+      "seed": 104202603,
+      "sha256": "679e973e95981ea9ab1bec72c3f2e4a81d4c15d7d6f7b5ebc3ab3da356881724",
+      "sourceBytes": 24628150
+    },
+    "validation": {
+      "answerableCount": 256,
+      "episodeCount": 288,
+      "eventCount": 889,
+      "historyCount": 32,
+      "prototypeByteFeasibleAnswerableCount": 224,
+      "seed": 104202602,
+      "sha256": "7c6adfff64ed396a523a03407ca8ab6e80bb4709739f4a316fb8a9eedfec995b",
+      "sourceBytes": 3941429
+    }
+  },
+  "fixtureVersion": "boros-retrieval-fixtures-v1",
+  "futureCategories": [
+    "exact_historical_facts",
+    "cross_session_temporal_updates",
+    "immediate_exact_followups",
+    "scoped_instruction_lifecycle",
+    "appropriate_abstention"
+  ],
+  "futureEpisodeCaps": {
+    "deadlineSeconds": 120,
+    "generatedOutputTokensIncludingReportedReasoning": 16000,
+    "inputTokensAcrossCalls": 1000000,
+    "memoryServiceCalls": 24,
+    "modelCalls": 12,
+    "rawEvidenceTokens": 12000,
+    "rawScanBytes": 268435456,
+    "recentContextTokens": null
+  },
+  "futureGates": {
+    "costEnvelope": {
+      "upper95TargetCostPerSuccessRatioAtMost": 1.25
+    },
+    "costFirstAlternativeBeforeHeldOut": {
+      "lower95TaskScoreDifferenceAbove": -0.02,
+      "upper95TargetCostPerSuccessRatioAtMost": 0.8
+    },
+    "criticalCategoryRegressions": {
+      "categories": [
+        "immediate_exact_followups",
+        "scoped_instruction_lifecycle",
+        "appropriate_abstention"
+      ],
+      "lower95DifferenceAbove": -0.02
+    },
+    "endpoint": {
+      "sourceBytesChunksConcurrencyMustBeDeclared": true,
+      "textEvents": 100000,
+      "warmP95MillisecondsBelow": 1000
+    },
+    "finiteSuiteRecall": {
+      "minimumAllRequiredSpanRecallEachReplicateBuild": 0.95,
+      "providerBudgetFeasibleAnswerableOnly": true
+    },
+    "interactionEnvelopeEveryProfile": {
+      "maximumAddedP95MemoryPathMilliseconds": 500,
+      "maximumP95FullEpisodeRatio": 1.1,
+      "useWorstEmpiricalReplicateP95": true
+    },
+    "invariants": "every applicable deterministic invariant passes; acknowledged data loss/forbidden executed action blocks release",
+    "qualityFirst": {
+      "lower95DifferenceAbove": 0.0,
+      "minimumPairedTaskScorePointDifference": 0.05
+    }
+  },
+  "futureMinimums": {
+    "answeringReplicates": 3,
+    "independentHistoriesOverall": 200,
+    "independentHistoriesPerCriticalCategory": 50,
+    "independentSummaryBuildsForTree": 3,
+    "largerSampleIfDevelopmentPowerAnalysisRequires": true
+  },
+  "futurePrimaryMode": "quality-first",
+  "generatorSHA256": "771bcb167139040856d6d54dff9f0a0f2067f15786f7dfe64deb3c301ca840fe",
+  "heldOutPolicy": "script blocks held-out execution until full baseline/configuration/admission/workload/power contracts and completed decision sheet are frozen",
+  "measurements": {
+    "absence": "separate false-hit report; answer abstention unknown",
+    "byteInfeasible": "separately reported; provider-token feasibility pending; retained in future overall task denominator",
+    "citationCorrectness": "model citation correctness unknown; report source reference resolvability only",
+    "confidence": {
+      "generalization": "this generator distribution only; repeated template families do not establish production accuracy",
+      "procedure": "shared history resample across categories; 95% percentile intervals",
+      "resamples": 10000,
+      "seed": 104202604,
+      "unit": "synthetic history cluster"
+    },
+    "contextCoverage": "exact gold substring presence in actual ContextSnapshot messages; recent source-ID provenance not available",
+    "gold": "exact sufficient UTF-8 source spans with source IDs/byte offsets/length/SHA-256; never passed into search/selection",
+    "latency": {
+      "memoryPath": "one retrieval/context-selection path only; query-planning/model rounds absent",
+      "percentile": "linear interpolation at (n-1)*p",
+      "timeoutPolicy": "no answering or provider deadline claim; harness fatal timeout recorded as failed execution, never omitted for a successful report",
+      "unit": "milliseconds"
+    },
+    "missingOrError": "zero span recall; included latency until terminal selection error",
+    "primaryProbeEstimand": "Equal weight across categories with answerable byte-feasible gold; average episodes within synthetic history, histories equally within category. Retrieval spans only; not plan task score.",
+    "scope": "project-matched original sources only"
+  },
+  "protocols": {
+    "current_prompt_lexical": {
+      "historicalQuery": "complete fixture prompt",
+      "implementation": "ContextAssembler.prepare",
+      "role": "available assembler API with full prompt as AND query; diagnostic, not current GUI behavior"
+    },
+    "raw_source_probe": {
+      "hitLimitPerMode": 16,
+      "implementation": "MemoryStore literal + lexical + original byte pages",
+      "maximumReadCalls": 19,
+      "maximumReturnedSourceBytes": 12000,
+      "readStart": "hit excerptOffset; then consecutive UTF-8 pages",
+      "role": "search and source-read diagnostic; no final model context renderer",
+      "union": "literal first, stable source-ID deduplication"
+    },
+    "recent_only": {
+      "historicalQuery": null,
+      "implementation": "ContextAssembler.prepare",
+      "role": "current GUI answer-context path and Arm A selection diagnostic; no answering"
+    },
+    "targeted_lexical": {
+      "historicalQuery": "frozen fixture lexicalQuery",
+      "implementation": "ContextAssembler.prepare",
+      "role": "explicit human-specified query diagnostic; no automatic query planner"
+    }
+  },
+  "prototypeBounds": {
+    "evidenceSerializedBytes": 12000,
+    "providerEvidenceTokens": null,
+    "providerInputTokens": null,
+    "recentSerializedBytes": 24000,
+    "serializedContextBytes": 65536,
+    "sourceReadBytes": 12000
+  },
+  "releaseDecision": "not eligible; no model answers, token-feasible labels, complete Arm B, workload/cost pilot or product confirmation",
+  "runOrder": [
+    "recent_only",
+    "current_prompt_lexical",
+    "targeted_lexical",
+    "raw_source_probe"
+  ],
+  "status": "development retrieval-probe contracts frozen; product confirmation pending",
+  "version": "boros-evaluation-preregistration-v1",
+  "workload": {
+    "categoryMix": null,
+    "concurrency": null,
+    "controlMutationFrequency": null,
+    "correctionRebuildFrequency": null,
+    "incrementalCaptureRate": null,
+    "initialImportBytes": null,
+    "initialImportEvents": null,
+    "pauseCacheSchedule": null,
+    "primaryHorizonDays": 90,
+    "reportHorizonsDays": [
+      1,
+      30,
+      90
+    ],
+    "reuseEpisodesPer1000NewEvents": [
+      1,
+      10,
+      100
+    ],
+    "sourceChunkCount": null,
+    "storageHostingAllocation": null,
+    "targetProfile": null
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:boros:evaluation:run-manifest:v1",
+  "title": "Boros synthetic retrieval run manifest and metadata report",
+  "type": "object",
+  "required": [
+    "reportSchemaVersion", "recordedAtUTC", "purpose", "preregistrationSHA256",
+    "diagnosticOverride", "fixtureSet", "implementation", "hardware", "profiles", "pending"
+  ],
+  "properties": {
+    "reportSchemaVersion": {"const": 1},
+    "recordedAtUTC": {"type": "string", "format": "date-time"},
+    "purpose": {"const": "public synthetic partial-Arm-B retrieval groundwork; no answerer or deployment decision"},
+    "preregistrationSHA256": {"$ref": "#/$defs/sha256"},
+    "diagnosticOverride": {"type": "boolean"},
+    "fixtureSet": {
+      "type": "object",
+      "required": ["sha256", "historyCount", "eventCount", "sourceBytes", "episodeCount", "seed", "answerableCount", "prototypeByteFeasibleAnswerableCount"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "historyCount": {"type": "integer", "minimum": 1},
+        "eventCount": {"type": "integer", "minimum": 1},
+        "sourceBytes": {"type": "integer", "minimum": 1},
+        "episodeCount": {"type": "integer", "minimum": 1},
+        "seed": {"type": "integer"},
+        "answerableCount": {"type": "integer", "minimum": 0},
+        "prototypeByteFeasibleAnswerableCount": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "implementation": {
+      "type": "object",
+      "required": ["gitRevision", "sourceSHA256", "sourceSnapshot", "swiftVersion"],
+      "properties": {
+        "gitRevision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "sourceSHA256": {"type": "object", "additionalProperties": {"$ref": "#/$defs/sha256"}},
+        "sourceSnapshot": {"type": "string"},
+        "swiftVersion": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "hardware": {
+      "type": "object",
+      "required": ["architecture", "operatingSystem", "machineModel", "logicalCPUCount", "memoryBytes", "concurrency", "providerRequests"],
+      "properties": {
+        "architecture": {"type": "string"},
+        "operatingSystem": {"type": "string"},
+        "machineModel": {"type": ["string", "null"]},
+        "logicalCPUCount": {"type": ["integer", "null"], "minimum": 1},
+        "memoryBytes": {"type": ["integer", "null"], "minimum": 1},
+        "concurrency": {"const": 1},
+        "providerRequests": {"const": 0}
+      },
+      "additionalProperties": false
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "warm": {"$ref": "#/$defs/profile"},
+        "process_restart": {"$ref": "#/$defs/profile"},
+        "construction": {"type": "object", "required": ["report"], "properties": {"report": {"type": "object"}}, "additionalProperties": false}
+      },
+      "additionalProperties": false
+    },
+    "pending": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "profile": {
+      "type": "object",
+      "required": ["report", "summary", "cacheBoundary"],
+      "properties": {"report": {"type": "object"}, "summary": {"type": "object"}, "cacheBoundary": {"type": "string"}},
+      "additionalProperties": false
+    }
+  }
+}

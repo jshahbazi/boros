@@ -104,7 +104,6 @@ final class ReasoningRunner {
         guard written == keyData.count else { throw NativeFailure.fixed("launch_failed") }
         let thinking = settings.effectiveThinkingEnabled
         let budget = settings.effectiveThinkingBudget
-        let sampler = settings.profile.sampling(preset: settings.samplingPreset, thinking: thinking)
         let template = thinking ? "{\"enable_thinking\":true}" : "{\"enable_thinking\":false}"
         let flashAttention = settings.profile == .falconH1Tiny ? "auto" : "on"
         var serverArguments = ["-m", model, "-c", String(settings.context), "-n", String(settings.maximumOutput),
@@ -145,19 +144,9 @@ final class ReasoningRunner {
             if !ready { Thread.sleep(forTimeInterval: 0.05) }
         }
         _ = unlink(keyPath)
-        var body: [String: Any] = [
-            "messages": settings.messages(prompt, conversation: conversation),
-            "stream": true, "stream_options": ["include_usage": true], "max_tokens": settings.maximumOutput,
-            "temperature": settings.temperature, "top_k": sampler.topK, "top_p": sampler.topP, "min_p": sampler.minP,
-            "presence_penalty": sampler.presencePenalty, "repeat_penalty": sampler.repetitionPenalty,
-            "seed": settings.seed, "cache_prompt": false
-        ]
-        if settings.profile.supportsThinking {
-            body["reasoning_format"] = "deepseek"
-            body["reasoning_budget_tokens"] = budget
-            body["chat_template_kwargs"] = ["enable_thinking": thinking]
-        }
-        let request = try JSONSerialization.data(withJSONObject: body)
+        let builtRequest = try NativeRequest.reasoningBody(prompt: prompt, settings: settings, conversation: conversation)
+        if let prepared = settings.preparedNativeBody, prepared != builtRequest { throw NativeFailure.fixed("admission_mismatch") }
+        let request = settings.preparedNativeBody ?? builtRequest
         let connection = try UnixHTTP(path: socketPath, token: job.token, job: job, deadline: deadline)
         defer { connection.close() }
         let status = try connection.request(method: "POST", path: "/v1/chat/completions", body: request)

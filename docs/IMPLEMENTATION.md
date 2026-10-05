@@ -23,19 +23,25 @@ The first store accepts bounded text payloads, retained completely as SQLite BLO
 
 SQLite uses WAL and synchronous FULL on a local filesystem. The process holds an exclusive owner lock. The store and runtime state live outside the checkout with private filesystem permissions. Tests must cover reopen, idempotency, scope filtering, full payload recovery, UTF-8 paging, and refusal of a second owner.
 
-This does not yet implement the plan's external-blob protocol, import adapters, backup/restore workflow, retention, purge, migrations across released versions, or global control epoch. Control mutations and external actions remain unavailable in this slice.
+This does not yet implement the plan's external-blob protocol, import adapters, retention, purge, migrations across released versions, or global control epoch. Control mutations and external actions remain unavailable in this slice. The [backup/restore component](BACKUP-RESTORE.md) now supplies consistent online SQLite snapshots, complete-source/journal verification, private no-clobber publication and restore recovery. File-menu and CLI entry points expose it. Settings are captured independently after the database snapshot; the semantic sidecar is derived and rebuilds after restore. Current deletion authority accepts only stores without deletion controls; enabling deletion requires external-ledger application before restored content can be published.
 
-Human input commits before model dispatch. Assistant output commits on completion, cancellation, or a reported transport failure with the appropriate capture status. Abrupt process termination before that callback can lose in-flight assistant fragments; streamed text is not yet journaled incrementally. Filesystem permissions protect ordinary local access; the database is not encrypted.
+The invocation journal commits each received visible-text chunk before the GUI displays it. Finalization atomically publishes the assistant event and lexical index. Exclusive-owner startup recovers unfinished attempts as partial or failed, retaining committed chunks. Schema version 2 upgrades existing version 1 stores. Exact request bytes, provider identity, admission/accounting metadata and final usage are retained as private invocation evidence. Chunk and terminal retries are idempotent; conflicting or late writes are rejected. Combined checks and real process-kill recovery passed; the historical foundation results below predate this work.
+
+Human input commits before admission or dispatch. Network bytes that were never delivered, callbacks that did not reach their durable commit, and a failed commit cannot be recovered. Filesystem permissions protect ordinary local access; the database is not encrypted. Invocation snapshots duplicate some source content, so future deletion, retention and backup work must include these records and stream chunks.
 
 ## Retrieval and context boundary
 
-Start with literal and FTS5 lexical search over accepted text. Search results identify original events and expose exact source reads. Semantic indexing and the optional summary tree require subsequent implementation and measured comparisons.
+Literal and FTS5 lexical search identify original events and expose exact source reads. A private [semantic sidecar](SEMANTIC-RETRIEVAL.md) now adds a pinned installed Apple English sentence encoder, resumable jobs, complete-source SHA-256 sealing, explicit coverage holes and replayable manifests. The optional summary tree remains gated by measured comparisons.
 
-Ordinary Send uses the current request to select up to eight unique alphanumeric terms after removing common English filler words. This bounded local query uses any-term lexical matching within the active project and supplies historical source excerpts through the existing evidence budget. The complete current request remains intact. Manual search retains its all-term matching default. Automatic recall can miss distinctive terms late in a long request or select irrelevant sources for broad queries; it does not establish general long-chat memory quality.
+Ordinary Send selects up to eight unique alphanumeric terms after removing common English filler words, then combines scoped any-term lexical matches with eligible semantic chunks. Recent/current sources are excluded in SQL before candidate limits. Query and indexing support are conservative English heuristics; unsupported, unavailable or failed semantic paths retain lexical retrieval. The complete current request remains intact. Automatic Send skips full-archive literal scanning; manual search retains literal and all-term lexical modes. Query selection can miss distinctive terms late in a long request or choose irrelevant sources; general long-chat memory quality remains unproven.
 
 Recent context and historical evidence have separate bounds. Historical excerpts are marked as evidence and remain user-content material. A stored assistant reply has assistant authorship; it does not become human authority. Partial responses retain their capture status.
 
-The initial assembler measures serialized message bytes. This is an operational bound, not the plan's provider-token admission contract. Exact tokenizer admission, full request-envelope accounting, durable invocation snapshots, and evaluation budgets are subsequent work. Provider context errors must remain visible.
+The assembler still bounds serialized message bytes. The selected-Qwen admission adapter counts the exact provider-rendered prompt separately and reserves response tokens plus a safety margin against the configured and observed server limits. Optional evidence and recent history can be removed and re-counted when token admission fails; mandatory host instructions and the complete current request remain intact. A canonical request builder supplies the same credential-free body for admission, journaling and HTTP dispatch. Completed preflight attempts retain calibration usage and unknown outcomes. Total episode budget enforcement and durable accounting across termination during preflight remain subsequent work.
+
+The GUI answer path supplies recent history and hybrid archive excerpts through `ChatContextPreparation`. Exact source metadata and bytes are revalidated before framing excerpts as quoted user content. Token reduction preserves the complete mandatory request and audits only actually delivered historical ranges. The authoritative invocation journal retains a bounded content-free retrieval/delivery audit, ordered recent-source ID digest/count, manifest ID, frontiers and configuration fingerprints. The full search manifest remains in the derived sidecar; its replay ID is unavailable after a backup restore that excludes that sidecar. Exact dispatched request bytes and delivered historical references survive restore.
+
+Archive search is also available through the source browser. The [evaluation specification](EVALUATION.md) distinguishes historical recent-only/AND-query diagnostics, targeted queries, original-source probes and the lexical-only helper branch (`semanticIndex:nil`). The installed-index hybrid GUI path remains unmeasured. Lexical excerpt selection currently loads whole matching payloads; candidate count and final excerpt bounds do not establish a raw-byte episode budget. Manual literal scans and daily background indexing work also lack total-work accounting.
 
 ## Model boundary
 
@@ -47,6 +53,8 @@ For the confirmed Qwen model, Request thinking forwards `enable_thinking`; it st
 
 HTTP transport accepts loopback destinations only, rejects redirects, handles SSE boundaries and terminal states, and supports client cancellation. Cancellation closes the client request; it does not establish that the external server immediately stops model computation. API keys belong in macOS Keychain, never the SQLite store or repository. The app performs no external tool actions.
 
+The exact admission adapter is restricted to the verified Qwen text template and mlx-serve version. Unknown models/templates/versions fail explicitly. Final server usage must agree with the admitted prompt count. Compatibility with an arbitrary OpenAI-style endpoint is not established by this adapter. Native GGUF snapshots now share the actual structured request builder, or record the process arguments and stdin for Bonsai; native token admission and immutable model/runtime identity are still unverified.
+
 ## Deferred contracts
 
 The complete [plan](../tracechat-plan.md) remains the target architecture. The following are not established by the initial native prototype:
@@ -54,11 +62,17 @@ The complete [plan](../tracechat-plan.md) remains the target architecture. The f
 - A standalone multi-client memory service, read-only MCP interface, and authenticated import API.
 - Task lifecycle, scoped policy mutation, transitive processing grants, and deletion/revocation fencing.
 - External-action execution and recovery journals.
-- Semantic retrieval, asynchronous indexing coverage, optional summary-tree construction, and reproducible frontiers.
-- Physical purge, safe backup/restore, and retention management.
+- General semantic retrieval quality, complete-corpus interactive scan coverage, optional summary-tree construction and daily background budgets.
+- Physical purge, retention management and deletion-aware restore.
 - Model-quality, total-cost, latency, or comparative recall claims.
 
 ## Verification record
+
+The first implementation wave passed `python3 scripts/check.py`: 324 checks (51 conversation/profile/message, 75 GUI, 9 native parser, 81 memory, 44 endpoint/provider admission, 19 context reduction/settings compatibility, 45 loopback HTTP integration). The standalone memory suite also passed its separate-process owner and real SIGKILL/reopen checks. The rebuilt development bundle passed strict deep signature verification. The live mlx-serve CLI passed both arithmetic turns after exact admission was enabled.
+
+An independent integration review found and closed a partial-output cancellation status mismatch and a native request/snapshot mismatch. The current source uses matching generation IDs to fence stale callbacks. The provider renderer passed 30 independent oracle cases and 24 live count comparisons across both thinking modes, Unicode boundaries and literal template markup. See [provider admission](PROVIDER-ADMISSION.md) for the pinned source, license, calibration costs and compatibility limits.
+
+The final frozen integration passed 478 combined checks: 51 conversation/profile, 78 GUI, 9 native parser, 95 memory, 44 endpoint/admission, 37 context, 60 semantic, 59 backup/CLI and 45 HTTP integration. Independent review reproduced and closed recent-source candidate starvation, unrelated SQLite source mutation during CLI backup and residual boolean coercion in evaluation helpers. The standalone memory suite passes 103 checks; backup/CLI passes 60 including real SIGKILL; semantic recovery passes six process-kill checks on two reopens. Evaluation contracts pass 41 tests and the v4 development source report is frozen. Counts overlap. The final bundle passed strict deep signature verification; live arithmetic dispatch also passed after integration. The latest visual GUI recheck remains pending.
 
 The following checks passed against the final native foundation:
 

@@ -21,7 +21,7 @@ def main():
     total = 0
     with tempfile.TemporaryDirectory(prefix="boros-checks-") as directory:
         env = {**os.environ, "BOROS_DATA_DIR": directory}
-        suites = ["--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test"]
+        suites = ["--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test", "--context-admission-self-test", "--semantic-self-test", "--backup-self-test"]
         for suite in suites:
             run = subprocess.run([str(binary), suite], capture_output=True, text=True, env=env, timeout=90)
             checks = json.loads(run.stdout)

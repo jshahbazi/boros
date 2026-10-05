@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct ContextMessage: Codable, Equatable {
     let role: String
@@ -11,22 +12,75 @@ struct ContextSnapshot {
     let serializedBytes: Int
     let omittedRecentCount: Int
     let includedRecentCount: Int
+    var recentSourceIDs: [String] = []
+    var retrievalManifestID: String?
+    var retrievalManifestJSON: Data?
+    var retrievalAuditJSON: Data?
+    var retrievalNotice: String?
+
+    /// Bounded, content-free delivery evidence for the authoritative journal.
+    /// Full search manifests live in the derived sidecar; the dispatched body
+    /// independently preserves every message and quoted source byte.
+    func deliveryAudit() throws -> Data {
+        let recentIDs = try JSONEncoder().encode(recentSourceIDs)
+        var value: [String: Any] = ["version": 1, "recent_source_count": recentSourceIDs.count,
+            "ordered_recent_source_ids_sha256": Self.digest(recentIDs), "omitted_recent_count": omittedRecentCount,
+            "historical_sources": evidence.map { hit in
+                ["event_id": hit.eventID, "conversation_id": hit.conversationID, "project_id": hit.projectID,
+                 "role": hit.role.rawValue, "capture_status": hit.status.rawValue, "source_sha256": hit.digest,
+                 "source_bytes": hit.totalBytes, "excerpt_offset": hit.excerptOffset,
+                 "excerpt_bytes": hit.excerpt.utf8.count, "excerpt_sha256": Self.digest(Data(hit.excerpt.utf8))] as [String: Any]
+            }]
+        if let retrievalAuditJSON { value["retrieval"] = try JSONSerialization.jsonObject(with: retrievalAuditJSON) }
+        let bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        guard bytes.count <= 32768 else { throw ContextError.invalidBudget }
+        return bytes
+    }
+
+    private static func digest(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
 
     /// Same role/content message-array shape used by the HTTP chat adapter.
     /// Counts JSON UTF-8 bytes, including escaping and message separators.
     func serializedMessages() throws -> Data {
         try ContextAssembler.serializedMessages(messages)
     }
+
+    /// Remove optional evidence first, then the oldest half of recent history.
+    /// The coordinator re-counts every candidate with the actual provider.
+    /// Mandatory system and current-user messages are never shortened.
+    func reducedForTokenAdmission() throws -> ContextSnapshot? {
+        guard messages.count == includedRecentCount + 2 + (evidence.isEmpty ? 0 : 1),
+              let system = messages.first, let current = messages.last else { throw ContextError.invalidBudget }
+        let recent = Array(messages.dropFirst().prefix(includedRecentCount))
+        if !evidence.isEmpty {
+            let candidate = [system] + recent + [current]
+            return ContextSnapshot(messages: candidate, evidence: [], serializedBytes: try ContextAssembler.serializedMessages(candidate).count,
+                omittedRecentCount: omittedRecentCount, includedRecentCount: includedRecentCount, recentSourceIDs: recentSourceIDs,
+                retrievalManifestID: retrievalManifestID, retrievalManifestJSON: retrievalManifestJSON,
+                retrievalAuditJSON: retrievalAuditJSON, retrievalNotice: retrievalNotice)
+        }
+        guard !recent.isEmpty else { return nil }
+        let removed = max(1, recent.count / 2)
+        let candidate = [system] + recent.dropFirst(removed) + [current]
+        return ContextSnapshot(messages: candidate, evidence: [], serializedBytes: try ContextAssembler.serializedMessages(candidate).count,
+            omittedRecentCount: omittedRecentCount + removed, includedRecentCount: includedRecentCount - removed,
+            recentSourceIDs: Array(recentSourceIDs.dropFirst(removed)), retrievalManifestID: retrievalManifestID, retrievalManifestJSON: retrievalManifestJSON,
+            retrievalAuditJSON: retrievalAuditJSON, retrievalNotice: retrievalNotice)
+    }
 }
 
 enum ContextError: LocalizedError {
     case invalidBudget
     case scopeMismatch
+    case sourceMismatch
     case mandatoryOverflow(required: Int, available: Int)
     var errorDescription: String? {
         switch self {
         case .invalidBudget: return "Context budget must be positive; recent history budget must be 0–180000 bytes and evidence budget must be nonnegative."
         case .scopeMismatch: return "The conversation belongs to a different project."
+        case .sourceMismatch: return "Retrieved source bytes or metadata no longer match the stored evidence."
         case .mandatoryOverflow(let required, let available):
             return "System instructions and the complete current prompt need \(required) serialized bytes; the configured context budget is \(available). Shorten the prompt or increase the byte budget."
         }
@@ -54,7 +108,8 @@ enum ContextAssembler {
         historicalQuery: String? = nil,
         maximumRecentBytes: Int = 24000,
         maximumEvidenceBytes: Int = 12000,
-        historicalMatching: LexicalMatchMode = .allTerms
+        historicalMatching: LexicalMatchMode = .allTerms,
+        historicalHits: [MemoryHit]? = nil
     ) throws -> ContextSnapshot {
         guard budgetBytes > 0, maximumRecentBytes >= 0, maximumRecentBytes <= 180000, maximumEvidenceBytes >= 0 else { throw ContextError.invalidBudget }
         guard try store.listConversations(projectID: projectID).contains(where: { $0.id == conversationID }) else { throw ContextError.scopeMismatch }
@@ -81,10 +136,20 @@ enum ContextAssembler {
 
         var evidence: [MemoryHit] = []
         var evidenceText = ""
-        if let historicalQuery, !historicalQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, maximumEvidenceBytes > 0 {
+        if maximumEvidenceBytes > 0, historicalHits != nil || historicalQuery?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             let excluded = Set(selected.map(\.id) + [excludingEventID].compactMap { $0 })
-            let hits = try store.search(query: historicalQuery, projectID: projectID, limit: 16, matching: historicalMatching)
+            let hits = try historicalHits ?? store.search(query: historicalQuery ?? "", projectID: projectID, limit: 16,
+                matching: historicalMatching, excludingEventIDs: excluded)
             for hit in hits where !excluded.contains(hit.eventID) {
+                // Supplied semantic/raw results cannot turn a stale or foreign
+                // excerpt into a source citation in this project's request.
+                guard let reference = try store.sourceReference(eventID: hit.eventID, projectID: projectID),
+                      hit.projectID == projectID, hit.conversationID == reference.conversationID,
+                      hit.role == reference.role, hit.status == reference.status, hit.digest == reference.digest,
+                      hit.createdAt == reference.createdAt, hit.totalBytes == reference.byteCount,
+                      !hit.excerpt.isEmpty, hit.excerpt.utf8.count <= MemoryStore.maximumPageBytes else { throw ContextError.sourceMismatch }
+                let original = try store.read(eventID: hit.eventID, offset: hit.excerptOffset, length: hit.excerpt.utf8.count)
+                guard original.text == hit.excerpt, original.digest == hit.digest else { throw ContextError.sourceMismatch }
                 let source = """
                     BEGIN HISTORICAL SOURCE
                     event_id: \(hit.eventID)
@@ -110,7 +175,8 @@ enum ContextAssembler {
 
         let evidenceMessages = evidenceText.isEmpty ? [] : [ContextMessage(role: "user", content: "Historical source excerpts for reference:\n\n" + evidenceText)]
         let messages = [systemMessage] + recent + evidenceMessages + [promptMessage]
-        return ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try serializedMessages(messages).count, omittedRecentCount: historyCount - selected.count, includedRecentCount: selected.count)
+        return ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try serializedMessages(messages).count,
+            omittedRecentCount: historyCount - selected.count, includedRecentCount: selected.count, recentSourceIDs: selected.map(\.id))
     }
 
     static func serializedMessages(_ messages: [ContextMessage]) throws -> Data {

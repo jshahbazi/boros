@@ -16,7 +16,9 @@ The build produces `.build/boros/Boros.app`. Use `--open` to launch it after bui
 
 ## Local model
 
-The user selected the already-running [Qwen3.8 Flash Next MLX model](https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit). Boros connects to the local server rather than downloading or loading a second copy. The default API address is `http://localhost:11234/v1/`, with the selected Qwen model ID. Both are configurable in Settings. Authentication credentials are entered through the app and stored in macOS Keychain.
+The user selected the already-running [Qwen3.8 Flash Next MLX model](https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit). The default mlx-serve API address is `http://localhost:11234/v1/`. Credentials are optional and use macOS Keychain. Boros verifies the selected model's complete prompt token count before dispatch, reserving response tokens and a safety margin within the API token budget.
+
+The verified API adapter currently supports this Qwen text template on mlx-serve 26.10.1. Changing the model, template or server version requires adapter verification; unsupported combinations fail visibly. See [provider admission](docs/PROVIDER-ADMISSION.md) for compatibility, template provenance and license details. Existing native GGUF profiles remain available with their runtime context controls.
 
 Server connectivity and model-quality validation are separate checks. A successful response establishes integration, not reliable memory, instruction following, or task performance.
 
@@ -27,10 +29,21 @@ The native interface preserves the earlier editor, scrolling transcript, streami
 ```sh
 python3 scripts/check.py
 python3 scripts/test_memory.py
+python3 scripts/test_semantic_recovery.py
+python3 scripts/test_backup.py
+python3 scripts/test_evaluation.py
 ```
 
 Use New Chat to start another retained conversation, the chat picker to reopen one, and Search Memory to inspect source events. The initial UI uses the `default` project. Chats and drafts are saved under `~/Library/Application Support/Boros`; `BOROS_DATA_DIR` selects an isolated store for development.
 
-Current limits: context admission counts serialized bytes, source search is synchronous, and semantic search, policy lifecycle, deletion, summary trees, and external actions are not implemented. See the implementation status for the full boundary.
+Accepted messages persist before dispatch; received answer chunks commit before display and interrupted attempts recover with an explicit incomplete status. Ordinary Send includes recent history and scoped lexical/semantic archive excerpts, excluding recent sources before candidate limits. Semantic retrieval uses an installed Apple English sentence encoder; unavailable or unsupported inputs retain lexical retrieval. Coverage gaps are recorded and surfaced. Search Memory provides scoped literal/lexical search and exact source pages.
+
+File → Create Backup produces a verified archive of complete sources and invocation journals. File → Restore Backup to New Folder creates a separate restored store. Command-line create/verify/restore is also available; see [backup and restore](docs/BACKUP-RESTORE.md). Credentials and the derived semantic sidecar are excluded; semantic indexing rebuilds when a restored store opens.
+
+Current limits include byte-bounded context assembly, synchronous source selection, unimplemented total episode budgets and background-index budgets, and pending policy lifecycle, deletion, summary trees and external actions. Manual literal scans have unknown scan accounting. Whole matching payloads are currently loaded for lexical excerpt selection. The installed semantic encoder's quality and the full hybrid GUI path remain unevaluated. See [project status](docs/STATUS.md) and [implementation status](docs/IMPLEMENTATION.md) for verified boundaries.
+
+## Local verification
+
+The automated commands above use synthetic data and isolated stores. The [evaluation specification](docs/EVALUATION.md) freezes fixtures, splits, estimands and decision gates. Synthetic source coverage and arithmetic smoke tests do not establish general model quality or production cost/latency improvements.
 
 See [GUI provenance](docs/GUI-ORIGIN.md), the [independent design review](tracechat-adversarial-review.md), and [implementation status](docs/IMPLEMENTATION.md).

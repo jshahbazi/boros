@@ -1,0 +1,3 @@
+# Preserve imported license bytes and their upstream whitespace verbatim.
+licenses/models/MiniCPM5-2B-LICENSE -text whitespace=-trailing-space
+Tests/qwen38-chat-template.LICENSE -text whitespace=-trailing-space,-cr-at-eol

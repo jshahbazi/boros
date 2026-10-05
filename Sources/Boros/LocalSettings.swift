@@ -8,6 +8,8 @@ struct LocalSettings: Codable {
     var endpointURL = "http://localhost:11234/v1/"
     var endpointModel = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
     var profile = ModelProfile.customLocal.rawValue
+    // Optional so existing settings JSON retains its conversation selection.
+    var endpointTokenBudget: Int?
 
     static func load(in directory: URL) -> LocalSettings {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("settings.json")),
