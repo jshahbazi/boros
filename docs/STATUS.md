@@ -19,12 +19,12 @@ The design goal is evidence-backed continuity within bounded context and resourc
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
 | Latest recorded application verification | **2,218 checks passed** on a copied source snapshot matching the current Swift sources; five additional native public-case checks passed; strict deep development signature verification passed |
 | Latest imported-chat result | Lexical, hybrid, and exact-page paths each recovered 12/12 selected answerable probes in warm and process-restart profiles |
-| Answering model | Configured Qwen completed the public paired diagnostic on October 5; one initial admission failure and two partial outputs retained |
+| Answering model | Configured Qwen completed the original pilot and all 24 DevGPT attempts on October 5; original failures retained, new run operationally complete |
 | Running GUI/build freshness | `.build/boros-n3/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
 | Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
-**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3 progress:** three fixed DevGPT histories and exact-answer/cross-message/citation/abstention contracts now pass controlled native checks; live execution, natural questions, actual correction cases and sufficient-evidence feasibility remain pending. **Next:** execute this frozen amendment, then N4 failure-driven improvements and N5 workload scaling. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
+**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3 progress:** three fixed DevGPT histories and strict rubrics pass controlled native checks; live Qwen completed 24/24 attempts, with each strategy passing only the three absence cases. All source text fit recent context, so this run measures reproduction/citation failures rather than historical-retrieval benefit. Natural questions, actual correction cases and a separate sufficient-evidence witness remain pending. **Next:** N4 versioned recent-source IDs and structural failure attribution, then a separately frozen history-outside-recent diagnostic and N3 feasibility. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
 
 ### Status labels
 
@@ -146,7 +146,7 @@ Ordinary selected-Qwen Send and the diagnostic use `AnswerAttemptCoordinator`. A
 |---|---|---|
 | `ContextRetrievalStrategy` and preparation | Explicit recent-only avoids historical payload, metadata/vector and query-encoder work; hybrid retains the current scoped selector | Recent-only still reads bounded recent messages; nil semantic index remains lexical retrieval |
 | Shared coordinator and GUI | Controlled success, incomplete/cancelled output, stale callbacks, runner ownership, post-acceptance host-save failure and Stop after the first durable visible chunk | Client cancellation cannot prove immediate server compute cancellation |
-| `AnswerEvaluationCommand` and Python scorer | Original 18-attempt pilot plus three fixed public DevGPT projections; restored overlays, per-hybrid Apple construction, quiescent measurement, oracle separation and content-free reports | New 24-attempt amendment passes controlled transport; live run pending; targeted reproduction and partial category coverage leave representative gates unfinished |
+| `AnswerEvaluationCommand` and Python scorer | Original 18-attempt pilot plus three fixed public DevGPT projections; restored overlays, per-hybrid Apple construction, quiescent measurement, oracle separation and content-free reports | New 24-attempt live run completed; all sources fit recent context and each arm passed only three absence cases; representative gates unfinished |
 
 The contract and invocation are in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md). The first paired Qwen diagnostic completed; controlled transport is verified. A wrong task answer remains an operationally complete captured invocation. Fatal/missing/timeout attempts retain their declared denominators with explicit unknown accounting.
 
@@ -178,7 +178,27 @@ Three source-pinned DevGPT PR-linked histories contain 138 serialized events and
 
 Each history declares historical, ordered cross-message and later-line reproduction plus a corpus-verified absent identifier, paired across both strategies: 24 attempts. The frozen exact JSON rubric separates answer, citation and abstention correctness, and requires validated delivered gold ranges for citation support. Correction scoring passes synthetic contracts; no public correction cases are frozen. Source-derived anchors and constrained reproduction questions do not establish natural developer reasoning.
 
-All 24 native attempts completed against controlled Qwen transport with intentionally incorrect output and zero task credit. Overlays remained isolated, actual projection digests matched, per-hybrid background construction and foreground accounting were retained, and reports contained no chat text. Live Qwen answering is pending. The amendment reserves 2,048 output tokens before any model results; its spend/latency must not be pooled with the 128-token pilot. Provider-rendered sufficient-gold-evidence feasibility remains unmeasured. See [the source amendment](DEVELOPER-ANSWER-EVALUATION.md) and [rubric contract](ANSWER-RUBRICS.md).
+All 24 native attempts completed against controlled Qwen transport with intentionally incorrect output and zero task credit. Overlays remained isolated, actual projection digests matched, per-hybrid background construction and foreground accounting were retained, and reports contained no chat text. The amendment reserves 2,048 output tokens before model results; its spend/latency must not be pooled with the 128-token pilot. See [the source amendment](DEVELOPER-ANSWER-EVALUATION.md) and [rubric contract](ANSWER-RUBRICS.md).
+
+The live run at `987441e` completed all 24 attempts. Every original event fit the 8,000-token recent component: 68, 42 and 28 recent sources by history, with zero historical evidence excerpts. All 12 paired request digests and answer digests were identical. This is a source-reproduction/citation diagnostic; it establishes no hybrid retrieval benefit.
+
+| Live result | Recent-only | Hybrid |
+|---|---:|---:|
+| Operational completions | 12/12 | 12/12 |
+| Full task successes, including citations | 3/12 | 3/12 |
+| Corpus-verified absence successes | 3/3 | 3/3 |
+| Exact single-quote text correct | 3/6 | 3/6 |
+| Answerable probes with every gold span delivered | 9/9 | 9/9 |
+| Cross-message responses rejected by strict schema | 3/3 | 3/3 |
+| Known charged input tokens, including calibration | 68,434 | 68,434 |
+| Charged output tokens, including calibration | 2,267 | 2,267 |
+| Foreground model calls | 24 | 36 |
+
+All nine source-answer tasks per arm failed overall. Three exact single-quote answers lacked required citation support, three single quotes differed from the frozen text, and three cross-message responses failed strict response validation. The discarded answers cannot support a more specific JSON-failure explanation. Recent messages expose no stable event IDs to the model; the snapshot/journal retains their IDs privately. The next source-framing change must preserve legacy schema-5 body/archive verification through explicit v1/v2 dispatch. It must not reinterpret old unlabelled bodies.
+
+Both arms retained zero input/output holds. Hybrid's twelve additional foreground calls are opaque query encodings; twelve real per-attempt background builds are reported separately. The complete admitted prompts contained every required answer-text span. A separate sufficient-evidence witness including model-visible citation identity remains pending. No representative quality, tree, latency or economics claim follows.
+
+Report: `.build/evaluation/devgpt-answer-pilot-20261005.json`, 1,207,595 bytes, SHA-256 `c1ff20c833bb9af27174a68aadba94e838895031523d122d17eaac0d28528d72`. Captured implementation hashes matched the worktree at recording; transient stores/answers were removed after scoring. Source payload remains a private ignored local file.
 
 ### First paired production answering diagnostic
 
@@ -258,8 +278,8 @@ The user authorized completion of the full planned architecture on October 5, 20
 |---|---|---|---|
 | N1 | Shared Qwen coordinator and retrieval strategies integrated | Prerequisite for production-path comparison implemented | 2,162 passing checks and rebuilt matching-source app; original lease, controlled GUI/runner parity, durable delivery, Stop/late callbacks and ownership verified |
 | N2 | First paired answering driver/scorer implemented and executed | N1 verified; all 18 attempts from the pinned public development history | 15/18 operational completions; hybrid 6/6 and recent-only 1/6 literal factual successes; every failure retained; complete quality gate inconclusive |
-| N3 | Add independent developer-history/imported-chat answering cases — partial | Three pinned DevGPT histories, source-anchored questions and strict rubrics now pass controlled native checks | Live run, natural-question annotations, actual corrections, immediate follow-ups, chronology and sufficient-evidence provider feasibility remain; no representative claim |
-| N4 | Improve baseline where N2/N3 expose failures | Semantic exclusions and query/excerpt limits are concrete risks | Distinguish retrieval/preparation/answerer/budget failures; independent confirmation after fixes; lexical/hybrid support comparison; preserve metering |
+| N3 | Add independent developer-history/imported-chat answering cases — partial | Three pinned DevGPT histories executed; all text fit recent context; strict reproduction/citation/absence rubrics | Separately frozen larger/cross-session histories, natural questions, corrections, immediate follow-ups, chronology and sufficient-evidence witness remain |
+| N4 | Improve baseline where N2/N3 expose failures — next | Recent context hides citation IDs; cross-message schema failures and exact-quote mismatches observed with gold text present | Version recent framing and retain legacy archive validation; content-free structural failure attribution; independent confirmation and larger-history retrieval comparison; preserve metering |
 | N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
 | N6 | Implement standing-policy/task lifecycle | Required for scoped-instruction category and durable correction semantics | Authenticated scope/conflict/expiry/reopen operations; control epoch and stale handoff/output fences |
 | N7 | Freeze/execute representative baseline evaluation | Pilot workload/variance from N2–N5; full five-category claim also needs N6 | New source/config amendment, independent splits, feasibility, failure scoring, power, usage and trajectory accounting; preserve old pins |
@@ -333,9 +353,9 @@ All confidence bounds above are the specified 95% bounds. Replicates and tree bu
 
 | Decision | Current position | Needed choice/evidence |
 |---|---|---|
-| Immediate milestone | N1–N2 first diagnostic complete; N3–N5 next | Independent histories/rubrics, admission reliability attribution and representative scaling; retain optional feature gates |
+| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 next | Recent-source citation IDs with legacy proof/archive compatibility, structural attribution, larger histories and sufficient-gold witness; retain optional gates |
 | Answering runtime | Configured Qwen executed the first paired diagnostic | Retain initial admission failure and unknown output hold; establish startup/warm reliability before representative measurements |
-| Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories | Live diagnostic pending; independent authors, natural questions, original times and representative workload unestablished |
+| Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories; all new source text fit recent context | Independent authors, natural questions, original times, larger/cross-session histories and representative workload unestablished |
 | Rubrics | Literal factual pilot and frozen strict exact-answer/cross-message/citation/abstention contracts; synthetic correction checks | Actual public correction cases, semantic reasoning and scoped lifecycle remain unmeasured/unimplemented |
 | Semantic direction | Narrow Apple support on import | Measure code/paraphrase needs before choosing new encoder, lexical chunks or reranker |
 | Caps/machine envelope | Development defaults exist | Archive/capture/query frequency, backlog, contention and hardware measurements |
