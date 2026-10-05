@@ -1,111 +1,337 @@
-# Boros project status
+# Boros status and roadmap
 
-Updated October 5, 2026. Repository: `/Users/johnshahbazian/development/boros`. Branch: `codex/boros-foundation`.
+Updated October 5, 2026. Branch: `codex/boros-foundation`.
 
-The current implementation checkpoint is **`b006b6a`**, committed and pushed; its verification documentation was pushed at **`9757f75`**. It integrates schema-5 background-index accounting with the native app and archives. Final verification passed **1,673 whole-app checks**, **455 background/full-source/process checks**, **183 backup checks**, **225 episode checks**, strict signature verification and two public live Qwen turns. Counts overlap. The complete [plan](../tracechat-plan.md) remains unfinished; current answer quality and economics remain unmeasured.
+This is the planning index for Boros: available features, implementation gaps, recorded evidence, remaining design, and dependencies between next steps. Detailed contracts remain in the linked documents. TraceChat is the historical name of the original design and review.
 
-The working tree now contains the next answering-evaluation wave. Its retrieval strategy has focused checks passing. Coordinator lifecycle fixes and independent review are in progress; the new path has not been integrated into the GUI or evaluated against Qwen. These changes are excluded from the pushed checkpoint's verification totals.
+Start with [next work](#6-dependency-ordered-next-work) and [open decisions](#8-decisions-before-selecting-work). Use [the feature inventory](#2-feature-inventory) and [recorded evidence](#4-recorded-evidence) to check the basis for a choice.
 
-## Work status
+## 1. Current position
 
-“Implemented” describes available behavior within the stated boundary. It does not establish production readiness or measured answer quality. Evidence distinguishes the pushed baseline from the current working tree.
+Boros provides a native macOS chat application, durable accepted text, bounded recent context and historical evidence, source search and paging, local model integration, resource accounting, semantic maintenance, backup/restore, and public-chat ingestion. Reliable answering across long histories, representative performance, and total economics remain unproven.
 
-| Workstream | Status | Evidence and available behavior | Next required work |
+The design goal is evidence-backed continuity within bounded context and resource allowances. The summary tree is optional and must earn its place through comparison with the source-retrieval baseline. See [the product decision](../tracechat-plan.md#1-product-decision).
+
+| Snapshot | Status |
+|---|---|
+| Latest reviewed code checkpoint | `af48f03`: lexical excerpt placement and imported-chat page selection fixes |
+| Latest preceding evidence documentation | `9ea5c90`: traced failures and controlled long-chat results |
+| Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
+| Latest recorded application verification | 1,700 checks passed in an isolated tracked-source snapshot containing the intended import/retrieval changes; strict deep development signature verification passed |
+| Latest imported-chat result | Lexical, hybrid, and exact-page paths each recovered 12/12 selected answerable probes in warm and process-restart profiles |
+| Answering model | The user reported Qwen stopped for now. This documentation update makes no new endpoint availability check |
+| Running GUI/build freshness | Latest retrieval fixes were verified in a separate snapshot bundle. The currently running GUI's code revision has not been rechecked |
+| Additional answering work | Two modified and four untracked Swift files exist; they are outside the recorded 1,700-check snapshot |
+| Release state | Development application with local ad hoc signing; no production-readiness claim |
+
+**Recommended next milestone:** finish the shared answering path and run the first paired production-path answering diagnostic. This is the shortest route to evidence about whether Boros's memory selection improves actual answers. Implementation can proceed while Qwen is off; real-model execution requires the configured server to be available.
+
+### Status labels
+
+| Label | Meaning |
+|---|---|
+| Available | Implemented in committed application code or developer tooling, within the stated limits |
+| Partial | Some required behavior exists; the row names what remains |
+| Working tree | Source exists outside the verified committed checkpoint; integration and correctness are not assumed |
+| Planned | Specified by the design; implemented behavior is not established |
+| Gated | Requires prior contracts or measured evidence before enablement |
+| Unmeasured | Needs workload evidence; passing contract checks does not establish it |
+
+## 2. Feature inventory
+
+### Application and model access
+
+| Feature | Status | Available behavior | Remaining work or boundary |
 |---|---|---|---|
-| Project setup and design | Complete foundation | Boros repository and GitHub branch established; original plan, reviews and provenance retained | Keep implementation and evidence aligned with the plan |
-| Native chat GUI | Implemented; visual check pending | Pushed baseline: chats, drafts, restored transcripts, streaming, cancellation, source browser and archive menus; 89 automated GUI checks | Final visual inspection of the background-status menu and chat flow; Mac locked at last attempt |
-| Local model connection | Implemented; current live smoke passed | mlx-serve at `http://localhost:11234/v1/`; selected Qwen model; two public arithmetic turns passed at `b006b6a` | Evaluate broader reliability and model compatibility |
-| Transport and credentials | Implemented for local endpoints | Loopback restriction, redirect refusal, bounded SSE, explicit errors and optional Keychain credentials | Processing and disclosure contracts before enabling remote providers |
-| Durable text capture | Implemented and verified | Complete bounded UTF-8 sources, exact IDs/digests, capture status, durable streaming and exclusive ownership; current schema 5; genuine schemas 1–4 migrate | External payload protocol, aggregate ingestion quotas and released-version migrations |
-| Original-source retrieval | Implemented baseline | Scoped lexical search, bounded literal traversal, exact source pages and hybrid retrieval; scope checked before inspection | Representative archive scaling and measured hybrid quality |
-| Standalone read episodes | Implemented; current migration/recovery verified | Immutable read origins, shared allowances, deadline, indexed retry identity and crash recovery; 225 current standalone checks | Ownership and disclosure contracts for external adapters |
-| Source-browser accounting | Implemented baseline | Shared search/initial-page allowance; explicit paging; queue, Stop, supersession, close and deadline fences; incomplete results retained | Final visual verification and external continuation compatibility |
-| Context assembly | Implemented and pushed | Mandatory input/output reserve preserved; independent recent/evidence counts, bounded reductions and durable proofs; 143 context and 97 coordinator checks included in the current app pass | Registered measurement amendment and additional verified adapters |
-| Answering and read accounting | Implemented and pushed | Durable reservations, conservative unknown outcomes, continuous deadlines and provider-family quarantine | Opaque Apple/native input-token usage remains explicit; broader adapter verification |
-| Background budget contract | Implemented and pushed | 167 pure checks; six global resource caps across anchored, nonoverlapping 24-hour windows; checked arithmetic and clock/recovery rules | Measure representative workloads and resource-cap suitability |
-| Background owner ledger | Implemented and pushed | Schema-5 windows/work, preflight, bounded source reader, recovery and atomic publication gate; 108 owner checks, included in 455 background/full-source/process checks | Measure representative workloads and resource-cap suitability |
-| Background indexing worker | Implemented and pushed | Metered startup probes, scheduling, seals, chunks and publication; exhaustion preserves pending work; 80 short checks plus seven full 4 MiB checks | Installed-encoder quality and corpus coverage |
-| Semantic retrieval | Core protocol implemented | Installed Apple English encoder, derived sidecar, resumable jobs, coverage holes and replayable manifests; durable background budgets integrated | Whole-corpus coverage, installed-encoder quality and stronger validation against temporary source corruption |
-| Backup and restore | Schemas 1–5 verified and pushed | Frozen schemas 1–4; schema-5 inventory retains charges/unknowns and releases prepared holds on restore; 183 final standalone checks pass | Deletion-aware restore and retention/purge |
-| Evaluation accounting | Implemented; quality protocol pending | Isolated per-protocol read episodes, authoritative totals/time/outcome, structured coverage and capped attempts retained in denominators | Freeze a new development protocol after integration; run comparative answering measurements |
-| Evaluation retrieval controls | Working-tree implementation; focused checks passed | Explicit recent-only and hybrid strategies; recent-only avoids historical source work and query encoding | Integrate into the app and shared answer path; verify preparation parity |
-| Shared answer coordinator | Working-tree implementation; review in progress | Shared acceptance, original lease, preparation proofs, durable streaming and terminal accounting | Complete cancellation-drain and runner-ownership fixes; verify lifecycle and integrate into the GUI |
-| Answering diagnostic | Contract written; execution pending | Public development fixtures, isolated attempts, runner/scorer separation and content-free reports specified in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md) | Implement the driver and scoring, verify controlled transport, then run the first paired diagnostic |
-| Service, MCP and imports | Deferred | Native app owns the store in one process | Multi-client boundary when justified, read-only MCP and authenticated imports |
-| Policy and task lifecycle | Not started | Authorship and capture status retained | Authenticated lifecycle changes, expiry/reopen, grants and dependencies |
-| Revocation and deletion | Not started | Policy mutation and deletion features unavailable | Control epoch, output fencing, suppression, purge and deletion-aware restore |
-| External actions | Optional; deferred | External tool execution unavailable | Action journal, reconciliation and unknown-outcome recovery if enabled |
-| Summary tree | Optional; gated | No generated summary tree | Accept measured raw-retrieval baseline, then implement lineage/frontier/fence contracts |
-| Quality and economics | Unmeasured for current app | Historical lexical-only synthetic coverage and current contract checks | Representative hybrid/answering comparison, latency/cost evidence, power design and held-out confirmation |
-| Local release | Development build only | Rebuilt current app passes strict deep ad hoc signature verification | Packaging, diagnostics, release recovery gates and visual verification |
+| Native chat interface | Available | AppKit transcript/editor, conversation picker, new chats, drafts, keyboard controls, undo/redo, streaming and Stop | Final visual recheck pending; automated UI evidence recorded separately |
+| Conversation continuity | Available | Stored conversations and drafts reopen after restart | GUI uses the `default` project; full project/task management UI unfinished |
+| Instruction/generation settings | Available | Editable instructions/settings and profile-specific controls | Does not implement scoped standing-policy lifecycle |
+| Selected local HTTP model | Available | Configured Qwen through mlx-serve; structured role messages and explicit errors | Answering needs a running server; exact admission restricted to the verified combination below |
+| HTTP transport | Available | Loopback destinations, redirect refusal, bounded SSE, cancellation and incomplete-result handling | Client cancellation cannot establish immediate server compute cancellation; remote processing unavailable |
+| Credentials | Available | Optional API credentials in macOS Keychain | Excluded from history and archives |
+| Qwen thinking/sampling | Available | Thinking toggle, temperature, seed and output cap | No thinking-budget control; unsupported controls disabled |
+| Native GGUF/Bonsai paths | Partial | Existing native process execution and runtime controls | Exact input admission, authoritative output usage and immutable runtime identity unverified |
+| Source browser | Available | Search Memory, source selection, exact UTF-8 pages, cancellation and incomplete coverage | No tree navigation, complete timeline API or deletion controls |
+| Maintenance visibility | Available | Background Indexing Status shows allowance and pause reasons | Cap suitability and final visual inspection open |
+| Distribution | Partial | Apple silicon/macOS 14+ development build; Swift/Python build scripts; no bundled weights | Release packaging, operational guide and release gates unfinished |
 
-## Current parallel assignments
+The verified HTTP adapter targets `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` with mlx-serve `26.10.1`. Unsupported model/template/server combinations fail explicitly. Historical arithmetic turns establish integration only. See [provider admission](PROVIDER-ADMISSION.md) and [GUI provenance](GUI-ORIGIN.md).
 
-Agents share the checkout and own distinct implementation surfaces. Component counts overlap with combined checks and must not be added to them.
+### Evidence, ingestion and recovery
 
-| Owner | Owned surface | Current state | Evidence |
+| Feature | Status | Available behavior | Remaining work or boundary |
 |---|---|---|---|
-| Budget contract agent | Pure resource/window rules and checks; peer review of other owners | Implementation and peer review finished | 167 pure checks; publication, reboot and forged-anchor rechecks |
-| Ledger agent | Shared selected-Qwen answer coordinator and focused checks | Lifecycle fixes in progress | Cancellation drain, concurrent Stop during acceptance and runner ownership under review |
-| Worker agent | Explicit recent-only/hybrid strategies; independent coordinator review | Strategy files frozen; app integration pending | Focused strategy checks pass; controlled preparation checks reported; coordinator review active |
-| Coordinating agent | GUI/diagnostic integration, runner/scorer separation and status | Evaluation integration in progress | Schema-5 checkpoint pushed; [answering diagnostic contract](ANSWER-EVALUATION.md) recorded |
+| Complete accepted text | Available | Bounded human/assistant UTF-8 payloads, stable IDs, SHA-256 digests, scope, order and capture status | Rich attachments and external-blob protocol unfinished |
+| Durable input/output capture | Available | Human input commits before dispatch; received visible chunks commit before display; atomic final event/index publication | Bytes never received/committed cannot be recovered; hidden reasoning outside capture promise |
+| Crash/restart behavior | Available | Exclusive owner, WAL/FULL durability, idempotent receipts, interrupted capture and episode recovery | No automatic inference replay; released-version migration policy unfinished |
+| Store schema | Available | Main schema 5; prototype schemas 1–4 migrate; derived semantic sidecar | Prototype checks do not establish released-version support |
+| Tool/subagent capture | Planned | Distinct event types/authorship specified | No complete tool/subagent capture adapter or agent tool loop; public importer accepts text user/assistant roles only |
+| Public chat import | Available | BEAM, DevGPT, ShareGPT and role-message JSON/JSONL; selection, prefixes, provenance and readback into a fresh private store | No existing-store merge, account-export branches, Parquet, tool/system/developer roles or multimodal input |
+| Imported chronology | Partial | Original metadata retained in sidecars; message order preserved | Event timestamps record ingestion; original times/IDs are not indexed as temporal evidence |
+| Import publication | Available | Strict validation, private staging, exclusive atomic publication and refused overwrite | Death can leave unpublished staging; importer sidecars need separate preservation |
+| Attachments/extraction | Planned | Complete binary bytes and versioned extractors specified | No attachment/extractor pipeline or searchable-content guarantee |
+| Aggregate ingestion quotas | Planned | Per-event/import limits exist | Store-wide quotas, streaming intake and external-blob recovery unfinished |
+| Backup/verify/restore | Available | Consistent SQLite snapshots, source/journal checks, private no-clobber restore to a new folder; GUI/CLI | Settings captured separately; credentials, semantic sidecar and importer sidecars excluded |
+| Derived rebuild after restore | Available | Semantic rebuild uses archived background accounting | Point-in-time ledger; later charges not merged; external antirollback absent |
+| Encryption/sync/scheduled backup | Planned/later | Private filesystem permissions | Encryption/key management, remote sync and scheduled backups unavailable |
 
-Peer review reproduced publication after a concurrent quarantine and a runtime/archive inconsistency in original window clock-anchor validation. The integrated fixes serialize the short sidecar publication commit with the owner eligibility gate and share intrinsic anchor validation. Actual contention checks prove concurrent owner mutation remains blocked through commit. Historical schema-1/2/3 fixtures were corrected to remove empty schema-5 tables before constructing older schemas; store validation remains strict. No material open defect remains in those reviewed background-indexing paths. Review of the new answer coordinator remains open.
+Intake limits include 4 MiB per event, 100,000 messages per selected imported chat and 128 MiB per original/canonical import document. These are storage limits, not provider token guarantees. See [chat import](CHAT-IMPORT.md), [backup/restore](BACKUP-RESTORE.md) and [storage boundary](IMPLEMENTATION.md#storage-boundary).
 
-Temporary source corruption followed by restoration remains a known limitation: initial and final whole-source hashes do not prove every intervening embedding used the original bytes. Exact excerpt digests still gate delivery. Schema-5 restore preserves archived accounting, with no merge of post-backup charges or external budget antirollback authority. Global limits cover work in one owner store. The full 4 MiB fixture uses a deterministic test encoder and establishes scheduling/accounting behavior; it does not measure Apple's encoder quality.
+### Retrieval and context
 
-## Verification record
+| Feature | Status | Available behavior | Remaining work or boundary |
+|---|---|---|---|
+| Literal retrieval | Available | Exact matching independent of FTS/semantic tokenization; metered UTF-8 traversal and page-boundary matching | Archive traversal can be expensive and allowance-limited; ordinary Send does not automatically run it |
+| Lexical retrieval | Available | Scoped FTS5 candidates; manual all-term and automatic any-term selection | Natural-question recall, scaling and candidate-cap suitability unmeasured |
+| Automatic query selection | Available | Up to eight distinct alphanumeric terms after common filler removal | Can miss late terms, paraphrases and multi-message dependencies |
+| Lexical excerpt selection | Available | Shared selector favors clustered terms and preserves exact offsets; 4,096-byte cap | Considers first occurrences; repeated-occurrence ranking remains limited |
+| Exact source paging | Available | Digest-bound, scalar-safe original-source reads | External continuation/scanner/ranking compatibility unfinished |
+| Scope/source validation | Available | Exact UTF-8 identity; scope checked before payload access; range/digest validation; recent exclusions before candidate limits | External client authorization/disclosure unavailable |
+| Semantic/hybrid retrieval | Partial | Installed Apple English encoder, chunks, lexical fallback, coverage holes and manifests | Conservative code/multilingual/ambiguous-input support; broad usefulness unmeasured |
+| Metadata/timeline/neighbors | Partial/planned | Source metadata and scope filtering support existing paths | Complete metadata search, timeline and neighbor-expansion product APIs unfinished |
+| Recent verbatim context | Available | Independent recent allocation and whole retained messages | Representative exact-follow-up answer tests needed |
+| Historical evidence assembly | Available | Bounded excerpts, source IDs, authorship/status; complete current request preserved | Selection can miss evidence; provenance does not prove answer correctness |
+| Selected-Qwen component caps | Available | Independently counted 8,000 recent and 12,000 evidence tokens; whole rendered prompt counted separately | New registered comparison has not adopted settings; native/Apple counts opaque |
+| Context reductions/output reserve | Available | Whole optional messages/spans removed under original lease; mandatory input and response reserve preserved | New provider adapters need renderer/count verification |
+| Private selection/delivery audit | Available | Durable bodies, count/reduction proofs and delivered source ranges | No complete “inspect this turn” UI; full semantic replay manifests absent after sidecar-free restore |
+| Model-driven memory-tool loop | Planned | Bounded planning, reads, neighbors and zoom specified | Current answer path selects evidence in the host; no autonomous historical-search loop |
+| Summary orientation/tree zoom | Gated | Versioned chronological trees and reproducible frontiers specified | No generated tree, model zoom tool or tree-backed whole-history view |
 
-Results apply to their stated checkpoint or source capture. Older evaluation source pins and held-out artifacts remain unchanged.
+See [context components](CONTEXT-COMPONENTS.md), [semantic retrieval](SEMANTIC-RETRIEVAL.md) and [retrieval/context boundary](IMPLEMENTATION.md#retrieval-and-context-boundary).
 
-| Check | Recorded result | Evidence boundary |
+### Resource accounting and maintenance
+
+| Feature | Status | Available behavior | Remaining work or boundary |
+|---|---|---|---|
+| Answering episode allowance | Available | One lease covers capture, preparation, retrieval, discovery, counts, calibration and answering | Complete token enforcement limited to observable adapters |
+| Standalone read episodes | Available | Durable browser/evaluation origins, retry identity, shared search/initial-page allowance and deadlines | External ownership/disclosure planned |
+| Reserve/arm/settle | Available | Reserve before work; armed unknown charges/holds survive Stop, death, reopen and restore | Conservative charges are not actual billing |
+| Continuous deadline/Stop | Available | Deadline includes queueing/sleep; stale deliveries/handoffs fenced | Budget revision is not policy/deletion control epoch |
+| Provider quarantine | Available | Violations fence provider family across metadata changes and later handoffs | Same-metadata reload, weight/binary attestation and atomic provider lease unobservable |
+| Metered foreground reads | Available | Metadata-first lexical selection; charged validation/matching, pages and bounded vector/metadata work | Logical-work counters do not measure physical disk I/O or every internal comparison |
+| Background allowance | Available | Six shared caps across projects/fingerprints/retries/rebuilds; anchored 24-hour windows in one store | Machine-wide accounting/external antirollback absent; cap suitability unmeasured |
+| Background worker/recovery | Available | Charged probes/seals/chunks, cursors, quota pause and publication gate; incomplete prefixes cannot rank | Deterministic 4 MiB fixture measures mechanics, not Apple quality |
+| Semantic source integrity | Partial | Full-source seals and delivered excerpt digests gate publication/delivery | Temporary corruption then restoration can evade proof that every embedding used original bytes |
+| Coverage reporting | Available | Unsupported/pending/failed ranges and resource frontiers explicit; lexical fallback | Coverage limits can exist even when a selected gold span is recovered |
+
+Foreground development caps include 1,000,000 aggregate input tokens, 16,000 output tokens, 12 model calls, 24 memory operations, 256 MiB logical source work and a 120-second deadline. Auxiliary HTTP/vector/metadata/encoder/journal guards are in [episode budgets](EPISODE-BUDGET.md).
+
+Background defaults are 512 MiB logical source work, 4,096 encoder calls, 16 MiB encoder input, 32 MiB vector publication, 100,000 metadata rows and 4,096 new source jobs per window. Apple tokenizer/input usage remains unknown. See [background budgets](BACKGROUND-INDEX-BUDGET.md).
+
+### Interfaces, authority and data lifecycle
+
+| Feature | Status | Available behavior | Remaining work or boundary |
+|---|---|---|---|
+| Developer CLI | Available/partial | Build, diagnostics, import, backup/verify/restore and smoke entry points | No general authenticated memory-service CLI for all planned operations |
+| Multi-client service | Planned | Native process owns its store exclusively | Service/IPC ownership, concurrency and capture integration |
+| Read-only MCP | Planned | No exposed memory MCP server | Scope/disclosure grants, authentication and continuation compatibility |
+| Authenticated live ingestion | Planned | Offline fresh-store importer exists | Capture authentication, idempotency and role/completeness contracts |
+| Provenance/authority separation | Partial | Historical assistant/imported content remains attributed evidence; no imported authority activation | Policy/task capabilities and adversarial action tests unfinished |
+| Standing policies | Planned | Settings/current instructions exist | Explicit activation, source links, scope/conflicts, expiry, supersession and revocation |
+| Task lifecycle | Planned | Conversations/turns exist | Human-owned new/select/suspend/resume/complete/cancel/reopen; reopening must not reactivate exceptions |
+| Remote managed processing | Gated | Local/loopback transport | Destination intersection across transitive input lineage, routing revisions and dispatch gates |
+| External disclosure/export | Gated | Explicit local archives and import provenance exist | Separate unmanaged-client/export grants; no all-history HTML export |
+| Control epoch/revocation | Planned | Narrower budget/cancellation/publication gates exist | One authority epoch across policies/tasks/source dependencies, reads, outputs and derived publication |
+| Retention/suppression | Planned | Accepted content retained; deletion controls unavailable | Retention policy, resumable suppression and serving fences |
+| Purge/deletion-aware restore | Planned | Restore supports stores without deletion controls | Inventory payloads, FTS/WAL, journals, snapshots, derivatives and backups; external deletion ledger before old restore serving |
+| External actions | Gated/optional | No external tool execution | Capabilities, durable intent, adapter idempotency/outcome lookup and unknown-outcome reconciliation |
+
+These are separate contracts. Local storage, provenance and retrieval journals do not establish deletion safety, policy enforcement, action recovery or downstream control over an unmanaged client. See [plan sections 3, 6, 7, 10 and 12](../tracechat-plan.md).
+
+## 3. Uncommitted answering work
+
+These artifacts were present when this page was written. Earlier status recorded focused strategy checks and coordinator review; this page does not recertify those results or imply current agent assignments.
+
+| Files in `Sources/Boros/` | Workstream | Required before relying on it |
 |---|---|---|
-| Current integrated app at `b006b6a` | **1,673 passed** | 167 pure background, 108 owner, 80 worker, 172 episode, 56 local-read, 51 conversation/profile, 89 GUI, nine native parser, 100 memory, 105 admission, 143 context, 76 semantic, 166 backup, 254 HTTP and 97 coordinator checks |
-| Previous app at `9cf4d11` | **1,297 passed** | Historical schema-4 context-component checkpoint |
-| Frozen schema-4 archive recognition | **147 passed** | Isolated `9cf4d11` closure, genuine 30-object schema recreation and sidecar-free WAL controls; compatibility fix pushed at `0284ee0` |
-| Current background pure contract | **167 passed** | Arithmetic, exact bindings, bounded recipes, clock anchors and recovery decisions |
-| Current background owner ledger | **108 passed** | Authoritative totals, admission, live/offline corruption refusal and publication contention |
-| Current background worker | **80 passed** | Actual short worker fixtures, quota pause/resume and publication fencing |
-| Current complete 4 MiB worker fixture | **7 passed** | All 4,096 ranges completed across two windows; probes and resumed seals charged; deterministic encoder |
-| Current background/full-source/process wrapper | **455 passed** | Final source capture; actual SIGKILL at ledger and four worker barriers, repeated reopen and worker resume |
-| Current standalone episodes | **225 passed** | 172 component plus 53 migration/process/recovery checks; corrected historical fixtures |
-| Current schema-5 backup wrapper | **183 passed** | Final source capture; archived charges, unknowns and prepared releases, frozen legacy recognition and process recovery |
-| Current local-read wrapper | **77 passed** | Browser lifecycle, metered source access and coverage guards |
-| Current evaluation contracts | **49 passed** | Frozen-baseline refusal, current-source diagnostics, receipts and coverage denominators |
-| Qwen rendering oracle | **30 passed** | Independent Jinja comparison: 24 renderings and six rejection cases |
-| Provider continuity review | **19 rechecks passed** | Supported metadata binding and quarantine regressions; instance continuity unobservable |
-| Current memory recovery wrapper | **108 passed** | 100 component plus process/reopen checks |
-| Current semantic recovery wrapper | **6 passed on each of two reopens** | Actual SIGKILL, cursor/source integrity, completion and frozen replay |
-| Current development app signature | Passed | Strict deep verification of rebuilt development bundle |
-| Current live mlx-serve | Two public turns passed | Thinking off; final foreground turn completed with 218 input tokens, three output tokens, zero held output, two model calls, 12 HTTP attempts, 208 logical raw bytes and zero unknown input operations; counters are not two-turn totals |
-| Working-tree retrieval strategy | Focused checks passed | Public synthetic fixtures; separate from the pushed app totals; app and shared-answer integration pending |
-| Final GUI visual check | Pending | Mac locked at last attempt; use isolated synthetic data |
-| Historical lexical-only development v4 | 224/224 eligible probes | Frozen synthetic lexical helper; no answerer or current hybrid quality evidence |
+| `ContextRetrievalStrategy.swift`, `RetrievalStrategyChecks.swift` | Explicit recent-only/hybrid controls | Confirm source-access checks; integrate measurement and GUI paths |
+| Modified `ChatContextPreparation.swift`, `ComponentContextPreparation.swift` | Strategy-aware preparation | Verify parity, exclusions, reductions, count proofs and original lease |
+| `AnswerAttemptCoordinator.swift`, `AnswerAttemptCoordinatorChecks.swift` | Shared answer lifecycle | Finish cancellation/drain/runner-ownership review and GUI integration |
 
-Integration initially exposed synthetic migration fixtures that retained schema-5 tables after being relabeled as older schemas, and a semantic wrapper missing its new worker dependency. Corrected fixtures verify background tables are empty before dropping them; production historical-inventory guards remain strict. Final standalone and combined checks pass on the committed sources.
+The intended contract is in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md). `semanticIndex:nil` is a lexical path, not a valid recent-only control. Recent-only must avoid historical reads and query encoding. No paired model-answer report exists; the offline runner does not complete this workstream.
 
-Apple/native input-token counts and provider load-instance continuity remain unobservable. Tests establish the stated accounting, recovery and compatibility contracts. Answer quality, a cost improvement, the 100k-event latency gate and production readiness remain unestablished. See [IMPLEMENTATION.md](IMPLEMENTATION.md), [BACKGROUND-INDEX-BUDGET.md](BACKGROUND-INDEX-BUDGET.md) and [EVALUATION.md](EVALUATION.md).
+## 4. Recorded evidence
 
-## Next work
+### Verification checkpoints
 
-| Priority | Work | Owner | Completion evidence |
-|---|---|---|---|
-| Complete | Schema-5 background-indexing checkpoint | Contract, ledger, worker and coordinating agents | Verified and pushed at `b006b6a`; explicit token, restore and source-integrity limits retained |
-| 1 | Finish and integrate the shared answer lifecycle and retrieval strategies | Ledger, worker and coordinating agents | Cancellation/ownership regressions, controlled transport and rebuilt app checks pass |
-| 2 | Implement and run the first paired answering diagnostic | Coordinating agent, with independent review; [diagnostic contract](ANSWER-EVALUATION.md) recorded | One public development history, all probes, both strategies; retained outcomes and authoritative resource reports |
-| 3 | Freeze and execute a representative quality protocol | Evaluation implementation and review agents | Registered workload, feasibility and power design, comparative quality/resources; held-out confirmation afterward |
-| Before external clients | Tighten continuation and client ownership contracts | Retrieval/service agents | Ranking/scanner versioning, resume policy and disclosure grants |
-| Before release | Verify native GUI visually | Coordinating agent | Unlocked desktop; rebuilt app with isolated synthetic data |
-| Later phases | Implement policy/task, deletion and release contracts | Assign after baseline acceptance | Phase-specific exit criteria below |
+These are recorded historical results. No application tests or model calls were run to author this page. Counts overlap and must not be summed.
 
-## Plan phases
-
-| Phase | Status | Outstanding exit criteria |
+| Surface | Recorded result | Evidence boundary |
 |---|---|---|
-| 0 — Contracts and evaluation | Partial | Executable policy/task/gate contracts, failure schedules, experiment split and power design |
-| 1 — Evidence foundation | Partial | External payload recovery, aggregate ingestion quotas, epoch suppression, deletion fencing and deletion-aware restore |
-| 2 — Read-only baseline | Partial | Registered component/answering measurement, CLI/MCP grants and recall/latency/cost evidence |
-| 3 — Policy/task and optional actions | Not started | Lifecycle, scoped harness checks and action recovery if enabled |
-| 4 — Optional summary tree | Gated | Accept measured baseline; then verify lineage, frontiers and fences |
-| 5 — Compare and confirm | Not started | Arms A–E, validation ablations and held-out quality/economics |
-| 6 — Local release | Not ready | Hardened import, resumable purge, diagnostics, deletion-aware restore, packaging and final visual verification |
+| Latest intended import/retrieval source snapshot | **1,700 application checks passed**; strict deep signature verification | Tracked-source closure plus intended changes; unrelated answering edits excluded |
+| Public-chat importer | **12 focused tests passed**, no skips | Strict formats, bytes/roles/statuses, provenance, refused replacement and staging SIGKILL |
+| Imported-chat runner after fixes | **10 focused tests passed**, no skips | Source-bound scoring, isolation, budgets, restart and excerpt/page regression fixtures |
+| Schema-5 `b006b6a` | **1,673 application checks passed** | Foundation before importer/diagnostic additions |
+| Background/full-source/process wrapper | **455 checks passed** at schema-5 checkpoint | Maintenance, contention, SIGKILL/reopen/resume and deterministic full-source traversal |
+| Schema-5 backup / episodes / local reads | **183 / 225 / 77 checks passed** at recorded checkpoints | Overlapping archive, lifecycle, migration and read recovery checks |
+| Independent Qwen rendering oracle | **30 checks passed** | Selected template parity/rejection cases |
+| Historical live Qwen smoke | Two public arithmetic turns passed at `b006b6a` | Connectivity, admission, capture/accounting; no long-history quality evidence |
+| Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
+
+Latest log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. Verification bundle: `.build/retrieval-fix-checkpoint/.build/boros/Boros.app`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+
+### Imported long-chat diagnostic
+
+The BEAM sample has 796 messages, evenly split between user and assistant, and 1,861,956 exact message-text bytes. Its dataset label is nominally 500K tokens; no provider token count was measured. It is generated and mixed-domain, not a verified human coding-only history.
+
+The controlled repeat retained the same 12 source-derived answerable probes and one absence probe used to trace failures. Lexical code changed; the page diagnostic also changed candidate-window scheduling. These are reused development probes, not an independent confirmation set.
+
+The offline report captures exact copied working-tree dependency hashes, including strategy-aware preparation dependencies present at the time. That source capture differs from the separate clean application-verification snapshot; its default context behavior was the path evaluated.
+
+| Protocol | Original warm/restart coverage | Corrected warm/restart coverage | Corrected full-read-episode p95, warm / restart |
+|---|---|---|---|
+| Recent-only | 1/12 | 1/12 | 0.159 / 0.307 seconds |
+| Lexical context | 8/12 | 12/12 | 0.949 / 1.740 seconds |
+| Hybrid context | 8/12 | 12/12 | 6.915 / 11.111 seconds |
+| Exact pages | 10/12 | 12/12 | 13.270 / 21.845 seconds |
+
+All 104 read attempts completed within frozen allowances in the controlled repeat. Original sources verified before/after both profiles. HTTP attempts were zero. The raw absence probe returned no hits. Pages stayed within 12,000 returned bytes and 19 calls. Coverage limits still existed on some attempts; success does not establish exhaustive scanning.
+
+Timers include diagnostic work, use fixed protocol order and do not control OS cache/system load. They do not measure endpoint latency, generation, first useful answer or product p95. The run used process-scoped `caffeinate -i`. A separate sleep-interrupted report retains one warm hybrid deadline failure and a warm hybrid score of 11/12.
+
+Semantic processing recorded 51 complete and 745 unsupported sources, with 118 supported and 2,117 unsupported chunks. Code-like/ambiguous/non-English guards limit the adapter. Hybrid improvement follows lexical excerpt fixes; it does not demonstrate semantic recall improvement.
+
+Controlled report: `.build/evaluation/beam-retrieval-fixes-awake-20261005.json`. Interrupted report: `.build/evaluation/beam-retrieval-fixes-20261005.json`. See [failure traces and boundaries](IMPORTED-CHAT-EVALUATION.md).
+
+### Claims still unsupported
+
+- Reliable natural-question recall, multi-source reasoning, corrections, citations and appropriate abstention.
+- Provider-budget feasibility or answer quality on the imported conversation.
+- Representative Apple encoder quality, code/multilingual support or semantic benefit over lexical retrieval.
+- Subsecond warm endpoint retrieval at 100,000 events, production latency or cap suitability.
+- Lower total cost, credible retained-history reuse economics or whole-pipeline cache savings.
+- Tree benefit, complete policy/task authority, deletion/action safety or production readiness.
+
+## 5. How Boros addresses the inspiration's gaps
+
+The [design mapping](../tracechat-plan.md#2-how-the-original-plan-and-review-inform-this-design) is the intended contract, not a claim that every remedy has shipped.
+
+| Gap | Boros remedy | Disposition |
+|---|---|---|
+| Summaries erase retrieval clues | Independent raw retrieval | Available; general recall unmeasured |
+| Truncated results lose middle content | Complete accepted bytes and paging | Available for text; tool/attachment capture planned |
+| Summary-only recent context loses exact follow-ups | Separate recent verbatim allocation | Available; representative answer accuracy unmeasured |
+| Failed summarization blocks turns | Compaction outside turn dependency path | Baseline has no summary dependency; tree guarantees gated |
+| “Latest wins”/quoted reports create false authority | Authorship plus scoped policy/task lifecycle | Provenance available; lifecycle/enforcement planned |
+| Bytes fail context admission | Selected-provider token counts | Available for verified Qwen; opaque adapters limited |
+| Fresh requests/cache reuse are treated as quality/cost proof | Matched answering/resource/economic evaluation | Tooling/contracts partial; product claims unmeasured |
+| Summary errors/frontiers/deletion persist unnoticed | Versioned lineage/frontiers, invalidation and restore-safe deletion | Tree/control/deletion contracts planned |
+
+## 6. Dependency-ordered next work
+
+This is a proposed backlog for choosing work. It does not start the listed implementation tasks. Dates depend on the selected scope and acceptance criteria.
+
+| Order | Work package | Dependencies and purpose | Completion evidence |
+|---|---|---|---|
+| N1 | Finish/integrate shared Qwen coordinator and retrieval strategies | Existing artifacts prerequisite for production-path comparison | One original lease; GUI/runner preparation parity; controlled transport, durable delivery, Stop/late-callback/ownership checks; intended source committed and app rebuilt |
+| N2 | Implement first paired answering driver/scorer | Depends on N1; measures actual answers | All probes from one public development history, recent-only/hybrid; runner receives no oracle; post-terminal scoring; all failures/unknowns retained; content-free report |
+| N3 | Add independent developer-history/imported-chat answering cases | Current probes targeted and mixed-domain; N2 initially uses public synthetic fixtures | Provenance, timestamp treatment, isolated questions, source/answer rubrics and sufficient-evidence feasibility; factual, temporal, follow-up, cross-message and absence cases supported by current contracts |
+| N4 | Improve baseline where N2/N3 expose failures | Semantic exclusions and query/excerpt limits are concrete risks | Distinguish retrieval/preparation/answerer/budget failures; independent confirmation after fixes; lexical/hybrid support comparison; preserve metering |
+| N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
+| N6 | Implement standing-policy/task lifecycle | Required for scoped-instruction category and durable correction semantics | Authenticated scope/conflict/expiry/reopen operations; control epoch and stale handoff/output fences |
+| N7 | Freeze/execute representative baseline evaluation | Pilot workload/variance from N2–N5; full five-category claim also needs N6 | New source/config amendment, independent splits, feasibility, failure scoring, power, usage and trajectory accounting; preserve old pins |
+| N8 | Decide whether to build optional tree | Accepted baseline/workload first | Explicit decision; then source/child/context lineage, ready queues, frontiers, nonblocking failures, correction/rebuild and pagination |
+| N9 | Compare tree-enabled and baseline paths | Tree and all comparison prerequisites | Frozen B/D pair, one primary mode; independent held-out quality/category/cost/latency gates |
+| Before external clients | Service/MCP/authenticated intake | Ownership, continuation and disclosure contracts | Scope-bound grants, ranking/pagination compatibility, concurrent ownership and no unauthorized disclosure |
+| Before deletion or local release | Suppression/purge/deletion-aware restore | Cover duplicated request/chunk evidence and all managed copies | Control-gate races, resumable inventory/cleanup and external deletion ledger applied before old restore serving |
+| Before actions/remote processing | Implement each host contract | Capabilities expand current boundary | Action reconciliation/idempotency, or transitive destination intersection and disclosure/routing fences, with adversarial checks |
+| Before local release | Visual/operational release checks | Apply to chosen shipping capabilities | Fresh intended bundle, synthetic GUI walkthrough, packaging/guide/diagnostics, restore and applicable invariants |
+
+The first diagnostic contract is [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md). Its initial runner refuses arbitrary user-store paths and validation/held-out execution. Imported-history answering is separate work; the offline imported-chat runner is not an answering driver.
+
+N7 also includes the supplemental LongMemEval and LongMemEval-V2 adapters named in [plan section 13](../tracechat-plan.md#13-evaluation-that-decides-the-design). These adapters remain unimplemented. Pin dataset revisions and follow published protocols; keep official benchmark scores separate from Boros's product decision score.
+
+### First milestone acceptance checklist
+
+- Finish coordinator/strategy review and integrate the same Qwen lifecycle into GUI and diagnostic.
+- Establish actual absence of historical reads/encoding in recent-only; empty evidence is insufficient.
+- Implement isolated attempts, runner/oracle separation and content-free reporting.
+- Complete controlled-transport contract checks before real-model calls.
+- Run/retain the paired public development diagnostic when Qwen is available.
+- Attribute failures and choose subsequent fixes from the report. A one-history pilot cannot pass the product-quality gate.
+
+## 7. Remaining plan and evaluation gates
+
+### Delivery phases
+
+| Phase | Status | Outstanding exit conditions |
+|---|---|---|
+| 0 — Contracts/evaluation | Partial | Templates/statistics helpers exist; policy/task/gate execution, workload splits, feasibility and power incomplete |
+| 1 — Evidence foundation | Partial | Text durability/backup exist; external payload recovery, aggregate quotas, suppression/purge and deletion-aware restore remain |
+| 2 — Read-only baseline | Partial | Native retrieval/context/accounting and offline tooling exist; full interfaces and representative answering/recall/latency/cost remain |
+| 3 — Policy/task/optional actions | Planned | Human-owned lifecycle/scoped policy enforcement; action recovery only if enabled |
+| 4 — Optional tree | Gated | Accepted baseline first; lineage/versioning/jobs/frontiers/browsing/invalidation |
+| 5 — Compare/confirm | Planned | Full comparison, validation ablations, frozen B/D pair, workload/cache profiles and independent held-out result |
+| 6 — Local release | Partial/not ready | Development build exists; product invariants, guide/packaging, visual check and required lifecycle/deletion contracts remain |
+
+The first useful read-only prototype ends at phase 2. Its service/API and measurement requirements are broader than the working native app. See [delivery plan](../tracechat-plan.md#14-delivery-plan).
+
+### Comparison contract
+
+| Arm | Planned purpose | Execution status |
+|---|---|---|
+| A | Recent exact context only | Offline diagnostic exists; paired production answering pending |
+| B | Recent plus raw hybrid retrieval | Substantial native baseline; full permitted operations and representative evaluation incomplete |
+| C | Tree/zoom, raw search disabled | Tree/answering arm unimplemented |
+| D | B plus tree/zoom | Tree/answering arm unimplemented |
+| E | Sufficient gold evidence supplied directly | Provider-feasibility/oracle answering arm pending |
+
+Tree comparisons retain separate C-local/C-full summarizer-context variants and an approximately 64k-token original orientation sensitivity when the selected model admits it. These are labeled development comparisons, not extra held-out winner-selection opportunities.
+
+Five equally weighted categories: exact facts, cross-session/temporal updates, immediate exact follow-ups, scoped instruction/lifecycle and appropriate abstention. Missing categories leave the result inconclusive. Budget-infeasible cases remain in overall task-success denominators and are reported separately from feasible source-recall diagnostics.
+
+| Proposed gate | Evidence required |
+|---|---|
+| Invariants | All applicable durability, scope/disclosure, lifecycle, fences, restart, deletion-serving and admission checks pass |
+| Feasible source recall | At least 95% recovering every required span in each frozen replicate/build combination; clustered uncertainty reported |
+| Endpoint scaling | Warm retrieval p95 below one second at declared 100k text events |
+| Tree quality-first | D−B estimate at least +5 percentage points and positive lower 95% confidence bound |
+| Optional cost-first | Chosen before held-out: task lower bound above −2 points and cost-per-success upper ratio at most 0.80 |
+| Regression/cost envelope | Critical category lower bounds above −2 points; cost upper ratio at most 1.25; authority invariants remain blockers |
+| Full interaction envelope | Warm/cold-restart/paused: at most 500 ms added p95 memory delay and 10% added p95 episode delay |
+| Independence/power | At least three answering replicates, three tree builds, 200 independent histories overall and 50 per critical category; larger counts where pilot power requires |
+| Economics | Pilot retained-history/reuse trajectory; construction, retries, rebuilds, queries/storage/unknown usage counted; research replication separate |
+
+These are proposed targets and executable helper contracts, not achieved product results. Default is one preregistered quality-first decision; inconclusive results keep the tree experimental. See [EVALUATION.md](EVALUATION.md).
+
+All confidence bounds above are the specified 95% bounds. Replicates and tree builds do not increase the independent-history count. A pilot-based power design and simulation of the complete conjunctive decision remain required.
+
+## 8. Decisions before selecting work
+
+| Decision | Current position | Needed choice/evidence |
+|---|---|---|
+| Immediate milestone | Recommend N1–N2 | Choose acceptance scope before unrelated capabilities |
+| Answering runtime | Verified Qwen; user-reported off | Use configured adapter when available; model changes need verification |
+| Representative histories | Generated mixed-domain import and synthetic fixtures | Public/sanitized developer histories, provenance/times and independent questions |
+| Rubrics | Factual contract exists; other dimensions incomplete | Correction, cross-message, citation and abstention scoring before claiming results |
+| Semantic direction | Narrow Apple support on import | Measure code/paraphrase needs before choosing new encoder, lexical chunks or reranker |
+| Caps/machine envelope | Development defaults exist | Archive/capture/query frequency, backlog, contention and hardware measurements |
+| Client/authority scope | One native owner | Decide when another client or durable policy state warrants service/gate contracts |
+| Tree go/no-go | Optional/gated | Accept measured baseline before tree implementation |
+| Release scope | Development-only | Select capabilities and apply corresponding exit criteria |
+
+Hidden reasoning capture, unrestricted orchestration, universal exactly-once actions, automatic policy activation from prose and guaranteed secure SSD erasure are outside the current promise. Richer hosting, all-history export, natural-language policy suggestions, semantic secret discovery, advanced vector selection and alternate tree shapes are later options with their own evidence/contracts.
+
+## 9. Document map
+
+| Document | Role |
+|---|---|
+| [README](../README.md) | Build/usage/tool entry points |
+| [Implementation](IMPLEMENTATION.md) | Detailed available boundaries and older verification |
+| [Plan](../tracechat-plan.md) | Full architecture, dependencies and gates |
+| [Design review](../tracechat-adversarial-review.md) | Immutable revision-1 review; revision-2 disposition in plan section 16 |
+| [Historical schema-5 status](STATUS-SCHEMA5-20261005.md) | Previous checkpoint totals and working snapshot |
+| [Chat import](CHAT-IMPORT.md) | Formats, publication/provenance and limits |
+| [Imported-chat evaluation](IMPORTED-CHAT-EVALUATION.md) | Offline protocol, traces and results |
+| [Answering diagnostic](ANSWER-EVALUATION.md) | Shared path, isolated pilot and runner/scorer contract |
+| [Evaluation](EVALUATION.md) | Pins/statistics and remaining quality/economics |
+| [Context components](CONTEXT-COMPONENTS.md) | Qwen caps/reductions/proofs |
+| [Provider admission](PROVIDER-ADMISSION.md) | Compatibility/rendering/counts |
+| [Episode budgets](EPISODE-BUDGET.md) | Foreground resources/deadlines/unknowns |
+| [Read episodes](READ-EPISODES.md) | Browser/evaluation origins and lifecycle |
+| [Background budgets](BACKGROUND-INDEX-BUDGET.md) | Maintenance/publication/recovery/integrity |
+| [Semantic retrieval](SEMANTIC-RETRIEVAL.md) | Encoder/coverage/manifests/jobs/fallback |
+| [Backup/restore](BACKUP-RESTORE.md) | Contents/compatibility/verification/exclusions |
+| [GUI provenance](GUI-ORIGIN.md) | Interface origin/development boundary |
+
+Update this page when a capability lands, verification is recorded or a measured decision changes. Keep checkpoint/source-capture boundaries explicit. Runtime histories, report payloads, credentials, weights and generated bundles stay outside Git. Documentation/diagnostics must not include prompts, responses or private chat text.

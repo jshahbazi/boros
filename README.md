@@ -2,7 +2,7 @@
 
 Boros is a native macOS chat application with durable conversational evidence and source retrieval. It starts from the chat GUI built in the user's mcpme experiment and the reviewed TraceChat architecture.
 
-The native foundation is implemented. It targets one local user, text conversations, an explicit project scope, and a local OpenAI-compatible model server. The complete architecture is in [the plan](tracechat-plan.md); workstream and milestone tables are in [project status](docs/STATUS.md), with detailed boundaries and verification in [implementation status](docs/IMPLEMENTATION.md).
+The native foundation is implemented. It targets one local user, text conversations, an explicit project scope, and a local OpenAI-compatible model server. Start with [status and roadmap](docs/STATUS.md) for the feature inventory, measured results, unfinished plans and dependency-ordered next work. The complete architecture is in [the plan](tracechat-plan.md), with detailed boundaries and verification in [implementation status](docs/IMPLEMENTATION.md).
 
 ## Build
 
@@ -16,7 +16,7 @@ The build produces `.build/boros/Boros.app`. Use `--open` to launch it after bui
 
 ## Local model
 
-The user selected the already-running [Qwen3.8 Flash Next MLX model](https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit). The default mlx-serve API address is `http://localhost:11234/v1/`. Credentials are optional and use macOS Keychain. Boros verifies the selected model's complete prompt token count before dispatch, reserving response tokens and a safety margin within the API token budget.
+The user selected the [Qwen3.8 Flash Next MLX model](https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit). The default mlx-serve API address is `http://localhost:11234/v1/`; the server must be running for inference. Credentials are optional and use macOS Keychain. Boros verifies the selected model's complete prompt token count before dispatch, reserving response tokens and a safety margin within the API token budget.
 
 The verified API adapter currently supports this Qwen text template on mlx-serve 26.10.1. Changing the model, template or server version requires adapter verification; unsupported combinations fail visibly. See [provider admission](docs/PROVIDER-ADMISSION.md) for compatibility, template provenance and license details. Existing native GGUF profiles remain available with their runtime context controls.
 

@@ -1,6 +1,6 @@
 # Durable episode budgets and preflight accounting
 
-Status: GUI/CLI answering, standalone source browsing, synthetic evaluation reads, metered core retrieval, selected-Qwen component limits and schema-4 backup integration are implemented, verified October 5, 2026. Evidence is recorded in [STATUS.md](STATUS.md). The complete phase 0/2 contract remains partial: daily background-index budgets, exact opaque-adapter token accounting and a registered matched measurement configuration remain pending. Service, policy mutation, deletion, external actions and the optional summary tree remain separate work.
+Status: GUI/CLI answering, standalone source browsing, synthetic evaluation reads, metered core retrieval, selected-Qwen component limits and schema-5 backup integration are implemented, verified October 5, 2026. Evidence is recorded in [STATUS.md](STATUS.md). Separate [background-index budgets](BACKGROUND-INDEX-BUDGET.md) are integrated in schema 5. The complete phase 0/2 contract remains partial: exact opaque-adapter token accounting and a registered matched measurement configuration remain pending. Service, policy mutation, deletion, external actions and the optional summary tree remain separate work.
 
 ## Gaps motivating this wave
 
@@ -43,7 +43,7 @@ Background index construction is a maintenance job with its own limits and cost 
 
 ## Persisted schema and API
 
-The owner-controlled SQLite database uses schema 4. Accepted events and invocation chunks remain unchanged. Schema 3 migration preserves exact stored chat identifiers and existing journal bytes, charges and holds, then adds canonical chat origins. Genuine schema 1 and 2 stores also upgrade to schema 4 without invented historical episodes. The journal is private runtime evidence and belongs in verified archives. [Backup recognition and restore](BACKUP-RESTORE.md) use separate historical schema contracts and validate current read origins.
+The owner-controlled SQLite database now uses schema 5, which adds the separate background inventory while retaining the foreground episode contract. Canonical chat/local-read origins were introduced in schema 4. Migration preserves exact stored chat identifiers and existing journal bytes, charges and holds; genuine prototype schemas 1–4 upgrade without invented historical episodes or background charges. The journal is private runtime evidence and belongs in verified archives. [Backup recognition and restore](BACKUP-RESTORE.md) use separate historical schema contracts and validate current read origins and background accounting.
 
 | Record | Required fields and constraints |
 |---|---|

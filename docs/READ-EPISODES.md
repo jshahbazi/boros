@@ -1,6 +1,6 @@
 # Standalone read episodes
 
-Status: implemented and independently reviewed, October 4, 2026. Final integrated checkpoint results are recorded in [STATUS.md](STATUS.md). This wave extends the schema-3 answering checkpoint (`22c3402`) to explicit read operations and binds metered entry points to the episode's project. The browser and current-source evaluation harness now supply read leases. Daily background budgets and exact recent/evidence token allocations remain separate work.
+Status: implemented and independently reviewed, October 4, 2026, with subsequent integration recorded in [STATUS.md](STATUS.md). The original schema-4 wave extended the schema-3 answering checkpoint (`22c3402`) to explicit read operations and bound metered entry points to the episode's project. Those origin contracts remain in schema 5, and the browser and current-source evaluation harness supply read leases. Daily background budgets and exact selected-Qwen recent/evidence token allocations are now integrated; registered measurement adoption and opaque Apple/native token observability remain pending.
 
 ## Episode origin and schema
 
@@ -77,4 +77,4 @@ Required fixtures cover unchanged source/conversation/invocation counts after re
 | Evaluation | Read leases, authoritative reports and contract fixtures; amendment after freeze |
 | Coordinator | Shared interfaces, staged integration, status and verification |
 
-Ledger, backup and browser implementation proceeded concurrently against the frozen origin and scope APIs; evaluation then adopted that ledger. Independent review reproduced Unicode scope aliasing, implicit rereads after limited coverage and notice-derived coverage flags. Exact byte comparisons, local-read coverage guards and structured evaluation flags close those findings; dedicated fixtures cover the triggers. Daily background-index budgets and matched recent/evidence token allocations remain pending.
+Ledger, backup and browser implementation proceeded concurrently against the frozen origin and scope APIs; evaluation then adopted that ledger. Independent review reproduced Unicode scope aliasing, implicit rereads after limited coverage and notice-derived coverage flags. Exact byte comparisons, local-read coverage guards and structured evaluation flags close those findings; dedicated fixtures cover the triggers. Subsequent checkpoints integrated daily background-index budgets and exact selected-Qwen recent/evidence allocations. A new registered matched measurement configuration remains pending.

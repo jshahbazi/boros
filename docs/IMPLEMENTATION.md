@@ -1,6 +1,6 @@
 # Boros implementation status
 
-Status: native foundation, answering accounting, standalone reads, selected-Qwen context components and schema-5 background indexing integrated, October 5, 2026. Pushed implementation checkpoint: `b006b6a`. Final checkpoint results are recorded in [STATUS.md](STATUS.md). The product name is Boros; TraceChat remains the name of the historical design documents. The complete architecture remains in progress.
+Status: native foundation, answering accounting, standalone reads, selected-Qwen context components, schema-5 background indexing, public-chat import and offline retrieval diagnostics integrated, October 5, 2026. The schema-5 foundation checkpoint is `b006b6a`; the latest retrieval corrections are `af48f03`, with controlled results recorded at `9ea5c90`. The current feature inventory, recorded evidence and proposed next work are in [STATUS.md](STATUS.md). The product name is Boros; TraceChat remains the name of the historical design documents. The complete architecture remains in progress.
 
 ## First working slice
 
