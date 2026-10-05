@@ -4,7 +4,7 @@ Status: implementation contract recorded October 4, 2026. Foreground answering a
 
 ## Allowance and window
 
-Use `background-index-day-v1`: one global allowance shared by all projects, encoder fingerprints, retries and rebuilds in a store. The operational day is a rolling 24-hour window beginning with the first reserved maintenance work. It is independent of local timezone and foreground requests.
+Use `background-index-day-v1`: one global allowance shared by all projects, encoder fingerprints, retries and rebuilds in a store. Each operational window lasts 24 hours, anchored by its first successful maintenance reservation. Windows do not overlap; this is not a sliding calculation over the preceding 24 hours. It is independent of local timezone and foreground requests.
 
 | Resource | Development allowance per window |
 |---|---|

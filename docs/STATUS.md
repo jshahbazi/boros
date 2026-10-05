@@ -31,7 +31,7 @@ The native prototype now combines durable text capture, selected-provider admiss
 
 ## Parallel implementation assignments
 
-The component wave is committed and pushed at `9cf4d11`. No implementation agent is currently assigned to that completed wave. The background ledger is the next integration wave; its isolated drafts are preparatory evidence, with no runtime enforcement yet.
+The component wave is committed and pushed at `9cf4d11`. The background ledger wave is now in progress. Its shared pure contract is implemented; main-store and worker integration remain under verification and do not yet constitute a validated runtime checkpoint.
 
 | Owner | Surface | State and evidence |
 |---|---|---|
@@ -39,7 +39,10 @@ The component wave is committed and pushed at `9cf4d11`. No implementation agent
 | Provider agent | Verified counting session, attributed renderer, immutable count proof and continuous-clock freshness | Integrated: 105 pure and 254 HTTP checks passed; independent rendering oracle passed 30 checks. Response-time `created` excluded; fresh calibration per independent session |
 | Coordinating agent | Frozen component policy, GUI/CLI handoff, durable proof and quarantine validation | 1,297 combined checks, 225 standalone episode checks, strict signature and two live turns passed |
 | Independent review agent | Observation compatibility and quarantine continuity | 19 isolated rechecks passed after closing capacity/capability/legacy-key and previously reserved handoff bypasses; schema remains 4 |
-| Provider agent draft; integration next | Daily background-index ledger | Isolated pure-type draft passed 95 checks. Freeze schema-4 archive recognition before schema-5 migration; owner transactions, worker adoption, recovery and archive verification remain |
+| Budget contract agent | Daily limits, canonical bindings, bounded-page recipes and pure recovery/clock decisions | Tracked implementation passed 161 pure checks; peer review of other owners' runtime integration underway |
+| Ledger agent | Authoritative schema-5 windows/work, admission, source reader and recovery | Implementing and verifying owner transactions and journal integrity; runtime checks pending |
+| Worker agent | Metered startup probes, scheduling, source sealing, chunk inference and publication | Integrating preflight with pending-job preservation; runtime checks pending |
+| Coordinating agent | Frozen schema-4 recognition and schema-5 archives, wrappers, UI and whole-app integration | Genuine schema 4 captured from `9cf4d11`; exact 30-object recreation and 147 frozen backup checks passed. Schema-5 archive and combined verification pending |
 
 The combined results above were observed by the coordinating agent. Targeted suites overlap and must not be added to the whole-app count. The context review reproduced Unicode source-ID collapse that could hide older evidence behind recent candidates; the integrated fix preserves exact UTF-8 identities through selection, metering and semantic replay. Component journal review findings concerning source linkage, clock stamps, receipt scope and clock failure handling were reproduced and closed.
 
@@ -67,6 +70,8 @@ Counts overlap across scripts and must not be added together. These are recorded
 | Preceding whole-app integration at `1f8e0a6` | **1,016 passed** | 156 episode, 56 local-read, 51 conversation/profile, 89 GUI, 9 native parser, 100 memory, 49 endpoint/admission, 96 context, 76 semantic, 145 backup/CLI, 189 HTTP |
 | Component preparation/proof fixtures | **97 passed** | Actual coordinator limits, scope rejection, cancellation, deadline, fresh calibration, metadata drift, durable invocation, backup/restore and journal corruption checks; included in 1,297 |
 | Independent Qwen rendering oracle | **30 passed** | 24 template renderings and six rejection cases; shared renderer verified against Jinja |
+| Background budget pure contract | **161 passed** | `scripts/test_background_budget.py`; arithmetic, exact identities, bounded recipes, canonical evidence and clock/recovery decisions. Does not establish durable owner or worker enforcement |
+| Frozen schema-4 archive recognition | **147 passed** | Native isolated closure from `9cf4d11`, with frozen recognition and two new sidecar-free WAL regression checks; schema-5 runtime verification remains pending |
 | Ledger, `scripts/test_episode.py` | **225 passed** | 172 component and 53 process/recovery checks; includes durable family quarantine, reserved/armed handoff fencing, migration rollback and actual SIGKILL/reopen |
 | Local reads, `scripts/test_local_read.py` | **77 passed** | Async lifecycle and delivery, bounded search/page, limited-coverage stop before reread/encoder; also included in app suites |
 | Backup, `scripts/test_backup.py` | **162 passed** | Legacy 1–4 recognition, exact origin inventory, refreshed-hash corruption rejection, preserved unknowns and actual SIGKILL/reopen |
@@ -88,7 +93,7 @@ Integrate the daily background-index ledger. Its pure draft and bounded-worker d
 | Priority | Next work | Status | Required completion evidence |
 |---|---|---|---|
 | Complete | Exact recent/evidence token allocations | Verified and pushed at `9cf4d11` | 1,297 combined checks, live Qwen dispatch, durable proof/archive checks and independent review passed; instance-identity limitation remains explicit |
-| 1 | Background indexing budgets | Next; [contract recorded](BACKGROUND-INDEX-BUDGET.md), isolated draft prepared; runtime enforcement absent | Frozen schema-4 recognition; durable global daily limits, preflight, unknown outcomes, schema-5 migration, backup/restore and crash recovery verified |
+| 1 | Background indexing budgets | In progress; [contract recorded](BACKGROUND-INDEX-BUDGET.md), pure types verified, ledger/worker integration under verification | Frozen schema-4 recognition; durable global daily limits, preflight, unknown outcomes, schema-5 migration, backup/restore and crash recovery verified |
 | 2 | Hybrid answering quality and economics | Unmeasured | Frozen development protocol, representative workloads, answerer and comparative results before held-out confirmation |
 | Before external clients | External continuation compatibility | Partial internal contract | Explicit ranking/scanner identities and resume policy before client ingestion |
 | Before release | Final GUI visual recheck | Pending Mac unlock | Inspect rebuilt app using isolated synthetic data |

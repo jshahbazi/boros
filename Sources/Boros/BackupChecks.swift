@@ -202,7 +202,37 @@ enum BackupChecks {
         checks.merge(try schemaOneArchiveChecks(in: scratch, archive: archive)) { _, new in new }
         checks.merge(try localReadArchiveChecks(in: scratch)) { _, new in new }
         checks.merge(try ReadIdentityChecks.run()) { _, new in new }
+        checks.merge(try closedWALRecognitionChecks(in: scratch)) { _, new in new }
         return checks
+    }
+
+    private static func closedWALRecognitionChecks(in scratch: URL) throws -> [String: Bool] {
+        let directory = scratch.appendingPathComponent("closed-wal-source", isDirectory: true)
+        var owner: MemoryStore? = try MemoryStore(directory: directory)
+        withExtendedLifetime(owner) {}
+        owner = nil
+        let database = directory.appendingPathComponent("memory.sqlite3")
+        try sql(database, "PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)")
+        // The synthetic checkpoint has no live owners. Some SQLite builds
+        // retain empty WAL/SHM files on close; remove only the proven empty WAL
+        // and its derived SHM to construct the sidecar-free header fixture.
+        let wal = URL(fileURLWithPath: database.path + "-wal")
+        if FileManager.default.fileExists(atPath: wal.path) {
+            guard try Data(contentsOf: wal).isEmpty else { throw BackupError.invalid("synthetic WAL checkpoint was incomplete") }
+            try FileManager.default.removeItem(at: wal)
+        }
+        let shm = URL(fileURLWithPath: database.path + "-shm")
+        if FileManager.default.fileExists(atPath: shm.path) { try FileManager.default.removeItem(at: shm) }
+        let before = try Data(contentsOf: database)
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        let fixtureValid = before.count >= 100 && before[18] == 2 && before[19] == 2
+            && !names.contains("memory.sqlite3-wal") && !names.contains("memory.sqlite3-shm")
+        try BackupArchive.recognizeExistingSource(at: directory)
+        return [
+            "backup_recognizes_closed_wal_without_sidecars": fixtureValid,
+            "backup_recognition_leaves_original_closed_wal_untouched": try Data(contentsOf: database) == before
+                && FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() == names
+        ]
     }
 
     private static func commandChecks(in scratch: URL) throws -> [String: Bool] {
