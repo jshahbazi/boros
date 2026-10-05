@@ -63,3 +63,18 @@ The contract check command is:
 ```sh
 python3 scripts/test_imported_chat_evaluation.py
 ```
+
+## October 5, 2026 development evidence
+
+The focused suite passed 9 tests, and the integrated development-app check passed 1,694 checks. Contracts cover exact source bytes/roles/statuses, a read-only committed snapshot, exclusion of later application turns, private reports, refused replacement, corrupt source/canonical rejection, strict UTF-8 gold spans, restart, local-read origins, zero-budget failures, and scoring that excludes current-prompt echoes and identical text in the wrong event.
+
+The imported BEAM conversation supplied 796 messages and 1,861,956 text bytes. The default optimized run evaluated 12 source-derived answerable phrase probes plus one absence probe in warm and process-restart profiles. All 104 read attempts completed, original diagnostic sources verified before and after both profiles, and all authoritative receipts recorded zero HTTP attempts. Captured dependency hashes matched the evaluated working-tree files. The private metadata report is `.build/evaluation/imported-beam-offline-20261005-optimized.json`; dataset payloads and diagnostic stores remain outside Git.
+
+| Protocol | Required spans recovered, warm | Required spans recovered, process restart |
+|---|---|---|
+| Recent-only context | 1/12 | 1/12 |
+| Lexical context | 8/12 | 8/12 |
+| Hybrid context | 8/12 | 8/12 |
+| Exact source pages | 10/12 | 10/12 |
+
+The absence probe returned no raw-search hits. The semantic sidecar finished processing all 796 sources: 51 complete and 745 unsupported, with no pending or failed sources. It recorded 118 supported vector chunks and 2,117 unsupported chunks; its hole list reached the 128-entry reporting cap. Full semantic coverage was false. Hybrid initialization and processing therefore supplied limited usable embeddings on this corpus. These targeted diagnostics do not establish natural-question recall, answer accuracy, or an official BEAM score. The exact-page path was slow in this run; its process-restart diagnostic p95 was about 95 seconds. OS cache and system load were uncontrolled, and timers include diagnostic work, so this is not a product latency estimate.
