@@ -24,7 +24,7 @@ The design goal is evidence-backed continuity within bounded context and resourc
 | Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
-**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3 progress:** three fixed DevGPT histories and strict rubrics pass controlled native checks; live Qwen completed 24/24 attempts, with each strategy passing only the three absence cases. All source text fit recent context, so this run measures reproduction/citation failures rather than historical-retrieval benefit. Natural questions, actual correction cases and a separate sufficient-evidence witness remain pending. **N4 implementation:** versioned recent-source IDs and content-free structural response attribution passed 2,287 application checks and five additional native checks; the declared development repeat is next. **Next:** a separately frozen history-outside-recent diagnostic and N3 sufficient-evidence feasibility. The full architecture, authority/lifecycle/deletion contracts and release gates remain unfinished.
+**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3/N4 progress:** three fixed DevGPT histories, strict rubrics, versioned recent IDs and structural diagnostics are verified. The declared repeat completed 24/24 attempts, with each strategy passing 6/12 tasks. Labels pushed one history over the recent cap; two probes lost required gold and hybrid did not recover it. **Next:** source-selection failure attribution and a separately annotated provider-fit witness, with N6 policy/task/control-epoch implementation able to proceed independently. Natural questions, actual corrections, representative measurements, service, deletion and release gates remain unfinished.
 
 ### Status labels
 
@@ -89,7 +89,7 @@ Intake limits include 4 MiB per event, 100,000 messages per selected imported ch
 | Scope/source validation | Available | Exact UTF-8 identity; scope checked before payload access; range/digest validation; recent exclusions before candidate limits | External client authorization/disclosure unavailable |
 | Semantic/hybrid retrieval | Partial | Installed Apple English encoder, chunks, lexical fallback, coverage holes and manifests | Conservative code/multilingual/ambiguous-input support; broad usefulness unmeasured |
 | Metadata/timeline/neighbors | Partial/planned | Source metadata and scope filtering support existing paths | Complete metadata search, timeline and neighbor-expansion product APIs unfinished |
-| Recent verbatim context | Available | Independent recent allocation and whole retained messages | Representative exact-follow-up answer tests needed |
+| Recent verbatim context | Available | Independent allocation, whole original messages and v2 host source-ID/role/status labels | Labels consume the existing cap; representative exact-follow-up tests and retrieval recovery remain |
 | Historical evidence assembly | Available | Bounded excerpts, source IDs, authorship/status; complete current request preserved | Selection can miss evidence; provenance does not prove answer correctness |
 | Selected-Qwen component caps | Available | Independently counted 8,000 recent and 12,000 evidence tokens; whole rendered prompt counted separately | New registered comparison has not adopted settings; native/Apple counts opaque |
 | Context reductions/output reserve | Available | Whole optional messages/spans removed under original lease; mandatory input and response reserve preserved | New provider adapters need renderer/count verification |
@@ -172,6 +172,32 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 | Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
 
 Latest verification record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Verified bundle: `.build/boros-n4-verified/Boros.app`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+
+### Recent-source framing development repeat
+
+Commit `d9c3e20` exposes host source IDs in new recent context and preserves v1 journal/archive validation. The frozen response diagnostic adds structural codes without changing the original scoring decisions. All 2,287 application checks and five additional native checks passed before this repeat. The original source projections, questions, oracles, output reserve and strategy order are unchanged. These are reused development probes, with one replicate and uncontrolled caches.
+
+All 24 attempts completed. The same three single quotes that previously reproduced the correct text now also carry correct citations. Each arm passes 6/12 overall: three single quotes and three absence cases. Five of six single quotes have correct citations; two of those still quote the wrong text. Cross-message responses fail with two JSON-syntax errors and one invalid top-level shape per arm. The discarded answers support these fixed codes, but no more detailed classification.
+
+| Repeat result | Recent-only | Hybrid |
+|---|---:|---:|
+| Operational completions | 12/12 | 12/12 |
+| Full task successes | 6/12 | 6/12 |
+| Exact single-quote text correct | 3/6 | 3/6 |
+| Single-quote citations correct | 5/6 | 5/6 |
+| Corpus-verified absence successes | 3/3 | 3/3 |
+| Answerable probes with every gold span delivered | 7/9 | 7/9 |
+| Cross-message schema failures | 3/3 | 3/3 |
+| Known charged input tokens, including calibration | 70,894 | 75,878 |
+| Charged output tokens, including calibration | 2,112 | 2,112 |
+| Foreground model calls | 24 | 36 |
+| Historical excerpts delivered across all attempts | 0 | 16 |
+
+Framing consumes the existing recent cap. History h00 now retains events 34–67, a 34-event suffix, after geometric token reduction from 68 events. Its historical quote needs event 1, and its cross-message quote needs events 1 and 33; neither probe receives historical excerpts in hybrid. History h01 retains 42 events and h02 retains 28. The sole historical-evidence delivery is 16 excerpts in h00's hybrid absence attempt. Eleven paired request digests match; all twelve paired answer digests match. This establishes no historical-retrieval advantage and exposes a source-selection boundary requiring a controlled trace; it does not identify the query/ranking/assembly cause.
+
+All input/output holds are zero. Hybrid's twelve extra foreground calls remain opaque query encodings, with twelve background constructions reported separately. Exact implementation hashes match the worktree at recording. Report: `.build/evaluation/devgpt-recent-framing-20261005.json`, 1,121,512 bytes, SHA-256 `285e435a21bcb484c0dfdb0df3173b6a19b2599a074bd6d0d50c07dfb5c7bf49`. Transient stores and answers were discarded. The original report below remains unchanged.
+
+The next provider witness must freeze enough question context to identify the requested exchange, including its human anchor, alongside answer spans and visible IDs. Counting isolated answer lines would establish a pack's token fit without establishing semantic sufficiency. A separate measurement API is needed to retain whole-render counts for over-cap packs; ordinary admission must keep its existing rejection rules. Standalone witness evidence also needs explicit source/body/count journal validation before claiming durable attestation.
 
 ### Public developer-history amendment
 
@@ -273,16 +299,16 @@ The [design mapping](../tracechat-plan.md#2-how-the-original-plan-and-review-inf
 
 ## 6. Dependency-ordered next work
 
-The user authorized completion of the full planned architecture on October 5, 2026, keeping optional features gated by evidence. Work follows this dependency order. N1–N2 reached their first diagnostic acceptance milestone; N3–N5 are next. Subsequent architecture and release packages remain unfinished. Dates depend on verified dependencies and acceptance criteria.
+The user authorized completion of the full planned architecture on October 5, 2026, keeping optional features gated by evidence. Work follows this dependency order. N1–N2 reached their first diagnostic acceptance milestone; N3–N5 measurement and baseline work remain, and N6 can proceed independently. Subsequent architecture and release packages remain unfinished. Dates depend on verified dependencies and acceptance criteria.
 
 | Order | Work package | Dependencies and purpose | Completion evidence |
 |---|---|---|---|
 | N1 | Shared Qwen coordinator and retrieval strategies integrated | Prerequisite for production-path comparison implemented | 2,162 passing checks and rebuilt matching-source app; original lease, controlled GUI/runner parity, durable delivery, Stop/late callbacks and ownership verified |
 | N2 | First paired answering driver/scorer implemented and executed | N1 verified; all 18 attempts from the pinned public development history | 15/18 operational completions; hybrid 6/6 and recent-only 1/6 literal factual successes; every failure retained; complete quality gate inconclusive |
 | N3 | Add independent developer-history/imported-chat answering cases — partial | Three pinned DevGPT histories executed; all text fit recent context; strict reproduction/citation/absence rubrics | Separately frozen larger/cross-session histories, natural questions, corrections, immediate follow-ups, chronology and sufficient-evidence witness remain |
-| N4 | Improve baseline where N2/N3 expose failures — in progress | V2 recent source identity and structural response diagnostics verified; declared repeat pending | Preserve genuine v1 count/admission/archive contracts; measure the declared repeat; independent confirmation and larger-history retrieval comparison remain |
+| N4 | Improve baseline where N2/N3 expose failures — partial | V2 framing/legacy compatibility and structural diagnostics verified; repeat 6/12 per arm, with missing h00 gold and format/quote failures | Controlled source-selection trace, independently frozen confirmation/larger histories; preserve metering and old pins |
 | N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
-| N6 | Implement standing-policy/task lifecycle | Required for scoped-instruction category and durable correction semantics | Authenticated scope/conflict/expiry/reopen operations; control epoch and stale handoff/output fences |
+| N6 | Implement standing-policy/task lifecycle | Can proceed independently of N3/N4 measurements; required for scoped-instruction category | Schema-6 explicit human-operation receipts, task/policy revisions and separate control epoch; shared dispatch, output, page and publication gates; retain charged/unknown work and legacy evidence |
 | N7 | Freeze/execute representative baseline evaluation | Pilot workload/variance from N2–N5; full five-category claim also needs N6 | New source/config amendment, independent splits, feasibility, failure scoring, power, usage and trajectory accounting; preserve old pins |
 | N8 | Decide whether to build optional tree | Accepted baseline/workload first | Explicit decision; then source/child/context lineage, ready queues, frontiers, nonblocking failures, correction/rebuild and pagination |
 | N9 | Compare tree-enabled and baseline paths | Tree and all comparison prerequisites | Frozen B/D pair, one primary mode; independent held-out quality/category/cost/latency gates |
@@ -354,7 +380,7 @@ All confidence bounds above are the specified 95% bounds. Replicates and tree bu
 
 | Decision | Current position | Needed choice/evidence |
 |---|---|---|
-| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 framing/diagnostics verified; declared repeat pending | Complete declared repeat, larger histories and sufficient-gold witness; retain optional gates |
+| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 framing/diagnostics and repeat complete; baseline failures remain | Trace selection failures, freeze larger histories and sufficient question/gold context; begin N6 independently; retain optional gates |
 | Answering runtime | Configured Qwen executed the first paired diagnostic | Retain initial admission failure and unknown output hold; establish startup/warm reliability before representative measurements |
 | Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories; all new source text fit recent context | Independent authors, natural questions, original times, larger/cross-session histories and representative workload unestablished |
 | Rubrics | Literal factual pilot and frozen strict exact-answer/cross-message/citation/abstention contracts; synthetic correction checks | Actual public correction cases, semantic reasoning and scoped lifecycle remain unmeasured/unimplemented |
