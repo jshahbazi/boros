@@ -52,6 +52,13 @@ def main():
         total += component_report["checks"]
         if component.returncode or component_report["failed"]:
             return 1
+        importer = subprocess.run([sys.executable, str(ROOT / "scripts/test_chat_import.py"),
+                                   "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=90)
+        importer_report = json.loads(importer.stdout)
+        print(json.dumps({"suite": "chat-import", **importer_report}))
+        total += importer_report["checks"]
+        if importer.returncode or importer_report["failed"] or importer_report["skipped"]:
+            return 1
     print(json.dumps({"total_checks": total, "passed": True}))
     return 0
 

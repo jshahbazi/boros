@@ -1862,6 +1862,7 @@ private enum BonsaiPlayground {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
         _ = ReasoningSupervisor.runIfRequested()
+        if let code = ChatImportCommand.run(arguments: CommandLine.arguments) { exit(code) }
         if let code = BackupCommand.run(arguments: CommandLine.arguments) { exit(code) }
         if CommandLine.arguments.contains("--background-budget-self-test") {
             do {
