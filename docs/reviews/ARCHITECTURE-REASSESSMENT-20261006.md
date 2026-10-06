@@ -65,7 +65,9 @@ Gold-session hits can rise without recovering the needed turn. Full positive-tur
 
 The declared synthetic 100,000-event profiles record legacy automatic-context p95 above 111 seconds. Read-only system-SQLite attribution identifies repeated FTS matching caused by join planning. The faster isolated SQL alternative is not a measured native repair. This latency must be corrected and remeasured before adding repeated searches; it is separate from recall quality. See [scaling](../SCALING.md).
 
-## Smallest next decision
+## Proposed decision before the OpenAI diagnostic
+
+The following proposal preceded the subsequent authorized diagnostic recorded below. Its clean-pack comparison is now complete; independent semantic pack authentication and judge calibration remain pending.
 
 Predeclare five diagnostic controls: the three rejected answerable cases with missing targets and the two newly rejected cases with all annotated positives delivered. For each, independently verify a small original exchange pack containing the facts, antecedents and chronology needed to answer. Use the existing counted original-source control path, the same evidence/output allowances and the same question. Preserve infeasible packs and incomplete answers as failures.
 
@@ -91,3 +93,13 @@ Do not add a summary tree to compensate for this uncertainty. A tree can provide
 | Frozen experimental source-copy manifest | `5ea041d198d81f03c41c51b915f2665c5b8f7079af40e1fca84a565928253bdb` |
 
 All artifacts remain under ignored private `.build/evaluation` paths. Frozen experimental sources are preserved separately from the later working-tree gating edit. No current gated-build, representative-quality or finished-architecture claim is made.
+
+## Subsequent authorized OpenAI diagnostic
+
+After this assessment, the user authorized GPT-6.1 Sol API testing. The [completed answerer controls](../OPENAI-ANSWERER-CONTROLS.md) use five frozen oracle-selected original-evidence packs through a standalone Python runner. They bypass native retrieval/admission; exact preceding native request bodies were unavailable. Every source/question/reference pin remains authenticated, but semantic pack sufficiency was unverified before generation.
+
+Both source-aware judges accept Sol on 4/5 cases. Qwen receives 2/5 acceptance from itself and 3/5 from Sol. Both models succeed on two prior missing-target failures when given the curated packs. Sol also succeeds on the two cases with all annotated positives previously delivered. This supplies bounded evidence that answerer capability and evidence presentation matter alongside selection; it does not establish a representative model ceiling or isolate a native model replacement.
+
+Five individual fields disagree between the judges. Qwen also gives the same pack opposite sufficiency labels depending on which answer it judges. Sol calls that pack insufficient in both assessments. The remaining failed case cannot be attributed to an answerer limit from verified sufficient evidence. A source-aware model rubric still requires independent semantic calibration; it has not become ground truth merely by including evidence.
+
+The immediate priority remains authenticated complete-exchange selection and measured answering. Sol merits further comparison on fresh cases. Broader architecture and optional trees remain deferred. The diagnostic leaves remote application processing disabled and does not change the unbuilt default-gating boundary.
