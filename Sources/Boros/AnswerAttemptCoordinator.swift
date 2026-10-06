@@ -37,6 +37,7 @@ struct AnswerAttemptPreparation {
     let sourceSelectionWorkID: String?
     let answerWorkID: String
     let admission: EndpointAdmissionReceipt
+    let admissionAuditJSON: Data
     let contextAudit: Data
     let retrievalNotice: String?
 }
@@ -244,7 +245,8 @@ final class AnswerAttemptCoordinator {
                 preparation = AnswerAttemptPreparation(requestDigest: EndpointRequest.digest(value.body),
                     sourceSelectionDigest: try value.snapshot.selectionDigest(),
                     sourceSelectionWorkID: value.snapshot.selectionWorkID, answerWorkID: work.id,
-                    admission: value.receipt, contextAudit: audit, retrievalNotice: value.snapshot.retrievalNotice)
+                    admission: value.receipt, admissionAuditJSON: admission,
+                    contextAudit: audit, retrievalNotice: value.snapshot.retrievalNotice)
                 preparationMilliseconds = elapsedMilliseconds()
                 var ready = value.settings; ready.preparedAnswerWork = work
                 state = .answering; onStage?(.answering, preparation)

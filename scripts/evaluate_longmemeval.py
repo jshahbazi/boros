@@ -179,10 +179,12 @@ def validate_request_links(item, request, configuration):
     for key in ("selection_work_id", "answer_work_id"):
         if not isinstance(preparation.get(key), str) or not e.UUID.fullmatch(preparation[key]):
             raise e.EvaluationError("invalid native request work linkage")
-    admission, audit = preparation.get("admission"), preparation.get("context_audit")
-    if not isinstance(admission, dict) or not isinstance(audit, dict):
+    admission, audit = preparation.get("admission_audit"), preparation.get("context_audit")
+    receipt = preparation.get("admission")
+    if not isinstance(admission, dict) or not isinstance(audit, dict) or not isinstance(receipt, dict):
         raise e.EvaluationError("invalid native admission metadata")
-    receipt = admission.get("receipt")
+    if admission.get("receipt") != receipt:
+        raise e.EvaluationError("native admission receipt mismatch")
     proof = receipt.get("componentProof") if isinstance(receipt, dict) else None
     if (not isinstance(receipt, dict) or not isinstance(proof, dict)
             or type(admission.get("version")) is not int or admission["version"] != 3
@@ -229,11 +231,17 @@ def validate_request_links(item, request, configuration):
 
 def _empty_attempt(history, request, ordinal, reason):
     probe = validate_history(history)
+    delivery = delivery_diagnostic(history, request, [], [])
+    # Missing or rejected native evidence is unknown, not measured zero recall.
+    for key in ("validated_delivered_source_count", "hit_gold_session_count", "session_hit_fraction",
+                "all_gold_sessions_hit", "fully_delivered_evidence_turn_count",
+                "full_evidence_turn_delivery_fraction", "all_evidence_turns_delivered"):
+        delivery[key] = None
     return {"ordinal": ordinal, "question_id": probe["question_id"], "question_type": probe["question_type"],
         "abstention": probe["abstention"], "strategy": request["strategy"], "replicate": request["replicate"],
         "operational_complete": False, "official_qa_score": None, "official_qa_status": "pending_official_judge",
         "answer_bytes": None, "answer_sha256": None,
-        "delivery": delivery_diagnostic(history, request, [], []),
+        "delivery": delivery,
         "failure_code": reason, "metadata": None}
 
 
@@ -463,9 +471,11 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
                         or oracle_sha256(history) != annotations[index]["scorer_annotations_sha256"]):
                     raise e.EvaluationError("frozen benchmark evidence changed")
                 attempts, private_predictions = score_native(native, native_directory, history, document)
-            except Exception:
+            except Exception as error:
                 # Do not publish exceptions containing source-bearing paths/text.
                 native = {"version": 1, "fatal_failure": "runner_report_invalid", "attempts": []}
+                if isinstance(error, e.EvaluationError):
+                    native["validation_error_sha256"] = e.digest(str(error).encode())
                 attempts, private_predictions = score_native(native, native_directory, history, document)
             results.append({"case": annotations[index], "attempts": attempts, "driver": e.native_metadata(native)})
             predictions.extend(private_predictions)

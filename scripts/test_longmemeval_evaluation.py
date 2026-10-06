@@ -83,7 +83,8 @@ def native_report(history, document, directory):
             "delivered_recent_source_ids": recent, "identifiers": identifiers,
             "preparation": {"request_sha256": "c" * 64, "selection_sha256": "b" * 64,
                 "selection_work_id": selection_id, "answer_work_id": answer_id,
-                "context_audit": audit, "admission": {"version": 3, "receipt": receipt,
+                "context_audit": audit, "admission": copy.deepcopy(receipt),
+                "admission_audit": {"version": 3, "receipt": receipt,
                     "inputProofWorkID": str(uuid.uuid4()), "inputProofSHA256": "d" * 64,
                     "context": base64.b64encode(canonical_json(audit)).decode()}}})
     return {"version": 1, "history_id": history["id"], "split": "development", "declared_attempts": 2,
@@ -187,6 +188,19 @@ class Contracts(unittest.TestCase):
             self.assertTrue(all(row["hypothesis"] == "private generated natural answer sentinel" for row in predictions))
             self.assertTrue("private generated natural answer sentinel" not in canonical_json(attempts).decode())
 
+    def test_provider_receipt_and_persisted_audit_are_separate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "native"; native = native_report(self.history, self.document, directory)
+            preparation = native["attempts"][0]["preparation"]
+            self.assertTrue("componentProof" in preparation["admission"] and "receipt" not in preparation["admission"])
+            self.assertEqual(preparation["admission_audit"]["receipt"], preparation["admission"])
+            changed = copy.deepcopy(native)
+            changed["attempts"][0]["preparation"]["admission"] = preparation["admission_audit"]
+            with self.assertRaises(e.EvaluationError): diagnostic.score_native(changed, directory, self.history, self.document)
+            changed = copy.deepcopy(native)
+            changed["attempts"][0]["preparation"].pop("admission_audit")
+            with self.assertRaises(e.EvaluationError): diagnostic.score_native(changed, directory, self.history, self.document)
+
     def test_document_provenance_fields_required_and_exact(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / "native"; native = native_report(self.history, self.document, directory)
@@ -218,13 +232,14 @@ class Contracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / "native"; native = native_report(self.history, self.document, directory)
             mutations = [lambda p: p.update(request_sha256="0" * 64),
-                lambda p: p["admission"]["receipt"]["componentProof"].update(sourceSnapshotDigest="0" * 64),
-                lambda p: p["admission"]["receipt"]["componentProof"].update(projectID="outside-scope"),
-                lambda p: p["admission"]["receipt"].update(episodeID=str(uuid.uuid4())),
-                lambda p: p["admission"]["receipt"].update(endpoint=diagnostic.CONFIGURATION["endpoint"]),
-                lambda p: p["admission"]["receipt"]["componentProof"].update(endpoint="http://localhost:11234/v1/"),
-                lambda p: p["admission"].pop("inputProofSHA256"),
-                lambda p: p["admission"].update(context=base64.b64encode(b"{}").decode()),
+                lambda p: p["admission"]["componentProof"].update(sourceSnapshotDigest="0" * 64),
+                lambda p: p["admission"]["componentProof"].update(projectID="outside-scope"),
+                lambda p: p["admission"].update(episodeID=str(uuid.uuid4())),
+                lambda p: p["admission"].update(endpoint=diagnostic.CONFIGURATION["endpoint"]),
+                lambda p: p["admission"]["componentProof"].update(endpoint="http://localhost:11234/v1/"),
+                lambda p: p["admission_audit"].pop("inputProofSHA256"),
+                lambda p: p["admission_audit"].update(context=base64.b64encode(b"{}").decode()),
+                lambda p: p.pop("admission_audit"),
                 lambda p: p["context_audit"].update(ordered_recent_source_ids_sha256="0" * 64)]
             for mutate in mutations:
                 changed = copy.deepcopy(native); mutate(changed["attempts"][0]["preparation"])
@@ -331,7 +346,8 @@ class Contracts(unittest.TestCase):
                 report = diagnostic.run(root / "unused", output, private, timeout=60)
             self.assertTrue(execute.call_count == 7 and sum(r["declared_attempts"] for r in report["summary"].values()) == 14)
             self.assertTrue(all(r["operational_failures"] == 7 and r["official_qa_unscored_attempts"] == 7 for r in report["summary"].values()))
-            self.assertTrue(all(r["session_hit_diagnostic_denominator"] == 6 for r in report["summary"].values()))
+            self.assertTrue(all(r["session_hit_diagnostic_denominator"] == 0
+                and r["mean_session_hit_fraction"] is None for r in report["summary"].values()))
             self.assertTrue(private.stat().st_mode & 0o777 == 0o700 and output.stat().st_mode & 0o777 == 0o600)
             for strategy in e.STRATEGIES:
                 self.assertTrue(all(json.loads(line)["hypothesis"] == "" for line in (private / (strategy + ".jsonl")).read_bytes().splitlines()))

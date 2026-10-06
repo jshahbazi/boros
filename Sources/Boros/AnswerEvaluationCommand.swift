@@ -396,6 +396,11 @@ enum AnswerEvaluationCommand {
                                 "selection_work_id": preparation.sourceSelectionWorkID as Any? ?? NSNull(),
                                 "answer_work_id": preparation.answerWorkID,
                                 "admission": try object(preparation.admission), "context_audit": audit]
+                            if self.document.version == 4 {
+                                var metadata = item["preparation"] as! [String: Any]
+                                metadata["admission_audit"] = try JSONSerialization.jsonObject(with: preparation.admissionAuditJSON)
+                                item["preparation"] = metadata
+                            }
                             var ranges = try (audit["historical_sources"] as? [[String: Any]] ?? []).map { source -> [String: Any] in
                                 guard let id = source["event_id"], let offset = source["excerpt_offset"],
                                       let length = source["excerpt_bytes"], let hash = source["excerpt_sha256"] else { throw Failure.invalid }

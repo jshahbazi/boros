@@ -197,6 +197,7 @@ enum AnswerAttemptCoordinatorChecks {
                     checks[prefix + "_invocation_bound_to_original_episode"] = invocation?.episodeID == report.identifiers.episodeID
                         && invocation?.episodeWorkID == preparation.answerWorkID
                         && invocation?.requestDigest == preparation.requestDigest && invocation?.finalStatus == report.captureStatus
+                        && invocation?.admissionJSON == preparation.admissionAuditJSON
                     checks[prefix + "_source_selection_and_count_proof_retained"] = preparation.sourceSelectionWorkID != nil
                         && preparation.admission.componentProof != nil && preparation.admission.episodeID == report.identifiers.episodeID
                     if runner.starts > 0 {
