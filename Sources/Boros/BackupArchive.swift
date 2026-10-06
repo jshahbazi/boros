@@ -60,9 +60,12 @@ struct BackupInventory: Codable, Equatable {
     var episodeUncertainWork: Int? = nil
     var episodeCharged: EpisodeResources? = nil
     var episodeHeld: EpisodeResources? = nil
-    // Only schema 5 has authoritative background maintenance accounting.
+    // Schemas 5 and newer have authoritative background maintenance accounting.
     // Recognized schemas 1–4 establish that this inventory is absent.
     var backgroundIndex: BackgroundIndexInventory? = nil
+    // Historical schemas 1–5 have no standing-policy/task authority state.
+    // This foundation inventory is separate from the external deletion hook.
+    var authorityState: AuthorityStateInventory? = nil
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Canonical bytes preserve SQLite's exact identifier semantics for
         // scopes, providers and model IDs, including equivalent-looking Unicode.
@@ -137,7 +140,7 @@ enum BackupArchive {
         let candidate = try Database(copied.appendingPathComponent("memory.sqlite3"), writable: true)
         defer { candidate.close() }
         let version = try candidate.integer("PRAGMA user_version")
-        guard (1...5).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
+        guard (1...6).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
         let actualSchema = try schemaObjects(candidate)
         candidate.close()
         guard actualSchema == (try recognizedSchemaObjects(version: version, at: reference)) else {
@@ -170,6 +173,7 @@ enum BackupArchive {
     /// Frozen historical contracts captured from checkpoint 22c3402. Legacy
     /// recognition never derives old constraints by subtracting newer DDL.
     private static func historicalSchemaSQL(version: Int) throws -> String {
+        if version == 5 { return AuthoritySchemaFive.sql }
         // Genuine schema 4 captured from immutable checkpoint 9cf4d11 before
         // adding background accounting. Never derive this from the current store.
         if version == 4 { return """
@@ -345,9 +349,9 @@ enum BackupArchive {
     }
 
     private static func recognizedSchemaObjects(version: Int, at directory: URL) throws -> [SchemaObject] {
-        if version == 5 {
+        if version == 6 {
             // Only the current contract derives from the current owner. All
-            // historical schemas, including 4, retain their frozen DDL.
+            // historical schemas 1–5 retain their frozen DDL.
             do { let owner = try MemoryStore(directory: directory); withExtendedLifetime(owner) {} }
         } else {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -398,7 +402,7 @@ enum BackupArchive {
             files.append(try fileRecord(staging.appendingPathComponent("settings.json"), name: "settings.json"))
             settingsCapture = "independent-atomic-file-point-capture"
         }
-        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 5, archiveID: UUID().uuidString,
+        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 6, archiveID: UUID().uuidString,
             createdAt: timestamp(), databaseCapture: databaseCapture, settingsCapture: settingsCapture,
             control: control, files: files, inventory: inventory, excluded: excluded)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -417,7 +421,7 @@ enum BackupArchive {
         let manifest: BackupManifest
         do { manifest = try JSONDecoder().decode(BackupManifest.self, from: manifestData) }
         catch { throw BackupError.invalid("missing or malformed archive manifest") }
-        guard manifest.archiveVersion == 1, (1...5).contains(manifest.databaseSchema),
+        guard manifest.archiveVersion == 1, (1...6).contains(manifest.databaseSchema),
               UUID(uuidString: manifest.archiveID) != nil, !manifest.createdAt.isEmpty,
               manifest.databaseCapture == databaseCapture, manifest.excluded == excluded,
               ["absent", "independent-atomic-file-point-capture"].contains(manifest.settingsCapture),
@@ -514,7 +518,7 @@ enum BackupArchive {
             }
         }
         guard let background = restored.backgroundIndex else { throw BackupError.invalid("restored background inventory is missing") }
-        if manifest.databaseSchema == 5 {
+        if manifest.databaseSchema >= 5 {
             guard let archived = manifest.inventory.backgroundIndex,
                   background.windows == archived.windows, background.works == archived.works,
                   background.prepared == 0, background.uncertain == archived.uncertain,
@@ -530,6 +534,26 @@ enum BackupArchive {
                   background.charged == .zero, background.held == .zero,
                   background.unknownEncoderCalls == 0 else {
                 throw BackupError.invalid("legacy restore introduced background work")
+            }
+        }
+        guard let restoredAuthority = restored.authorityState else {
+            throw BackupError.invalid("restored authority state inventory is missing")
+        }
+        if manifest.databaseSchema == 6 {
+            guard let archivedAuthority = manifest.inventory.authorityState else {
+                throw BackupError.invalid("archived authority state inventory is missing")
+            }
+            let authorityDB = try Database(staging.appendingPathComponent("memory.sqlite3"), writable: false)
+            defer { authorityDB.close() }
+            guard let handle = authorityDB.handle else { throw BackupError.database }
+            do { try AuthorityStateJournal.validateRestore(database: handle, archived: archivedAuthority) }
+            catch { throw BackupError.invalid("restored authority state recovery inventory mismatch") }
+        } else {
+            // Legacy archives acquire only an empty authority foundation on
+            // upgrade. Historical human-role text never creates tasks/policies.
+            guard manifest.inventory.authorityState == nil,
+                  restoredAuthority.tasks == 0, restoredAuthority.bindings == 0, restoredAuthority.policies == 0 else {
+                throw BackupError.invalid("legacy restore introduced authority records")
             }
         }
         // No stale archive manifest is placed alongside the recovered database.
@@ -604,7 +628,7 @@ enum BackupArchive {
         let db = try Database(url, writable: false)
         defer { db.close() }
         let schema = try db.integer("PRAGMA user_version")
-        guard (1...5).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
+        guard (1...6).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
         guard try db.texts("PRAGMA integrity_check") == ["ok"], try db.integer("SELECT count(*) FROM pragma_foreign_key_check") == 0 else {
             throw BackupError.invalid("SQLite integrity or foreign-key check failed")
         }
@@ -612,7 +636,8 @@ enum BackupArchive {
         var allowedTables = Set(["conversations", "events", "drafts", "settings", "sqlite_sequence", "event_fts", "event_fts_data", "event_fts_idx", "event_fts_docsize", "event_fts_config"])
         if schema >= 2 { allowedTables.formUnion(["invocations", "invocation_chunks"]) }
         if schema >= 3 { allowedTables.formUnion(["episodes", "episode_resource_totals", "episode_request_snapshots", "episode_work"]) }
-        if schema == 5 { allowedTables.formUnion(["background_index_windows", "background_index_work"]) }
+        if schema >= 5 { allowedTables.formUnion(["background_index_windows", "background_index_work"]) }
+        if schema == 6 { allowedTables.formUnion(AuthorityStateKernel.tableNames) }
         guard Set(try db.texts("SELECT name FROM sqlite_schema WHERE type='table'")) == allowedTables,
               try db.integer("SELECT count(*) FROM sqlite_schema WHERE type IN ('view','trigger')") == 0 else {
             throw BackupError.invalid("unsupported database object inventory")
@@ -632,9 +657,16 @@ enum BackupArchive {
         }
         if schema == 1 { columns.removeValue(forKey: "invocations"); columns.removeValue(forKey: "invocation_chunks") }
         if schema >= 4 { columns["episodes"]! += ["origin_json", "origin_digest"] }
-        if schema == 5 {
+        if schema >= 5 {
             columns["background_index_windows"] = ["sequence", "id", "state", "revision", "limits_json", "limits_digest", "started_clock_json", "started_clock_digest", "window_json", "window_digest"]
             columns["background_index_work"] = ["id", "window_id", "state", "adapter_identity", "binding_digest", "request_digest", "record_json", "record_digest", "receipt_id", "adapter_violation"]
+        }
+        if schema == 6 {
+            columns["authority_control"] = ["id", "payload", "digest"]
+            columns["authority_tasks"] = ["id", "payload", "digest"]
+            columns["authority_bindings"] = ["conversation_id", "payload", "digest"]
+            columns["authority_policies"] = ["id", "payload", "digest"]
+            columns["authority_operations"] = ["sequence", "request_id", "request_payload", "receipt_payload", "receipt_digest"]
         }
         for (table, expected) in columns {
             guard try db.texts("SELECT name FROM pragma_table_info('\(table)') ORDER BY cid") == expected else { throw BackupError.invalid("unsupported table contract") }
@@ -762,10 +794,17 @@ enum BackupArchive {
                 inventory.chatEpisodes = chat; inventory.localReadEpisodes = localRead
             }
         }
-        if schema == 5 {
+        if schema >= 5 {
             guard let handle = db.handle else { throw BackupError.database }
             do { inventory.backgroundIndex = try BackgroundIndexJournal.inventory(database: handle) }
             catch { throw BackupError.invalid("background index journal failed integrity verification") }
+        }
+        if schema == 6 {
+            guard let handle = db.handle else { throw BackupError.database }
+            do {
+                try AuthorityStateJournal.validate(database: handle)
+                inventory.authorityState = try AuthorityStateJournal.inventory(database: handle)
+            } catch { throw BackupError.invalid("authority state journal failed integrity verification") }
         }
         return inventory
     }

@@ -246,7 +246,7 @@ enum BackupChecks {
         let restoredSubmitted = try restored.backgroundWork(workID: submitted.request.id)
         var checks: [String: Bool] = [
             "backup_background_inventory_required_and_roundtrips": try BackupArchive.verify(at: archive) == manifest
-                && manifest.databaseSchema == 5 && manifest.inventory.backgroundIndex?.windows == 1
+                && manifest.databaseSchema == 6 && manifest.inventory.backgroundIndex?.windows == 1
                 && manifest.inventory.backgroundIndex?.works == 3 && manifest.inventory.backgroundIndex?.prepared == 1,
             "restore_background_original_window_limits_and_charges_retained": before.window?.id == after.window?.id
                 && after.window?.limits == limits && after.window?.charged == .init(encoderCalls: 4, encoderInputBytes: 130)
@@ -343,7 +343,7 @@ enum BackupChecks {
         return [
             "backup_genuine_four_has_no_background_inventory": verified.databaseSchema == 4 && verified.inventory.backgroundIndex == nil,
             "backup_genuine_four_recognition_preserves_original": try Data(contentsOf: legacy.appendingPathComponent("memory.sqlite3")) == original,
-            "restore_genuine_four_migrates_to_five_without_background_work": upgraded.databaseSchema == 5
+            "restore_genuine_four_migrates_to_six_without_background_work": upgraded.databaseSchema == 6
                 && upgraded.inventory.backgroundIndex?.windows == 0 && upgraded.inventory.backgroundIndex?.works == 0
                 && upgraded.inventory.backgroundIndex?.charged == .zero && upgraded.inventory.backgroundIndex?.held == .zero,
             "restore_genuine_four_retains_origins_and_exact_sources": upgraded.inventory.chatEpisodes == verified.inventory.chatEpisodes
@@ -429,7 +429,7 @@ enum BackupChecks {
         let unrelatedArchive = scratch.appendingPathComponent("non-boros-command-archive")
         let unrelatedSource = try captureCommand(["--backup-create", "--data-directory", unrelatedDirectory.path, "--archive", unrelatedArchive.path])
         checks["backup_cli_unrecognized_source_schema_refused_without_mutation"] = try unrelatedSource.status == 1 && unrelatedSource.output.isEmpty && Data(contentsOf: unrelatedDatabase) == beforeUnrelated && !FileManager.default.fileExists(atPath: unrelatedArchive.path) && !FileManager.default.fileExists(atPath: unrelatedDirectory.appendingPathComponent("owner.lock").path)
-        for version in [1, 2, 3, 4, 5] {
+        for version in [1, 2, 3, 4, 5, 6] {
             let foreignDirectory = scratch.appendingPathComponent("foreign-command-source-\(version)", isDirectory: true)
             try FileManager.default.createDirectory(at: foreignDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             let database = foreignDirectory.appendingPathComponent("memory.sqlite3")
@@ -468,7 +468,7 @@ enum BackupChecks {
         var legacyReadback = false
         if legacyCommand.status == 0 {
             let legacyOwner = try MemoryStore(directory: legacyDirectory)
-            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 5
+            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 6
         }
         checks["backup_cli_strict_recognition_accepts_genuine_schema_one_upgrade"] = legacyCommand.status == 0 && legacyCommand.errors.isEmpty && legacyReadback
         let versionTwoDirectory = scratch.appendingPathComponent("schema-two-command-source", isDirectory: true)
@@ -480,7 +480,7 @@ enum BackupChecks {
         try downgrade(versionTwoDirectory.appendingPathComponent("memory.sqlite3"), to: 2)
         let versionTwoArchive = scratch.appendingPathComponent("schema-two-command-archive", isDirectory: true)
         let versionTwoCommand = try captureCommand(["--backup-create", "--data-directory", versionTwoDirectory.path, "--archive", versionTwoArchive.path])
-        checks["backup_cli_strict_recognition_accepts_genuine_schema_two_upgrade"] = try versionTwoCommand.status == 0 && versionTwoCommand.errors.isEmpty && BackupArchive.verify(at: versionTwoArchive).databaseSchema == 5
+        checks["backup_cli_strict_recognition_accepts_genuine_schema_two_upgrade"] = try versionTwoCommand.status == 0 && versionTwoCommand.errors.isEmpty && BackupArchive.verify(at: versionTwoArchive).databaseSchema == 6
         let missingArchive = try captureCommand(["--backup-verify", "--archive", scratch.appendingPathComponent("missing-command-archive").path])
         checks["backup_cli_verify_missing_archive_refused"] = missingArchive.status == 1 && missingArchive.output.isEmpty
         let invalid: [[String]] = [
@@ -505,7 +505,7 @@ enum BackupChecks {
         return checks
     }
 
-    /// One live schema-5 snapshot includes completed receipts, interrupted
+    /// One live current-schema snapshot includes completed receipts, interrupted
     /// answering, preflight-only inference and never-armed reservations.
     private static func episodeChecks(in scratch: URL) throws -> [String: Bool] {
         var checks: [String: Bool] = [:]
@@ -571,7 +571,7 @@ enum BackupChecks {
         let manifest = try BackupArchive.create(from: owner!, at: archive)
         let expectedCharged = try complete.charged.adding(beforePreflight.charged).adding(beforeAnswering.charged)
         let expectedHeld = try complete.held.adding(beforePreflight.held).adding(beforeAnswering.held)
-        checks["backup_schema_five_episode_inventory_captures_active_and_settled_work"] = manifest.databaseSchema == 5 && manifest.inventory.episodes == 3 && manifest.inventory.unfinishedEpisodes == 2 && manifest.inventory.episodeWork == 6 && manifest.inventory.episodePreparedWork == 2 && manifest.inventory.episodeUncertainWork == 2 && manifest.inventory.episodeCharged == expectedCharged && manifest.inventory.episodeHeld == expectedHeld
+        checks["backup_schema_six_episode_inventory_captures_active_and_settled_work"] = manifest.databaseSchema == 6 && manifest.inventory.episodes == 3 && manifest.inventory.unfinishedEpisodes == 2 && manifest.inventory.episodeWork == 6 && manifest.inventory.episodePreparedWork == 2 && manifest.inventory.episodeUncertainWork == 2 && manifest.inventory.episodeCharged == expectedCharged && manifest.inventory.episodeHeld == expectedHeld
         checks["backup_episode_request_snapshots_deduplicate_exact_bodies"] = manifest.inventory.episodeSnapshots == 2 && manifest.inventory.episodeSnapshotBytes == Int64(body.count + calibrationBody.count)
         checks["backup_episode_manifest_roundtrip_verified"] = try BackupArchive.verify(at: archive) == manifest
         checks.merge(try schemaThreeArchiveChecks(in: scratch, archive: archive)) { _, new in new }
@@ -731,7 +731,7 @@ enum BackupChecks {
             checks["restore_schema_two_private_upgrade_preserves_recovery_and_counts"] = try owner.invocation(id: "interrupted-attempt")?.finalStatus == .partial && owner.invocation(id: "empty-attempt")?.finalStatus == .failed && owner.sourceManifest(projectID: "synthetic-backup-alpha", afterSequence: 0, limit: 1000).count == 6
             let upgradedArchive = scratch.appendingPathComponent("schema-two-upgraded-archive", isDirectory: true)
             let upgraded = try BackupArchive.create(from: owner, at: upgradedArchive)
-            checks["restore_schema_two_upgrades_private_staging_to_schema_five"] = upgraded.databaseSchema == 5 && upgraded.inventory.episodes == 0 && upgraded.inventory.episodeWork == 0 && upgraded.inventory.invocations == verified.inventory.invocations && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
+            checks["restore_schema_two_upgrades_private_staging_to_schema_six"] = upgraded.databaseSchema == 6 && upgraded.inventory.episodes == 0 && upgraded.inventory.episodeWork == 0 && upgraded.inventory.invocations == verified.inventory.invocations && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
         }
         checks["restore_schema_two_preserves_original_verified_archive"] = try BackupArchive.verify(at: legacy) == verified
         return checks
@@ -749,7 +749,7 @@ enum BackupChecks {
         let upgraded = try BackupArchive.create(from: owner, at: scratch.appendingPathComponent("schema-one-upgraded-archive", isDirectory: true))
         return [
             "backup_schema_one_explicit_contract_has_no_journal": verified.databaseSchema == 1 && verified.inventory.invocations == 0 && verified.inventory.chunks == 0 && verified.inventory.episodes == nil && verified.inventory.chatEpisodes == nil && verified.inventory.localReadEpisodes == nil,
-            "restore_schema_one_exact_sources_without_invented_attempts": upgraded.databaseSchema == 5 && upgraded.inventory.events == verified.inventory.events && upgraded.inventory.sourceBytes == verified.inventory.sourceBytes && upgraded.inventory.invocations == 0 && upgraded.inventory.episodes == 0 && upgraded.inventory.chatEpisodes == 0 && upgraded.inventory.localReadEpisodes == 0,
+            "restore_schema_one_exact_sources_without_invented_attempts": upgraded.databaseSchema == 6 && upgraded.inventory.events == verified.inventory.events && upgraded.inventory.sourceBytes == verified.inventory.sourceBytes && upgraded.inventory.invocations == 0 && upgraded.inventory.episodes == 0 && upgraded.inventory.chatEpisodes == 0 && upgraded.inventory.localReadEpisodes == 0,
             "backup_schema_one_archive_bytes_unchanged_after_restore": try BackupArchive.verify(at: legacy) == verified
         ]
     }
@@ -796,6 +796,7 @@ enum BackupChecks {
         var inventory = object["inventory"] as! [String: Any]
         if version < 4 { inventory.removeValue(forKey: "chatEpisodes"); inventory.removeValue(forKey: "localReadEpisodes") }
         if version < 5 { inventory.removeValue(forKey: "backgroundIndex") }
+        if version < 6 { inventory.removeValue(forKey: "authorityState") }
         if version < 3 {
             for key in Array(inventory.keys) where key.hasPrefix("episode") || key == "unfinishedEpisodes" { inventory.removeValue(forKey: key) }
         }

@@ -19,9 +19,9 @@ from evaluation_statistics import clustered_recall, percentile
 ROOT = Path(__file__).resolve().parents[1]
 PREREGISTRATION = ROOT / "Tests/fixtures/evaluation/preregistration-v1.json"
 PROTOCOL_AMENDMENT = ROOT / "Tests/fixtures/evaluation/development-protocol-amendment-v4.json"
-CORE_FILES = ("Sources/Boros/MemoryStore.swift", "Sources/Boros/BackgroundIndexBudget.swift", "Sources/Boros/BackgroundIndexJournal.swift", "Sources/Boros/ContextComponentJournal.swift",
+CORE_FILES = ("Sources/Boros/MemoryStore.swift", "Sources/Boros/AuthorityState.swift", "Sources/Boros/AuthorityStateJournal.swift", "Sources/Boros/BackgroundIndexBudget.swift", "Sources/Boros/BackgroundIndexJournal.swift", "Sources/Boros/ContextComponentJournal.swift",
               "Sources/Boros/QwenTextRendering.swift", "Sources/Boros/ContextSourceFraming.swift", "Sources/Boros/ContextAssembler.swift",
-              "Sources/Boros/ChatContextPreparation.swift", "Sources/Boros/SemanticIndex.swift", "Sources/Boros/BackgroundIndexWorker.swift",
+              "Sources/Boros/ChatContextPreparation.swift", "Sources/Boros/ContextRetrievalStrategy.swift", "Sources/Boros/SemanticIndex.swift", "Sources/Boros/BackgroundIndexWorker.swift",
               "Sources/Boros/EpisodeBudget.swift", "Sources/Boros/EpisodeLease.swift",
               "Sources/Boros/EpisodeSQLFence.swift", "Sources/Boros/MeteredRetrieval.swift",
               "Tests/Evaluation/RetrievalHarness.swift", "Sources/CSQLite/module.modulemap",

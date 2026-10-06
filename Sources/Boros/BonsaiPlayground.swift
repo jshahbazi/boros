@@ -2136,6 +2136,13 @@ private enum BonsaiPlayground {
                 print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"context_admission_self_test\":false}"); exit(1) }
         }
+        if CommandLine.arguments.contains("--authority-state-self-test") {
+            do {
+                let checks = try AuthorityStateChecks.run()
+                let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"authority_state_self_test\":false}"); exit(1) }
+        }
         if CommandLine.arguments.contains("--recent-source-framing-self-test") {
             do {
                 let checks = try RecentSourceFramingChecks.run()

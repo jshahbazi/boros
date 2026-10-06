@@ -25,7 +25,7 @@ A fully armed attempt may finish against its original charged window while the o
 
 ## Durable requests and source binding
 
-Main-store schema 5 owns background windows and canonical work records with their request snapshots. It also preserves accepted bytes, foreground episodes, their deduplicated request snapshots and invocation evidence. The derived semantic sidecar remains schema 2.
+Main-store schema 6 retains the schema-5 background windows and canonical work records with their request snapshots. It also preserves accepted bytes, foreground episodes, their deduplicated request snapshots and invocation evidence. The derived semantic sidecar remains schema 2.
 
 Each work request binds its operation, adapter identity, index fingerprint and project using exact UTF-8 identity. Source operations include the canonical complete `MemorySourceReference`: sequence, event/conversation/project IDs, role, capture status, original timestamp, SHA-256 and accepted byte count. Its digest and exact range bound are immutable. Metadata scheduling retains the canonical ordered source-reference list. Work-ID retries are idempotent; changed bindings, snapshots or resource requests conflict.
 
@@ -70,7 +70,7 @@ The main owner exposes a snapshot of the window, remaining resources and clock/e
 
 Startup releases unused prepared reservations and converts interrupted armed/submitted attempts to unknown with all charges retained. It executes no source-job replay. Public startup probes are separately metered. The sidecar recovers processing jobs to pending at their committed offset; a later capture/open/search trigger can create a new charged attempt. Reopen, fingerprint changes and sidecar rebuild retain that store's allowance.
 
-Backup verification checks background bindings, canonical snapshots, clock anchors, work-window linkage, settlements and aggregate totals alongside foreground journals. Schema-5 restore preserves the archived windows and charges before any derived rebuild. An archive is a point-in-time snapshot: restore does not merge later charges from the current or another store, and no external budget authority prevents rollback to older archived accounting. Historical schema 1–4 recognition is frozen; a recognized schema-4 archive establishes its absence of background accounting. Migration creates its new ledger without inventing charges for historical unmetered work. Current schema-5 archives require the background inventory. The sidecar remains derived and excluded from archives.
+Backup verification checks background bindings, canonical snapshots, clock anchors, work-window linkage, settlements and aggregate totals alongside foreground journals. Schema-5/6 restore preserves the archived windows and charges before any derived rebuild. An archive is a point-in-time snapshot: restore does not merge later charges from the current or another store, and no external budget authority prevents rollback to older archived accounting. Historical schema 1–4 recognition is frozen; a recognized schema-4 archive establishes its absence of background accounting. Migration creates its new ledger without inventing charges for historical unmetered work. Schema-5/6 archives require the background inventory. The sidecar remains derived and excluded from archives.
 
 ## Integrity and measurement limits
 

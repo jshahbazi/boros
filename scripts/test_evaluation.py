@@ -316,7 +316,7 @@ class SwiftRetrievalContracts(unittest.TestCase):
             databases = list(directory.glob("*.sqlite3")) + list(directory.glob("*.sqlite"))
             self.assertEqual(len(databases), 1)
             with sqlite3.connect(f"file:{databases[0]}?mode=ro", uri=True) as database:
-                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 5)
+                self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 6)
                 self.assertEqual(database.execute("SELECT count(*) FROM events").fetchone()[0], len(history["events"]))
                 self.assertEqual(database.execute("SELECT count(*) FROM invocations").fetchone()[0], 0)
                 origins = database.execute("SELECT origin_json FROM episodes").fetchall()

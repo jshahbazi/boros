@@ -299,7 +299,8 @@ enum MemoryChecks {
         guard sqlite3_step(counts) == SQLITE_ROW, sqlite3_column_int64(counts, 0) == 0,
               sqlite3_column_int64(counts, 1) == 0 else { throw MemoryError.database("historical fixture contains background work") }
         guard sqlite3_step(counts) == SQLITE_DONE else { throw MemoryError.database("could not inspect synthetic background inventory") }
-        guard sqlite3_exec(opened, "DROP TABLE background_index_work; DROP TABLE background_index_windows; DROP TABLE invocation_chunks; DROP TABLE invocations; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=1;", nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("could not prepare version one schema") }
+        let authorityDrops = AuthorityStateKernel.tableNames.map { "DROP TABLE " + $0 + ";" }.joined()
+        guard sqlite3_exec(opened, authorityDrops + "DROP TABLE background_index_work; DROP TABLE background_index_windows; DROP TABLE invocation_chunks; DROP TABLE invocations; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=1;", nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("could not prepare version one schema") }
         store = try MemoryStore(directory: directory)
         let restored = try store!.events(conversationID: conversation.id)
         let checks = [

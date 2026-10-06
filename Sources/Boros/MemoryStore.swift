@@ -190,13 +190,20 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard (0...5).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
-            if version == 5 {
+            guard (0...6).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            if version == 5 || version == 6 {
                 guard let database else { throw MemoryError.database("closed owner") }
                 try BackgroundIndexJournal.validate(database: database)
             } else {
                 let existingBackground = try query("SELECT name FROM sqlite_master WHERE name IN ('background_index_windows','background_index_work','background_index_active_window','background_index_work_window','background_index_adapter_violation')") { string($0, 0) }
                 guard existingBackground.isEmpty else { throw MemoryError.database("historical schema contains a background inventory") }
+            }
+            if version == 6 {
+                guard let database else { throw MemoryError.database("closed owner") }
+                try AuthorityStateJournal.validate(database: database)
+            } else {
+                let existingAuthority = try query("SELECT name FROM sqlite_master WHERE name LIKE 'authority_%'") { string($0, 0) }
+                guard existingAuthority.isEmpty else { throw MemoryError.database("historical schema contains an authority inventory") }
             }
             // Foreign keys must be disabled outside the replacement transaction.
             // Children retain REFERENCES episodes while that parent is rebuilt.
@@ -259,12 +266,18 @@ final class MemoryStore: @unchecked Sendable {
                 if version == 3 { try migrateEpisodeSchemaThree(checkpoint: episodeMigrationCheckpoint) }
                 try createEpisodeSchema()
                 try createBackgroundIndexSchema()
+                guard let database else { throw MemoryError.database("closed owner") }
+                try AuthorityStateKernel.install(database: database, ownerID: "local-owner:\(geteuid())")
                 let violations = try query("PRAGMA foreign_key_check") { string($0, 0) }
                 guard violations.isEmpty else { throw MemoryError.database("episode migration foreign-key failure") }
-                try execute("PRAGMA user_version=5")
+                try execute("PRAGMA user_version=6")
                 if version == 3 { try episodeMigrationCheckpoint?("beforeCommit") }
             }
             try execute("PRAGMA foreign_keys=ON")
+            try transaction {
+                guard let database else { throw MemoryError.database("closed owner") }
+                try AuthorityStateKernel.advanceStartup(database: database)
+            }
             // The exclusive process lock is already held. Publish interrupted
             // attempts before any caller can read history or start a request.
             try recoverInterruptedEpisodes()
@@ -281,6 +294,32 @@ final class MemoryStore: @unchecked Sendable {
     deinit {
         if let database { sqlite3_close(database) }
         if ownerFD >= 0 { flock(ownerFD, LOCK_UN); close(ownerFD) }
+    }
+
+    /// Internal state foundation only. No GUI, CLI, ingestion or model path
+    /// activates policy/task mutations until shared control gates are wired.
+    func authorityStateSnapshot(now: Int64? = nil) throws -> AuthorityStateSnapshot {
+        try locked {
+            guard let database else { throw MemoryError.database("closed owner") }
+            if let now {
+                try transaction { try AuthorityStateKernel.advanceTime(database: database, now: now) }
+            }
+            return try AuthorityStateKernel.snapshot(database: database)
+        }
+    }
+
+    func applyAuthorityOperation(request: AuthorityOperationRequest, authority: AuthorityContext,
+                                 now: Int64) throws -> AuthorityOperationReceipt {
+        try locked {
+            guard let database else { throw MemoryError.database("closed owner") }
+            try AuthorityStateKernel.validateAuthority(database: database, authority: authority)
+            // Expiry survives a rejected mutation. Both commits share the
+            // owner lock, so no handoff can interleave between them.
+            try transaction { try AuthorityStateKernel.advanceTime(database: database, now: now) }
+            return try transaction {
+                try AuthorityStateKernel.apply(database: database, request: request, authority: authority, now: now)
+            }
+        }
     }
 
     func withEpisodeSQLFence<T>(lease: EpisodeLease, _ body: () throws -> T) throws -> T {
@@ -1698,7 +1737,8 @@ extension MemoryStore: EpisodeLedger {
         }
         guard Set(snapshots).count == snapshots.count else { throw MemoryError.database("duplicate episode archive snapshots") }
         let schemaVersion = try rows("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
-        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 else { throw MemoryError.database("unsupported episode archive schema") }
+        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 else { throw MemoryError.database("unsupported episode archive schema") }
+        if schemaVersion == 6 { try AuthorityStateJournal.validate(database: database) }
         struct CheckEpisode { let id: String; let origin: EpisodeOrigin; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
         let originColumns = schemaVersion >= 4 ? ",origin_json,origin_digest" : ""
         var localReadRequestIDs = Set<Data>()

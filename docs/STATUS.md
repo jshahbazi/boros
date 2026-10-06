@@ -14,17 +14,17 @@ The design goal is evidence-backed continuity within bounded context and resourc
 
 | Snapshot | Status |
 |---|---|
-| Latest verified code wave | V2 recent source IDs, exact source/body validation, genuine v1 count/admission/archive compatibility and fixed structural response diagnostics |
+| Latest verified code wave | Schema-6 dormant task/policy authority state, exact replay/DDL integrity, expiry/reopen and archive compatibility |
 | Latest preceding evidence documentation | `9ea5c90`: traced failures and controlled long-chat results |
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
-| Latest recorded application verification | **2,218 checks passed** on a copied source snapshot matching the current Swift sources; five additional native public-case checks passed; strict deep development signature verification passed |
+| Latest recorded application verification | **2,420 checks passed** on a frozen snapshot matching current Sources/scripts; 32 native public-case checks (27 overlapping) and seven old-writer archive checks passed; strict deep development signature verification passed |
 | Latest imported-chat result | Lexical, hybrid, and exact-page paths each recovered 12/12 selected answerable probes in warm and process-restart profiles |
 | Answering model | Configured Qwen completed the original pilot and all 24 DevGPT attempts on October 5; original failures retained, new run operationally complete |
-| Running GUI/build freshness | `.build/boros-n3/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
+| Running GUI/build freshness | `.build/boros-n6-verified/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
 | Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
-**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3/N4 progress:** three fixed DevGPT histories, strict rubrics, versioned recent IDs and structural diagnostics are verified. The declared repeat completed 24/24 attempts, with each strategy passing 6/12 tasks. Labels pushed one history over the recent cap; two probes lost required gold and hybrid did not recover it. **Next:** source-selection failure attribution and a separately annotated provider-fit witness, with N6 policy/task/control-epoch implementation able to proceed independently. Natural questions, actual corrections, representative measurements, service, deletion and release gates remain unfinished.
+**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3/N4 progress:** three fixed DevGPT histories, strict rubrics, versioned recent IDs and structural diagnostics are verified. The declared repeat completed 24/24 attempts, with each strategy passing 6/12 tasks. Labels pushed one history over the recent cap; two probes lost required gold and hybrid did not recover it. **Next:** source-selection failure attribution and a separately annotated provider-fit witness, with the N6 durable authority foundation now verified. Bounded clock checkpoints and shared policy/task runtime enforcement remain the next architecture dependencies. Natural questions, actual corrections, representative measurements, service, deletion and release gates remain unfinished.
 
 ### Status labels
 
@@ -64,7 +64,7 @@ The verified HTTP adapter targets `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8
 | Complete accepted text | Available | Bounded human/assistant UTF-8 payloads, stable IDs, SHA-256 digests, scope, order and capture status | Rich attachments and external-blob protocol unfinished |
 | Durable input/output capture | Available | Human input commits before dispatch; received visible chunks commit before display; atomic final event/index publication | Bytes never received/committed cannot be recovered; hidden reasoning outside capture promise |
 | Crash/restart behavior | Available | Exclusive owner, WAL/FULL durability, idempotent receipts, interrupted capture and episode recovery | No automatic inference replay; released-version migration policy unfinished |
-| Store schema | Available | Main schema 5; prototype schemas 1–4 migrate; derived semantic sidecar | Prototype checks do not establish released-version support |
+| Store schema | Available | Main schema 6 adds dormant authority state; prototype schemas 1–5 migrate; derived semantic sidecar | Prototype checks do not establish released-version support |
 | Tool/subagent capture | Planned | Distinct event types/authorship specified | No complete tool/subagent capture adapter or agent tool loop; public importer accepts text user/assistant roles only |
 | Public chat import | Available | BEAM, DevGPT, ShareGPT and role-message JSON/JSONL; selection, prefixes, provenance and readback into a fresh private store | No existing-store merge, account-export branches, Parquet, tool/system/developer roles or multimodal input |
 | Imported chronology | Partial | Original metadata retained in sidecars; message order preserved | Event timestamps record ingestion; original times/IDs are not indexed as temporal evidence |
@@ -127,11 +127,11 @@ Background defaults are 512 MiB logical source work, 4,096 encoder calls, 16 MiB
 | Read-only MCP | Planned | No exposed memory MCP server | Scope/disclosure grants, authentication and continuation compatibility |
 | Authenticated live ingestion | Planned | Offline fresh-store importer exists | Capture authentication, idempotency and role/completeness contracts |
 | Provenance/authority separation | Partial | Historical assistant/imported content remains attributed evidence; no imported authority activation | Policy/task capabilities and adversarial action tests unfinished |
-| Standing policies | Planned | Settings/current instructions exist | Explicit activation, source links, scope/conflicts, expiry, supersession and revocation |
-| Task lifecycle | Planned | Conversations/turns exist | Human-owned new/select/suspend/resume/complete/cancel/reopen; reopening must not reactivate exceptions |
+| Standing policies | Partial | Internal explicit human operations, source links, scopes/conflicts, expiry, supersession and revocation | Unexposed; policy renderer, shared runtime enforcement and operational journal contract pending |
+| Task lifecycle | Partial | Internal human-owned new/select/suspend/resume/complete/cancel/reopen | Human acceptance binding, interface and runtime gates pending; expired/revoked exceptions remain inactive on reopen |
 | Remote managed processing | Gated | Local/loopback transport | Destination intersection across transitive input lineage, routing revisions and dispatch gates |
 | External disclosure/export | Gated | Explicit local archives and import provenance exist | Separate unmanaged-client/export grants; no all-history HTML export |
-| Control epoch/revocation | Planned | Narrower budget/cancellation/publication gates exist | One authority epoch across policies/tasks/source dependencies, reads, outputs and derived publication |
+| Control epoch/revocation | Partial | Separate durable authority epoch advances on startup, task/policy mutation and temporal changes | Shared source/route dependency, dispatch, page, output and publication gates unfinished |
 | Retention/suppression | Planned | Accepted content retained; deletion controls unavailable | Retention policy, resumable suppression and serving fences |
 | Purge/deletion-aware restore | Planned | Restore supports stores without deletion controls | Inventory payloads, FTS/WAL, journals, snapshots, derivatives and backups; external deletion ledger before old restore serving |
 | External actions | Gated/optional | No external tool execution | Capabilities, durable intent, adapter idempotency/outcome lookup and unknown-outcome reconciliation |
@@ -146,7 +146,7 @@ Ordinary selected-Qwen Send and the diagnostic use `AnswerAttemptCoordinator`. A
 |---|---|---|
 | `ContextRetrievalStrategy` and preparation | Explicit recent-only avoids historical payload, metadata/vector and query-encoder work; hybrid retains the current scoped selector | Recent-only still reads bounded recent messages; nil semantic index remains lexical retrieval |
 | Shared coordinator and GUI | Controlled success, incomplete/cancelled output, stale callbacks, runner ownership, post-acceptance host-save failure and Stop after the first durable visible chunk | Client cancellation cannot prove immediate server compute cancellation |
-| `AnswerEvaluationCommand` and Python scorer | Original 18-attempt pilot plus three fixed public DevGPT projections; restored overlays, per-hybrid Apple construction, quiescent measurement, oracle separation and content-free reports | New 24-attempt live run completed; all sources fit recent context and each arm passed only three absence cases; representative gates unfinished |
+| `AnswerEvaluationCommand` and Python scorer | Original 18-attempt pilot plus three fixed public DevGPT projections; restored overlays, per-hybrid Apple construction, quiescent measurement, oracle separation and content-free reports | Original DevGPT run passed only three absence cases per arm; N4 repeat passed six tasks per arm with gold missing from two probes; representative gates unfinished |
 
 The contract and invocation are in [ANSWER-EVALUATION.md](ANSWER-EVALUATION.md). The first paired Qwen diagnostic completed; controlled transport is verified. A wrong task answer remains an operationally complete captured invocation. Fatal/missing/timeout attempts retain their declared denominators with explicit unknown accounting.
 
@@ -158,8 +158,9 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 
 | Surface | Recorded result | Evidence boundary |
 |---|---|---|
+| Dormant authority-state foundation | **2,420 application checks passed**; strict deep signature verification; 132 authority checks | Frozen Sources/scripts match the worktree; genuine schema-5 old-writer archive accepted through seven separate checks; policy mutations unexposed and runtime gates unfinished |
 | Shared answering source wave | **2,162 application checks passed**; strict deep signature verification | Preceding answering-wave source snapshot; includes 517 preparation/strategy/coordinator checks, 93 GUI self-checks and 20 answering contracts |
-| Recent-source framing amendment | **2,287 application checks passed**; strict deep signature verification; five additional native checks | Frozen source matches current files; 39 framing checks, 544 component/strategy/coordinator checks, 32 rubric checks and genuine v1 count/admission/archive/restore; separate 32-check public suite overlaps 27 default checks |
+| Recent-source framing amendment | **2,287 application checks passed**; strict deep signature verification; five additional native checks | Frozen source matches that recorded wave; 39 framing checks, 544 component/strategy/coordinator checks, 32 rubric checks and genuine v1 count/admission/archive/restore; separate 32-check public suite overlaps 27 default checks |
 | Public developer-history amendment | **2,218 application checks passed**; strict deep signature verification; five additional native checks | Copied Swift source matches amendment; 29 rubric and 27 developer contracts included; separate 32-check public suite overlaps those 27, runs all 24 native attempts against controlled Qwen and verifies killed-child cleanup ownership |
 | Earlier intended import/retrieval source snapshot | **1,700 application checks passed**; strict deep signature verification | Tracked-source closure plus intended changes; unrelated answering edits excluded |
 | Public-chat importer | **12 focused tests passed**, no skips | Strict formats, bytes/roles/statuses, provenance, refused replacement and staging SIGKILL |
@@ -171,7 +172,17 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 | Historical live Qwen smoke | Two public arithmetic turns passed at `b006b6a` | Connectivity, admission, capture/accounting; no long-history quality evidence |
 | Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
 
-Latest verification record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Verified bundle: `.build/boros-n4-verified/Boros.app`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+Latest verification record: `.build/evaluation/authority-state-wave-verification-20261005.json`. Verified bundle: `.build/boros-n6-verified/Boros.app`. Preceding framing record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+
+### Durable authority-state foundation
+
+N6 now has internal explicit human-operation receipts, task/policy revisions, a separate global control epoch, canonical source spans, conflict resolution, supersession and irreversible terminal expiry. Startup advances the epoch before recovery exposure. Authorized due expiry commits even when the following mutation fails CAS; nonhuman origins cannot change authority or advance the mutation clock. Reopen leaves expired/revoked/superseded exceptions inactive, while an explicitly permanent task preference can remain eligible. No external-action grant exists.
+
+The schema-6 journal validates exact DDL/implicit indexes, canonical state/request/receipt bytes, sequential replay and all materialized rows. Rehashed archive corruption and extra authority tables/triggers/indexes/changed constraints are rejected. A synthetic archive produced by the retained verified schema-5 binary passed the current verifier and restore; exact source bytes and the original archive remained intact. This is newly generated old-writer compatibility evidence, not a retained pre-upgrade production archive.
+
+The final bundle `.build/boros-n6-verified/Boros.app` passed **2,420 application checks**, including **132 authority checks**, strict deep signature verification and the 32-check controlled native public suite (27 overlap the default suite). Seven additional old-writer compatibility checks passed. Focused suites passed 225 episode/process, 184 backup/process, 113 memory/process, 77 local-read, 455 background/full-source/process and 49 evaluation contracts; semantic process recovery passed six checks. Counts overlap. The content-free source-hash record is `.build/evaluation/authority-state-wave-verification-20261005.json`.
+
+The state kernel remains unexposed. Existing dispatch, pages, visible chunks and derived publication do not yet consult it. Each increasing clock observation currently consumes an append-only journal entry; bounded clock checkpoints must land before continuous runtime gates use it. Full source-bound replay work also remains unmetered. Human acceptance/task binding, a policy renderer, source/route dependency grants, serialized delivery/dispatch/publication gates, deletion-aware restore, service interfaces and release remain unfinished. See [authority state](AUTHORITY-STATE.md).
 
 ### Recent-source framing development repeat
 
@@ -292,7 +303,7 @@ The [design mapping](../tracechat-plan.md#2-how-the-original-plan-and-review-inf
 | Truncated results lose middle content | Complete accepted bytes and paging | Available for text; tool/attachment capture planned |
 | Summary-only recent context loses exact follow-ups | Separate recent verbatim allocation | Available; representative answer accuracy unmeasured |
 | Failed summarization blocks turns | Compaction outside turn dependency path | Baseline has no summary dependency; tree guarantees gated |
-| “Latest wins”/quoted reports create false authority | Authorship plus scoped policy/task lifecycle | Provenance available; lifecycle/enforcement planned |
+| “Latest wins”/quoted reports create false authority | Authorship plus scoped policy/task lifecycle | Internal state verified; runtime enforcement pending |
 | Bytes fail context admission | Selected-provider token counts | Available for verified Qwen; opaque adapters limited |
 | Fresh requests/cache reuse are treated as quality/cost proof | Matched answering/resource/economic evaluation | Tooling/contracts partial; product claims unmeasured |
 | Summary errors/frontiers/deletion persist unnoticed | Versioned lineage/frontiers, invalidation and restore-safe deletion | Tree/control/deletion contracts planned |
@@ -308,7 +319,7 @@ The user authorized completion of the full planned architecture on October 5, 20
 | N3 | Add independent developer-history/imported-chat answering cases — partial | Three pinned DevGPT histories executed; all text fit recent context; strict reproduction/citation/absence rubrics | Separately frozen larger/cross-session histories, natural questions, corrections, immediate follow-ups, chronology and sufficient-evidence witness remain |
 | N4 | Improve baseline where N2/N3 expose failures — partial | V2 framing/legacy compatibility and structural diagnostics verified; repeat 6/12 per arm, with missing h00 gold and format/quote failures | Controlled source-selection trace, independently frozen confirmation/larger histories; preserve metering and old pins |
 | N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
-| N6 | Implement standing-policy/task lifecycle | Can proceed independently of N3/N4 measurements; required for scoped-instruction category | Schema-6 explicit human-operation receipts, task/policy revisions and separate control epoch; shared dispatch, output, page and publication gates; retain charged/unknown work and legacy evidence |
+| N6 | Complete standing-policy/task lifecycle | Can proceed independently of N3/N4 measurements; required for scoped-instruction category | Durable state foundation verified; clock checkpoints, human-acceptance binding, bounded policy renderer and shared dispatch/output/page/publication gates remain; retain charged/unknown work and legacy evidence |
 | N7 | Freeze/execute representative baseline evaluation | Pilot workload/variance from N2–N5; full five-category claim also needs N6 | New source/config amendment, independent splits, feasibility, failure scoring, power, usage and trajectory accounting; preserve old pins |
 | N8 | Decide whether to build optional tree | Accepted baseline/workload first | Explicit decision; then source/child/context lineage, ready queues, frontiers, nonblocking failures, correction/rebuild and pagination |
 | N9 | Compare tree-enabled and baseline paths | Tree and all comparison prerequisites | Frozen B/D pair, one primary mode; independent held-out quality/category/cost/latency gates |
@@ -339,7 +350,7 @@ N7 also includes the supplemental LongMemEval and LongMemEval-V2 adapters named 
 | 0 — Contracts/evaluation | Partial | Templates/statistics helpers exist; policy/task/gate execution, workload splits, feasibility and power incomplete |
 | 1 — Evidence foundation | Partial | Text durability/backup exist; external payload recovery, aggregate quotas, suppression/purge and deletion-aware restore remain |
 | 2 — Read-only baseline | Partial | Native retrieval/context/accounting and offline tooling exist; full interfaces and representative answering/recall/latency/cost remain |
-| 3 — Policy/task/optional actions | Planned | Human-owned lifecycle/scoped policy enforcement; action recovery only if enabled |
+| 3 — Policy/task/optional actions | Partial | Internal durable state verified; human interfaces, shared gates and scoped policy enforcement; action recovery only if enabled |
 | 4 — Optional tree | Gated | Accepted baseline first; lineage/versioning/jobs/frontiers/browsing/invalidation |
 | 5 — Compare/confirm | Planned | Full comparison, validation ablations, frozen B/D pair, workload/cache profiles and independent held-out result |
 | 6 — Local release | Partial/not ready | Development build exists; product invariants, guide/packaging, visual check and required lifecycle/deletion contracts remain |
@@ -380,13 +391,13 @@ All confidence bounds above are the specified 95% bounds. Replicates and tree bu
 
 | Decision | Current position | Needed choice/evidence |
 |---|---|---|
-| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 framing/diagnostics and repeat complete; baseline failures remain | Trace selection failures, freeze larger histories and sufficient question/gold context; begin N6 independently; retain optional gates |
+| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 framing/diagnostics and repeat complete; baseline failures remain | Trace selection failures, freeze larger histories and sufficient question/gold context; implement bounded clock checkpoints and N6 shared gates; retain optional gates |
 | Answering runtime | Configured Qwen executed the first paired diagnostic | Retain initial admission failure and unknown output hold; establish startup/warm reliability before representative measurements |
-| Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories; all new source text fit recent context | Independent authors, natural questions, original times, larger/cross-session histories and representative workload unestablished |
+| Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories; N4 labels trimmed h00 and hybrid failed to recover missing gold | Independent authors, natural questions, original times, larger/cross-session histories and representative workload unestablished |
 | Rubrics | Literal factual pilot and frozen strict exact-answer/cross-message/citation/abstention contracts; synthetic correction checks | Actual public correction cases, semantic reasoning and scoped lifecycle remain unmeasured/unimplemented |
 | Semantic direction | Narrow Apple support on import | Measure code/paraphrase needs before choosing new encoder, lexical chunks or reranker |
 | Caps/machine envelope | Development defaults exist | Archive/capture/query frequency, backlog, contention and hardware measurements |
-| Client/authority scope | One native owner | Decide when another client or durable policy state warrants service/gate contracts |
+| Client/authority scope | One native owner; dormant schema-6 authority foundation | Shared gates required before mutation exposure; authenticated service ownership remains planned |
 | Tree go/no-go | Optional/gated | Accept measured baseline before tree implementation |
 | Completion scope | Full planned architecture authorized; current bundle remains development-only | Complete required phases and release gates; optional tree/actions remain evidence-gated |
 
@@ -413,6 +424,7 @@ Hidden reasoning capture, unrestricted orchestration, universal exactly-once act
 | [Read episodes](READ-EPISODES.md) | Browser/evaluation origins and lifecycle |
 | [Background budgets](BACKGROUND-INDEX-BUDGET.md) | Maintenance/publication/recovery/integrity |
 | [Semantic retrieval](SEMANTIC-RETRIEVAL.md) | Encoder/coverage/manifests/jobs/fallback |
+| [Authority state](AUTHORITY-STATE.md) | Internal schema-6 task/policy journal and unexposed enforcement boundary |
 | [Backup/restore](BACKUP-RESTORE.md) | Contents/compatibility/verification/exclusions |
 | [GUI provenance](GUI-ORIGIN.md) | Interface origin/development boundary |
 
