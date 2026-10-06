@@ -14,7 +14,7 @@ enum BackupChecks {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let directory = scratch.appendingPathComponent("source", isDirectory: true)
         var owner: MemoryStore? = try MemoryStore(directory: directory)
-        var checks: [String: Bool] = [:]
+        var checks: [String: Bool] = try sourceTimeArchiveChecks(scratch: scratch)
         let first = try owner!.createConversation(projectID: "synthetic-backup-alpha", title: "Synthetic backup")
         let second = try owner!.createConversation(projectID: "synthetic-backup-beta", title: "Other scope")
         let payload = String(repeating: "full archived synthetic text\n", count: 4000) + "EXACT_BACKUP_SENTINEL café \u{1F680}\0suffix"
@@ -256,7 +256,7 @@ enum BackupChecks {
         let restoredSubmitted = try restored.backgroundWork(workID: submitted.request.id)
         var checks: [String: Bool] = [
             "backup_background_inventory_required_and_roundtrips": try BackupArchive.verify(at: archive) == manifest
-                && manifest.databaseSchema == 9 && manifest.inventory.backgroundIndex?.windows == 1
+                && manifest.databaseSchema == 10 && manifest.inventory.backgroundIndex?.windows == 1
                 && manifest.inventory.backgroundIndex?.works == 3 && manifest.inventory.backgroundIndex?.prepared == 1,
             "restore_background_original_window_limits_and_charges_retained": before.window?.id == after.window?.id
                 && after.window?.limits == limits && after.window?.charged == .init(encoderCalls: 4, encoderInputBytes: 130)
@@ -353,7 +353,7 @@ enum BackupChecks {
         return [
             "backup_genuine_four_has_no_background_inventory": verified.databaseSchema == 4 && verified.inventory.backgroundIndex == nil,
             "backup_genuine_four_recognition_preserves_original": try Data(contentsOf: legacy.appendingPathComponent("memory.sqlite3")) == original,
-            "restore_genuine_four_migrates_to_seven_without_background_work": upgraded.databaseSchema == 9
+            "restore_genuine_four_migrates_to_seven_without_background_work": upgraded.databaseSchema == 10
                 && upgraded.inventory.backgroundIndex?.windows == 0 && upgraded.inventory.backgroundIndex?.works == 0
                 && upgraded.inventory.backgroundIndex?.charged == .zero && upgraded.inventory.backgroundIndex?.held == .zero,
             "restore_genuine_four_retains_origins_and_exact_sources": upgraded.inventory.chatEpisodes == verified.inventory.chatEpisodes
@@ -394,7 +394,7 @@ enum BackupChecks {
         let manifest = try BackupArchive.create(from: owner, at: archive)
         guard let original = manifest.inventory.episodeCleanup else { throw BackupError.database }
         var checks: [String: Bool] = [
-            "backup_schema_nine_cleanup_inventory_has_prepaid_pending_and_prior_receipts": manifest.databaseSchema == 9
+            "backup_schema_nine_cleanup_inventory_has_prepaid_pending_and_prior_receipts": manifest.databaseSchema == 10
                 && original.version == "episode-cleanup-inventory-v1" && original.budgets == 3 && original.prepaidBudgets == 3
                 && original.legacyBudgets == 0 && original.prepaidRows == 9 && original.receipts == 3
                 && original.consumedRows == 3 && original.pendingRows == 6 && original.attemptedRows == 6 && original.administrativeRows == 0,
@@ -480,7 +480,7 @@ enum BackupChecks {
         _ = try BackupArchive.restore(from: historical, to: upgradedDirectory, authority: .unmanagedNoDeletion)
         let upgradedOwner = try MemoryStore(directory: upgradedDirectory)
         let upgraded = try BackupArchive.create(from: upgradedOwner, at: scratch.appendingPathComponent("schema-eight-upgraded-archive", isDirectory: true))
-        checks["restore_genuine_schema_eight_marks_all_cleanup_legacy_without_prepaid_claims"] = upgraded.databaseSchema == 9
+        checks["restore_genuine_schema_eight_marks_all_cleanup_legacy_without_prepaid_claims"] = upgraded.databaseSchema == 10
             && upgraded.inventory.episodeCleanup?.legacyBudgets == 3 && upgraded.inventory.episodeCleanup?.prepaidBudgets == 0
             && upgraded.inventory.episodeCleanup?.prepaidRows == 0 && upgraded.inventory.episodeCleanup?.pendingRows == 0
             && upgraded.inventory.episodeCleanup?.receipts == 0
@@ -501,7 +501,7 @@ enum BackupChecks {
     private static func accountingArchiveChecks(in scratch: URL, archive: URL) throws -> [String: Bool] {
         let manifest = try BackupArchive.verify(at: archive)
         var checks: [String: Bool] = [
-            "backup_schema_eight_accounting_inventory_required_and_roundtrips": manifest.databaseSchema == 9
+            "backup_schema_eight_accounting_inventory_required_and_roundtrips": manifest.databaseSchema == 10
                 && manifest.inventory.episodeAccounting?.version == "episode-accounting-inventory-v1"
                 && manifest.inventory.episodeAccounting?.episodes == manifest.inventory.episodes
                 && manifest.inventory.episodeAccounting!.settlementReceipts > 0
@@ -564,7 +564,7 @@ enum BackupChecks {
         _ = try BackupArchive.restore(from: historical, to: destination, authority: .unmanagedNoDeletion)
         let owner = try MemoryStore(directory: destination)
         let upgraded = try BackupArchive.create(from: owner, at: scratch.appendingPathComponent("schema-seven-upgraded-archive", isDirectory: true))
-        checks["restore_genuine_schema_seven_derives_exact_accounting_without_new_work"] = upgraded.databaseSchema == 9
+        checks["restore_genuine_schema_seven_derives_exact_accounting_without_new_work"] = upgraded.databaseSchema == 10
             && upgraded.inventory.episodeAccounting == manifest.inventory.episodeAccounting
             && upgraded.inventory.episodeWork == verified.inventory.episodeWork
             && upgraded.inventory.episodeCharged == verified.inventory.episodeCharged
@@ -617,7 +617,7 @@ enum BackupChecks {
                 && episodeIdentifierEqual(oldState.ownerID, state.ownerID) && state.timeHighWater == oldState.timeHighWater
                 && state.tasks == oldState.tasks && state.bindings == oldState.bindings && state.policies == oldState.policies
                 && state.controlEpoch == oldState.controlEpoch + 2 && state.revision == oldState.revision + 2 && state.operations == oldState.operations + 2,
-            "restore_schema_six_classifies_all_prior_evidence_as_legacy": upgraded.databaseSchema == 9
+            "restore_schema_six_classifies_all_prior_evidence_as_legacy": upgraded.databaseSchema == 10
                 && bindings.managedEpisodes == 0 && bindings.managedWork == 0 && bindings.managedInvocations == 0
                 && bindings.legacyEpisodes == upgraded.inventory.episodes && bindings.legacyWork == upgraded.inventory.episodeWork
                 && bindings.legacyInvocations == upgraded.inventory.invocations
@@ -767,7 +767,7 @@ enum BackupChecks {
         var legacyReadback = false
         if legacyCommand.status == 0 {
             let legacyOwner = try MemoryStore(directory: legacyDirectory)
-            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 9
+            legacyReadback = try legacyOwner.events(conversationID: legacyConversationID).first?.text == "Synthetic recognized legacy history" && BackupArchive.verify(at: legacyArchive).databaseSchema == 10
         }
         checks["backup_cli_strict_recognition_accepts_genuine_schema_one_upgrade"] = legacyCommand.status == 0 && legacyCommand.errors.isEmpty && legacyReadback
         let versionTwoDirectory = scratch.appendingPathComponent("schema-two-command-source", isDirectory: true)
@@ -779,7 +779,7 @@ enum BackupChecks {
         try downgrade(versionTwoDirectory.appendingPathComponent("memory.sqlite3"), to: 2)
         let versionTwoArchive = scratch.appendingPathComponent("schema-two-command-archive", isDirectory: true)
         let versionTwoCommand = try captureCommand(["--backup-create", "--data-directory", versionTwoDirectory.path, "--archive", versionTwoArchive.path])
-        checks["backup_cli_strict_recognition_accepts_genuine_schema_two_upgrade"] = try versionTwoCommand.status == 0 && versionTwoCommand.errors.isEmpty && BackupArchive.verify(at: versionTwoArchive).databaseSchema == 9
+        checks["backup_cli_strict_recognition_accepts_genuine_schema_two_upgrade"] = try versionTwoCommand.status == 0 && versionTwoCommand.errors.isEmpty && BackupArchive.verify(at: versionTwoArchive).databaseSchema == 10
         let missingArchive = try captureCommand(["--backup-verify", "--archive", scratch.appendingPathComponent("missing-command-archive").path])
         checks["backup_cli_verify_missing_archive_refused"] = missingArchive.status == 1 && missingArchive.output.isEmpty
         let invalid: [[String]] = [
@@ -870,7 +870,7 @@ enum BackupChecks {
         let manifest = try BackupArchive.create(from: owner!, at: archive)
         let expectedCharged = try complete.charged.adding(beforePreflight.charged).adding(beforeAnswering.charged)
         let expectedHeld = try complete.held.adding(beforePreflight.held).adding(beforeAnswering.held)
-        checks["backup_schema_nine_episode_inventory_captures_active_and_settled_work"] = manifest.databaseSchema == 9 && manifest.inventory.episodes == 3 && manifest.inventory.unfinishedEpisodes == 2 && manifest.inventory.episodeWork == 6 && manifest.inventory.episodePreparedWork == 2 && manifest.inventory.episodeUncertainWork == 2 && manifest.inventory.episodeCharged == expectedCharged && manifest.inventory.episodeHeld == expectedHeld
+        checks["backup_schema_nine_episode_inventory_captures_active_and_settled_work"] = manifest.databaseSchema == 10 && manifest.inventory.episodes == 3 && manifest.inventory.unfinishedEpisodes == 2 && manifest.inventory.episodeWork == 6 && manifest.inventory.episodePreparedWork == 2 && manifest.inventory.episodeUncertainWork == 2 && manifest.inventory.episodeCharged == expectedCharged && manifest.inventory.episodeHeld == expectedHeld
         checks["backup_episode_request_snapshots_deduplicate_exact_bodies"] = manifest.inventory.episodeSnapshots == 2 && manifest.inventory.episodeSnapshotBytes == Int64(body.count + calibrationBody.count)
         checks["backup_episode_manifest_roundtrip_verified"] = try BackupArchive.verify(at: archive) == manifest
         checks.merge(try schemaThreeArchiveChecks(in: scratch, archive: archive)) { _, new in new }
@@ -1033,7 +1033,7 @@ enum BackupChecks {
             checks["restore_schema_two_private_upgrade_preserves_recovery_and_counts"] = try owner.invocation(id: "interrupted-attempt")?.finalStatus == .partial && owner.invocation(id: "empty-attempt")?.finalStatus == .failed && owner.sourceManifest(projectID: "synthetic-backup-alpha", afterSequence: 0, limit: 1000).count == 6
             let upgradedArchive = scratch.appendingPathComponent("schema-two-upgraded-archive", isDirectory: true)
             let upgraded = try BackupArchive.create(from: owner, at: upgradedArchive)
-            checks["restore_schema_two_upgrades_private_staging_to_schema_nine"] = upgraded.databaseSchema == 9 && upgraded.inventory.episodes == 0 && upgraded.inventory.episodeWork == 0 && upgraded.inventory.invocations == verified.inventory.invocations && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
+            checks["restore_schema_two_upgrades_private_staging_to_schema_nine"] = upgraded.databaseSchema == 10 && upgraded.inventory.episodes == 0 && upgraded.inventory.episodeWork == 0 && upgraded.inventory.invocations == verified.inventory.invocations && upgraded.inventory.events == verified.inventory.events + verified.inventory.unfinishedInvocations
         }
         checks["restore_schema_two_preserves_original_verified_archive"] = try BackupArchive.verify(at: legacy) == verified
         return checks
@@ -1051,7 +1051,7 @@ enum BackupChecks {
         let upgraded = try BackupArchive.create(from: owner, at: scratch.appendingPathComponent("schema-one-upgraded-archive", isDirectory: true))
         return [
             "backup_schema_one_explicit_contract_has_no_journal": verified.databaseSchema == 1 && verified.inventory.invocations == 0 && verified.inventory.chunks == 0 && verified.inventory.episodes == nil && verified.inventory.chatEpisodes == nil && verified.inventory.localReadEpisodes == nil,
-            "restore_schema_one_exact_sources_without_invented_attempts": upgraded.databaseSchema == 9 && upgraded.inventory.events == verified.inventory.events && upgraded.inventory.sourceBytes == verified.inventory.sourceBytes && upgraded.inventory.invocations == 0 && upgraded.inventory.episodes == 0 && upgraded.inventory.chatEpisodes == 0 && upgraded.inventory.localReadEpisodes == 0,
+            "restore_schema_one_exact_sources_without_invented_attempts": upgraded.databaseSchema == 10 && upgraded.inventory.events == verified.inventory.events && upgraded.inventory.sourceBytes == verified.inventory.sourceBytes && upgraded.inventory.invocations == 0 && upgraded.inventory.episodes == 0 && upgraded.inventory.chatEpisodes == 0 && upgraded.inventory.localReadEpisodes == 0,
             "backup_schema_one_archive_bytes_unchanged_after_restore": try BackupArchive.verify(at: legacy) == verified
         ]
     }
@@ -1242,6 +1242,7 @@ enum BackupChecks {
     /// Independent historical fixture DDL frozen at checkpoint 22c3402.
     /// Rebuilding into these tables preserves old constraints and references.
     private static func historicalFixtureSQL(version: Int) throws -> String {
+        if version == 9 { return AuthoritySchemaNine.sql }
         if version == 8 { return AuthoritySchemaEight.sql }
         if version == 7 { return AuthoritySchemaSeven.sql }
         if version == 6 { return AuthoritySchemaSix.sql }
@@ -1420,7 +1421,7 @@ enum BackupChecks {
     }
 
     private static func downgrade(_ database: URL, to version: Int, alterLimitsConstraint: Bool = false) throws {
-        guard (1...4).contains(version) || (6...8).contains(version) else { throw BackupError.invalid("synthetic historical fixture version") }
+        guard (1...4).contains(version) || (6...9).contains(version) else { throw BackupError.invalid("synthetic historical fixture version") }
         let rebuilt = database.deletingLastPathComponent().appendingPathComponent("historical-" + UUID().uuidString + ".sqlite3")
         defer { try? FileManager.default.removeItem(at: rebuilt) }
         try privateWrite(Data(), at: rebuilt)
@@ -1446,6 +1447,7 @@ enum BackupChecks {
             if version >= 6 { tables += AuthorityStateKernel.tableNames }
             if version >= 7 { tables += AuthorityBindingJournal.tableNames }
             if version >= 8 { tables += EpisodeAccountingJournal.tableNames }
+            if version >= 9 { tables += EpisodeTerminalCleanupJournal.tableNames }
             for table in tables {
                 var statement: OpaquePointer?
                 guard sqlite3_prepare_v2(handle, "SELECT name FROM pragma_table_info('\(table)') ORDER BY cid", -1, &statement, nil) == SQLITE_OK, let statement else { throw BackupError.database }
@@ -1484,6 +1486,46 @@ enum BackupChecks {
         let output = FileHandle(fileDescriptor: outputPipe[0], closeOnDealloc: true).readDataToEndOfFile()
         let errors = FileHandle(fileDescriptor: errorPipe[0], closeOnDealloc: true).readDataToEndOfFile()
         return CommandCapture(status: status, output: output, errors: errors)
+    }
+
+    private static func sourceTimeArchiveChecks(scratch: URL) throws -> [String: Bool] {
+        let directory = scratch.appendingPathComponent("dated-source", isDirectory: true)
+        var owner: MemoryStore? = try MemoryStore(directory: directory)
+        let conversation = try owner!.createConversation(projectID: "dated-backup-project", title: "Synthetic dated archive")
+        let time = EventSourceTime(value: "2023-07-27T23:30:00", precision: "second", timezone: "-04:00", sourceSHA256: String(repeating: "c", count: 64), locator: "/history/0/date", originalValue: "2023-07-27T23:30:00-04:00")
+        let event = try owner!.append(conversationID: conversation.id, role: .human, text: "synthetic original dated bytes", status: .complete, turnID: "dated-backup-turn", eventID: "dated-backup-event", sourceTime: time)
+        let archive = scratch.appendingPathComponent("dated-archive", isDirectory: true)
+        let manifest = try BackupArchive.create(from: owner!, at: archive)
+        let target = scratch.appendingPathComponent("dated-restore", isDirectory: true)
+        _ = try BackupArchive.restore(from: archive, to: target, authority: .unmanagedNoDeletion)
+        var restored: MemoryStore? = try MemoryStore(directory: target)
+        let result = try restored!.events(conversationID: conversation.id).first
+        var checks = ["backup_schema_ten_preserves_original_time_payload_and_ingestion": manifest.databaseSchema == 10 && result?.sourceTime == time && result?.text == event.text && result?.createdAt == event.createdAt && result?.digest == event.digest]
+        restored = nil
+        owner = nil
+        let historical = scratch.appendingPathComponent("genuine-nine-archive", isDirectory: true)
+        try FileManager.default.copyItem(at: archive, to: historical)
+        try downgrade(historical.appendingPathComponent("memory.sqlite3"), to: 9)
+        try relabelLegacyManifest(historical, version: 9)
+        let old = try BackupArchive.verify(at: historical)
+        let oldTarget = scratch.appendingPathComponent("genuine-nine-restored", isDirectory: true)
+        _ = try BackupArchive.restore(from: historical, to: oldTarget, authority: .unmanagedNoDeletion)
+        restored = try MemoryStore(directory: oldTarget)
+        checks["backup_genuine_schema_nine_upgrade_preserves_unknown_original_time"] = try old.databaseSchema == 9 && restored!.events(conversationID: conversation.id).first?.sourceTime == nil && restored!.events(conversationID: conversation.id).first?.text == event.text
+        restored = nil
+        let forged = scratch.appendingPathComponent("forged-nine-archive", isDirectory: true)
+        try FileManager.default.copyItem(at: archive, to: forged)
+        try sql(forged.appendingPathComponent("memory.sqlite3"), "PRAGMA user_version=9")
+        try relabelLegacyManifest(forged, version: 9)
+        checks["backup_source_time_cannot_masquerade_as_schema_nine"] = rejects { _ = try BackupArchive.verify(at: forged) }
+        let corrupt = scratch.appendingPathComponent("noncanonical-time-archive", isDirectory: true)
+        try FileManager.default.copyItem(at: archive, to: corrupt)
+        let bytes = Data((" " + String(decoding: try time.canonicalData(), as: UTF8.self)).utf8)
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        try sql(corrupt.appendingPathComponent("memory.sqlite3"), "UPDATE events SET source_time_json=X'" + hex + "'")
+        try relabelLegacyManifest(corrupt, version: 10)
+        checks["backup_noncanonical_time_refused_even_with_rehashed_manifest"] = rejects { _ = try BackupArchive.verify(at: corrupt) }
+        return checks
     }
 
     private static func rejects(_ operation: () throws -> Void) -> Bool { do { try operation(); return false } catch { return true } }

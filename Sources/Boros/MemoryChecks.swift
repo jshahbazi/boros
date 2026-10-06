@@ -8,7 +8,7 @@ enum MemoryChecks {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-memory-check-" + UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         var store: MemoryStore? = try MemoryStore(directory: directory)
-        var checks: [String: Bool] = [:]
+        var checks: [String: Bool] = try sourceTimeChecks()
         let first = try store!.createConversation(projectID: "synthetic-alpha", title: "Synthetic history")
         let second = try store!.createConversation(projectID: "synthetic-beta", title: "Separate scope")
         let payload = String(repeating: "archived source line\n", count: 6000) + "MIDPAYLOAD_SENTINEL exact record café \u{1F680}\n" + String(repeating: "continued source line\n", count: 6000)
@@ -121,7 +121,8 @@ enum MemoryChecks {
         checks["wal_full_durability_configuration"] = durability.journalMode == "wal" && durability.synchronous == 2
 
         let current = try store!.append(conversationID: first.id, role: .human, text: "current exact prompt", status: .complete, turnID: "current-turn", eventID: "current-human")
-        let snapshot = try ContextAssembler.prepare(store: store!, conversationID: first.id, projectID: "synthetic-alpha", prompt: current.text, system: "Fixed test system", budgetBytes: 4096, excludingEventID: current.id, historicalQuery: "MIDPAYLOAD_SENTINEL", maximumRecentBytes: 512, maximumEvidenceBytes: 2048)
+        // Retain both small fixtures including their counted v3 metadata.
+        let snapshot = try ContextAssembler.prepare(store: store!, conversationID: first.id, projectID: "synthetic-alpha", prompt: current.text, system: "Fixed test system", budgetBytes: 4096, excludingEventID: current.id, historicalQuery: "MIDPAYLOAD_SENTINEL", maximumRecentBytes: 768, maximumEvidenceBytes: 2048)
         checks["context_preserves_current_prompt_once"] = snapshot.messages.last?.content == current.text && snapshot.messages.filter { $0.content == current.text }.count == 1
         checks["context_matches_serialized_byte_budget"] = snapshot.serializedBytes == (try snapshot.serializedMessages().count) && snapshot.serializedBytes <= 4096
         checks["incomplete_history_explicitly_marked"] = snapshot.messages.contains { $0.role == "assistant" && $0.content.contains("capture status: cancelled") }
@@ -300,14 +301,69 @@ enum MemoryChecks {
               sqlite3_column_int64(counts, 1) == 0 else { throw MemoryError.database("historical fixture contains background work") }
         guard sqlite3_step(counts) == SQLITE_DONE else { throw MemoryError.database("could not inspect synthetic background inventory") }
         let authorityDrops = "DROP INDEX episode_cleanup_pending;" + (Array(EpisodeTerminalCleanupJournal.tableNames.reversed()) + EpisodeAccountingJournal.tableNames + AuthorityBindings.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE " + $0 + ";" }.joined()
-        guard sqlite3_exec(opened, authorityDrops + "DROP TABLE background_index_work; DROP TABLE background_index_windows; DROP TABLE invocation_chunks; DROP TABLE invocations; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=1;", nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("could not prepare version one schema") }
+        guard sqlite3_exec(opened, authorityDrops + "DROP INDEX events_source_day; ALTER TABLE events DROP COLUMN source_time_json; DROP TABLE background_index_work; DROP TABLE background_index_windows; DROP TABLE invocation_chunks; DROP TABLE invocations; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=1;", nil, nil, nil) == SQLITE_OK else { throw MemoryError.database("could not prepare version one schema") }
         store = try MemoryStore(directory: directory)
         let restored = try store!.events(conversationID: conversation.id)
         let checks = [
-            "version_one_migration_preserves_exact_history": restored.count == 1 && restored[0].text == history && restored[0].digest == original.digest && restored[0].createdAt == original.createdAt,
+            "version_one_migration_preserves_exact_history": restored.count == 1 && restored[0].text == history && restored[0].digest == original.digest && restored[0].createdAt == original.createdAt && restored[0].sourceTime == nil,
             "version_one_migration_preserves_search_draft_settings": try store!.search(query: "VERSION_ONE_SENTINEL", projectID: "migration-project").first?.eventID == original.id && store!.loadDraft(conversationID: conversation.id) == "version one draft" && store!.loadSetting(key: "v1-setting") == "version one setting"
         ]
         store = nil
+        return checks
+    }
+
+    private static func sourceTimeChecks() throws -> [String: Bool] {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-source-time-" + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var owner: MemoryStore? = try MemoryStore(directory: directory)
+        let conversation = try owner!.createConversation(projectID: "source-time-project", title: "Synthetic dated source")
+        let time = EventSourceTime(value: "2023-07-27", precision: "day", timezone: "unspecified", sourceSHA256: String(repeating: "a", count: 64), locator: "/conversations/0/date", originalValue: "2023-07-27")
+        let event = try owner!.append(conversationID: conversation.id, role: .human, text: "synthetic dated source needle", status: .complete, turnID: "dated-turn", eventID: "dated-event", sourceTime: time)
+        let undated = try owner!.append(conversationID: conversation.id, role: .assistant, text: "synthetic undated source needle", status: .complete, turnID: "dated-turn", eventID: "undated-event")
+        let repeated = try owner!.append(conversationID: conversation.id, role: .human, text: event.text, status: event.status, turnID: event.turnID, eventID: event.id, sourceTime: time)
+        var checks: [String: Bool] = [:]
+        checks["source_time_replay_preserves_original_and_ingestion_clocks"] = repeated.sourceTime == time && repeated.createdAt == event.createdAt && event.createdAt != time.value
+        checks["source_time_retry_missing_or_changed_provenance_conflicts"] = rejects {
+            _ = try owner!.append(conversationID: conversation.id, role: .human, text: event.text, status: event.status, turnID: event.turnID, eventID: event.id)
+        } && rejects {
+            let changed = EventSourceTime(value: time.value, precision: time.precision, timezone: time.timezone, sourceSHA256: String(repeating: "b", count: 64), locator: time.locator, originalValue: time.originalValue)
+            _ = try owner!.append(conversationID: conversation.id, role: .human, text: event.text, status: event.status, turnID: event.turnID, eventID: event.id, sourceTime: changed)
+        }
+        let invalid = EventSourceTime(value: "2023-02-30", precision: "day", timezone: "unspecified", sourceSHA256: time.sourceSHA256, locator: time.locator, originalValue: "2023-02-30")
+        checks["source_time_invalid_metadata_rejected_before_publication"] = try rejects {
+            _ = try owner!.append(conversationID: conversation.id, role: .human, text: "rejected time", status: .complete, turnID: "rejected-turn", eventID: "rejected-event", sourceTime: invalid)
+        } && owner!.eventCount(conversationID: conversation.id) == 2
+        let refs = try owner!.sourceManifest(projectID: conversation.projectID, afterSequence: 0, limit: 20)
+        let hit = try owner!.search(query: "needle", projectID: conversation.projectID, limit: 20).first { $0.eventID == event.id }
+        checks["source_time_scoped_events_references_hits_preserve_metadata"] = try owner!.events(conversationID: conversation.id).first?.sourceTime == time && refs.first?.sourceTime == time && hit?.sourceTime == time && refs.last?.sourceTime == nil
+        checks["source_time_day_filter_excludes_unknown_and_preserves_frontier"] = try owner!.sourceManifest(projectID: conversation.projectID, afterSequence: 0, throughSequence: refs.last!.sequence, limit: 20, originalDayRange: "2023-07-27"..."2023-07-27").map(\.eventID) == [event.id]
+            && owner!.sourceManifest(projectID: "other-project", afterSequence: 0, limit: 20, originalDayRange: "2023-07-27"..."2023-07-27").isEmpty
+        checks["source_time_day_filter_rejects_timestamp_or_invalid_day"] = rejects {
+            _ = try owner!.sourceManifest(projectID: conversation.projectID, afterSequence: 0, limit: 20, originalDayRange: "2023-07-27T12:00"..."2023-07-27T12:00")
+        }
+        // Force failure after the event INSERT when lexical publication starts.
+        // SQLite cannot install triggers on an FTS virtual table.
+        try syntheticSQL(directory: directory, sql: "DROP TABLE event_fts")
+        checks["source_time_and_payload_atomic_on_publication_failure"] = try rejects {
+            _ = try owner!.append(conversationID: conversation.id, role: .human, text: "atomic source", status: .complete, turnID: "atomic-turn", eventID: "atomic-event", sourceTime: time)
+        } && owner!.eventCount(conversationID: conversation.id) == 2
+        try syntheticSQL(directory: directory, sql: "CREATE VIRTUAL TABLE event_fts USING fts5(text, content=''); INSERT INTO event_fts(rowid,text) SELECT sequence,CAST(payload AS TEXT) FROM events")
+        owner = nil
+        owner = try MemoryStore(directory: directory)
+        checks["source_time_restart_preserves_exact_metadata_and_legacy_nil"] = try owner!.events(conversationID: conversation.id).first?.sourceTime == time && owner!.sourceReference(eventID: undated.id, projectID: conversation.projectID)?.sourceTime == nil
+        let civil = try owner!.createConversation(projectID: "civil-boundary-project", title: "Synthetic civil-day boundaries")
+        let late = EventSourceTime(value: "2023-07-27T23:30:00", precision: "second", timezone: "-04:00", sourceSHA256: time.sourceSHA256, locator: "/history/1/date", originalValue: "2023-07-27T23:30:00-04:00")
+        let early = EventSourceTime(value: "2023-07-28T00:30:00", precision: "second", timezone: "+04:00", sourceSHA256: time.sourceSHA256, locator: "/history/2/date", originalValue: "2023-07-28T00:30:00+04:00")
+        _ = try owner!.append(conversationID: civil.id, role: .human, text: "synthetic late civil day", status: .complete, turnID: "civil-late", eventID: "civil-late-event", sourceTime: late)
+        _ = try owner!.append(conversationID: civil.id, role: .human, text: "synthetic early civil day", status: .complete, turnID: "civil-early", eventID: "civil-early-event", sourceTime: early)
+        checks["source_time_calendar_filter_retains_literal_day_across_offset_boundaries"] = try owner!.sourceManifest(projectID: civil.projectID, afterSequence: 0, limit: 20, originalDayRange: "2023-07-27"..."2023-07-27").map(\.eventID) == ["civil-late-event"]
+            && owner!.sourceManifest(projectID: civil.projectID, afterSequence: 0, limit: 20, originalDayRange: "2023-07-28"..."2023-07-28").map(\.eventID) == ["civil-early-event"]
+        let noncanonical = Data((" " + String(decoding: try time.canonicalData(), as: UTF8.self)).utf8)
+        let hex = noncanonical.map { String(format: "%02x", $0) }.joined()
+        try syntheticSQL(directory: directory, sql: "UPDATE events SET source_time_json=X'" + hex + "' WHERE id='dated-event'")
+        checks["source_time_corrupt_scoped_read_refuses_noncanonical_metadata"] = rejects { _ = try owner!.sourceReference(eventID: event.id, projectID: conversation.projectID) }
+        owner = nil
+        checks["source_time_corrupt_startup_refuses_noncanonical_metadata"] = rejects { _ = try MemoryStore(directory: directory) }
         return checks
     }
 

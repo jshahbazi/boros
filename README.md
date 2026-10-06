@@ -50,7 +50,7 @@ To keep instructions after restart, open Show settings, edit System, and click S
 
 For JSON output from the selected Qwen API model, select JSON object under API output and specify the desired fields in your question. JSON mode turns thinking off. The option defaults to off and is saved with API settings or Send. Boros retains the complete response and reports when it is not a valid object. JSON mode does not guarantee correct answers or citations. Its extra prompt instruction is included in token admission and accounting; see [the provider contract](docs/PROVIDER-ADMISSION.md#optional-json-object-output).
 
-For long public histories, [the chat importer](docs/CHAT-IMPORT.md) loads BEAM, DevGPT, ShareGPT, or role-message JSON into a new private test store. It preserves exact source text and roles, verifies complete readback before publication, and can open the imported chat for normal follow-up questions.
+For long public histories, [the chat importer](docs/CHAT-IMPORT.md) loads BEAM, DevGPT, ShareGPT, or role-message JSON into a new private test store. It preserves exact source text and roles, verifies explicit OpenAI message timestamps against the original artifact, verifies complete readback before publication, and can open the imported chat for normal follow-up questions.
 
 With the answering model stopped, [the offline imported-chat runner](docs/IMPORTED-CHAT-EVALUATION.md) compares recent-only, lexical, hybrid, and exact-page source recovery in disposable stores. It reports source coverage, read-episode resources, semantic holes and timing without printing chat text or generating answers.
 

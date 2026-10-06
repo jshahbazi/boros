@@ -1846,7 +1846,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     prompt: "Synthetic follow-up", system: "Synthetic host rule", budgetBytes: 65_536)
                 let humanContext = try ContextSourceFraming.recentPrefix(eventID: human.id,
                     role: human.role.rawValue, status: human.status.rawValue,
-                    selectionVersion: ContextSourceFraming.currentSelectionVersion) + human.text
+                    selectionVersion: ContextSourceFraming.currentSelectionVersion,
+                    capturedAt: human.createdAt, sourceTime: human.sourceTime) + human.text
                 checks["context_exact_roles_preserved"] = snapshot.messages.contains { $0.role == "user" && $0.content.utf8.elementsEqual(humanContext.utf8) }
                     && snapshot.messages.last?.content == "Synthetic follow-up"
                 checks.merge(try sendContextChecks(store: store)) { _, new in new }
@@ -2421,6 +2422,13 @@ private enum BonsaiPlayground {
                 let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
                 print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"authority_state_self_test\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--source-time-self-test") {
+            do {
+                let checks = try EventSourceTimeChecks.run()
+                let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"source_time_self_test\":false}"); exit(1) }
         }
         if CommandLine.arguments.contains("--recent-source-framing-self-test") {
             do {

@@ -105,7 +105,7 @@ enum MeteredExchangeExpansion {
                       page.totalBytes == neighbor.byteCount else { throw MeteredRetrievalError.sourceMismatch }
                 let prefix = MemoryHit(eventID: neighbor.eventID, conversationID: neighbor.conversationID, projectID: neighbor.projectID,
                     role: neighbor.role, status: neighbor.status, createdAt: neighbor.createdAt, digest: neighbor.digest,
-                    totalBytes: neighbor.byteCount, excerptOffset: 0, excerpt: page.text)
+                    totalBytes: neighbor.byteCount, excerptOffset: 0, excerpt: page.text, sourceTime: neighbor.sourceTime)
                 hits.append(prefix)
                 seenSpans.insert(PrimarySpan(eventID: Data(prefix.eventID.utf8), offset: 0, bytes: Data(prefix.excerpt.utf8)))
                 added += 1

@@ -285,12 +285,14 @@ enum ContextComponentJournal {
                   let length = integer(source["byteCount"]), let hash = source["digest"] as? String,
                   messages[index + 1]["role"] == (role == "human" ? "user" : "assistant"),
                   let content = messages[index + 1]["content"] else { throw invalid("recent source mismatch") }
+            let sourceTime = try sourceTime(source, selectionVersion: selectionVersion)
             let prefix = Data(try ContextSourceFraming.recentPrefix(eventID: id, role: role, status: status,
-                selectionVersion: selectionVersion).utf8), bytes = Data(content.utf8)
+                selectionVersion: selectionVersion, capturedAt: source["createdAt"] as? String, sourceTime: sourceTime).utf8), bytes = Data(content.utf8)
             guard bytes.starts(with: prefix), bytes.count - prefix.count == length,
                   digest(Data(bytes.dropFirst(prefix.count))) == hash else { throw invalid("recent source bytes mismatch") }
             try sourceMetadata(database: database, id: id, projectID: projectID, conversationID: conversationID,
-                role: role, status: status, createdAt: source["createdAt"] as? String, hash: hash, length: length)
+                role: role, status: status, createdAt: source["createdAt"] as? String, hash: hash, length: length,
+                selectionVersion: selectionVersion, sourceTime: sourceTime)
         }
         var humanMatches = 0
         try rows(database, "SELECT digest,byte_count,role,status FROM events WHERE id=? AND project_id=? AND conversation_id=?", [humanID, projectID, conversationID]) { row in
@@ -317,14 +319,17 @@ enum ContextComponentJournal {
                 guard let id = source["event_id"] as? String, !equal(id, humanID), !seen.contains(Data(id.utf8)),
                       equal(source["project_id"], projectID), let sourceConversation = source["conversation_id"] as? String,
                       let role = source["role"] as? String, let status = source["capture_status"] as? String,
-                      let created = source["source_created_utc"] as? String, let hash = source["source_sha256"] as? String,
+                      let created = source[selectionVersion == ContextSourceFraming.currentSelectionVersion ? "captured_utc" : "source_created_utc"] as? String, let hash = source["source_sha256"] as? String,
                       let length = integer(source["source_bytes"]), let offset = integer(source["excerpt_offset"]),
                       let excerptBytes = integer(source["excerpt_bytes"]), excerptBytes <= 4096, offset <= length,
                       excerptBytes <= length - offset, let excerptHash = source["excerpt_sha256"] as? String else { throw invalid("historical source mismatch") }
+                let sourceTime = try sourceTime(source, selectionVersion: selectionVersion)
                 try sourceMetadata(database: database, id: id, projectID: projectID, conversationID: sourceConversation,
-                    role: role, status: status, createdAt: created, hash: hash, length: length)
+                    role: role, status: status, createdAt: created, hash: hash, length: length,
+                    selectionVersion: selectionVersion, sourceTime: sourceTime)
                 try consume(Data(ContextSourceFraming.evidenceHeader(eventID: id, conversationID: sourceConversation,
-                    role: role, status: status, createdAt: created, digest: hash, offset: offset, totalBytes: length).utf8))
+                    role: role, status: status, createdAt: created, digest: hash, offset: offset, totalBytes: length,
+                    selectionVersion: selectionVersion, sourceTime: sourceTime).utf8))
                 guard excerptBytes <= bytes.count - cursor else { throw invalid("excerpt bytes missing") }
                 let excerpt = bytes.subdata(in: cursor..<(cursor + excerptBytes))
                 guard String(data: excerpt, encoding: .utf8) != nil, digest(excerpt) == excerptHash else { throw invalid("excerpt digest mismatch") }
@@ -344,13 +349,38 @@ enum ContextComponentJournal {
         }
     }
 
+    private static func sourceTime(_ source: [String: Any], selectionVersion: String) throws -> EventSourceTime? {
+        guard selectionVersion == ContextSourceFraming.currentSelectionVersion else { return nil }
+        guard let raw = source["source_time"] else { throw invalid("source calendar metadata missing") }
+        if raw is NSNull { return nil }
+        guard raw is [String: Any] else { throw invalid("source calendar metadata invalid") }
+        let bytes = try JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys, .withoutEscapingSlashes])
+        do { return try EventSourceTime.decodeCanonical(bytes) } catch { throw invalid("source calendar metadata invalid") }
+    }
+
     private static func sourceMetadata(database: OpaquePointer, id: String, projectID: String, conversationID: String,
-        role: String, status: String, createdAt: String?, hash: String, length: Int) throws {
+        role: String, status: String, createdAt: String?, hash: String, length: Int,
+        selectionVersion: String, sourceTime: EventSourceTime?) throws {
         var matches = 0
-        try rows(database, "SELECT role,status,created_at,digest,byte_count FROM events WHERE id=? AND project_id=? AND conversation_id=?", [id, projectID, conversationID]) { row in
+        // The existing scoped metadata read carries chronology under the same
+        // prepaid lease. Old journals do not reference the schema-10 column.
+        let dated = selectionVersion == ContextSourceFraming.currentSelectionVersion
+        let sql = "SELECT role,status,created_at,digest,byte_count" + (dated ? ",source_time_json" : "") + " FROM events WHERE id=? AND project_id=? AND conversation_id=?"
+        try rows(database, sql, [id, projectID, conversationID]) { row in
             matches += 1
             guard equal(text(row, 0), role), equal(text(row, 1), status), equal(text(row, 2), createdAt ?? ""),
                   text(row, 3) == hash, Int(sqlite3_column_int64(row, 4)) == length else { throw invalid("source metadata mismatch") }
+            if dated {
+                let stored: EventSourceTime?
+                if sqlite3_column_type(row, 5) == SQLITE_NULL { stored = nil }
+                else {
+                    guard sqlite3_column_type(row, 5) == SQLITE_BLOB, sqlite3_column_bytes(row, 5) > 0,
+                          sqlite3_column_bytes(row, 5) <= EventSourceTime.maximumBytes else { throw invalid("source calendar metadata invalid") }
+                    do { stored = try EventSourceTime.decodeCanonical(data(row, 5)) }
+                    catch { throw invalid("source calendar metadata invalid") }
+                }
+                guard try stored?.canonicalData() == sourceTime?.canonicalData() else { throw invalid("source calendar metadata mismatch") }
+            }
         }
         guard matches == 1 else { throw invalid("source metadata missing") }
     }

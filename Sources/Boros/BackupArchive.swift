@@ -149,7 +149,7 @@ enum BackupArchive {
         let candidate = try Database(copied.appendingPathComponent("memory.sqlite3"), writable: true)
         defer { candidate.close() }
         let version = try candidate.integer("PRAGMA user_version")
-        guard (1...9).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
+        guard (1...10).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
         let actualSchema = try schemaObjects(candidate)
         candidate.close()
         guard actualSchema == (try recognizedSchemaObjects(version: version, at: reference)) else {
@@ -182,6 +182,7 @@ enum BackupArchive {
     /// Frozen historical contracts captured from checkpoint 22c3402. Legacy
     /// recognition never derives old constraints by subtracting newer DDL.
     private static func historicalSchemaSQL(version: Int) throws -> String {
+        if version == 9 { return AuthoritySchemaNine.sql }
         if version == 8 { return AuthoritySchemaEight.sql }
         if version == 7 { return AuthoritySchemaSeven.sql }
         if version == 6 { return AuthoritySchemaSix.sql }
@@ -361,9 +362,9 @@ enum BackupArchive {
     }
 
     private static func recognizedSchemaObjects(version: Int, at directory: URL) throws -> [SchemaObject] {
-        if version == 9 {
+        if version == 10 {
             // Only the current contract derives from the current owner. All
-            // historical schemas 1–8 retain their frozen DDL.
+            // historical schemas 1–9 retain their frozen DDL.
             do { let owner = try MemoryStore(directory: directory); withExtendedLifetime(owner) {} }
         } else {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -414,7 +415,7 @@ enum BackupArchive {
             files.append(try fileRecord(staging.appendingPathComponent("settings.json"), name: "settings.json"))
             settingsCapture = "independent-atomic-file-point-capture"
         }
-        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 9, archiveID: UUID().uuidString,
+        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 10, archiveID: UUID().uuidString,
             createdAt: timestamp(), databaseCapture: databaseCapture, settingsCapture: settingsCapture,
             control: control, files: files, inventory: inventory, excluded: excluded)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -433,7 +434,7 @@ enum BackupArchive {
         let manifest: BackupManifest
         do { manifest = try JSONDecoder().decode(BackupManifest.self, from: manifestData) }
         catch { throw BackupError.invalid("missing or malformed archive manifest") }
-        guard manifest.archiveVersion == 1, (1...9).contains(manifest.databaseSchema),
+        guard manifest.archiveVersion == 1, (1...10).contains(manifest.databaseSchema),
               UUID(uuidString: manifest.archiveID) != nil, !manifest.createdAt.isEmpty,
               manifest.databaseCapture == databaseCapture, manifest.excluded == excluded,
               ["absent", "independent-atomic-file-point-capture"].contains(manifest.settingsCapture),
@@ -672,6 +673,16 @@ enum BackupArchive {
         guard let handle = target.handle else { throw BackupError.database }
         do { try EpisodeTerminalCleanupJournal.validate(database: handle) }
         catch { throw BackupError.invalid("restored cleanup journal failed integrity verification") }
+        // Original events retain exact optional provenance through upgrade and
+        // recovery. Historical rows must remain undated rather than guessed.
+        let originalTimeColumn = schema >= 10 ? "source_time_json" : "NULL"
+        try source.each("SELECT id," + originalTimeColumn + " FROM events ORDER BY sequence") { row in
+            let previous = try restoreCells(row)
+            guard let id = previous[0].string,
+                  let current = try restoreRow(target, "SELECT id,source_time_json FROM events WHERE id=?", id), current == previous else {
+                throw BackupError.invalid("restore changed original source time metadata")
+            }
+        }
         let budgetColumns = "episode_id,classification,limit_rows,prepaid_rows,consumed_rows,pending_rows,attempted_rows,administrative_rows,terminal_ticks"
         let receiptColumns = "work_id,episode_id,from_state,ticks"
         let pendingStates = Set(["prepared", "dispatchArmed", "submitted"])
@@ -818,7 +829,7 @@ enum BackupArchive {
         let db = try Database(url, writable: false)
         defer { db.close() }
         let schema = try db.integer("PRAGMA user_version")
-        guard (1...9).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
+        guard (1...10).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
         guard try db.texts("PRAGMA integrity_check") == ["ok"], try db.integer("SELECT count(*) FROM pragma_foreign_key_check") == 0 else {
             throw BackupError.invalid("SQLite integrity or foreign-key check failed")
         }
@@ -841,6 +852,7 @@ enum BackupArchive {
             "drafts": ["conversation_id", "payload"], "settings": ["key", "payload"],
             "invocations": ["id", "conversation_id", "project_id", "turn_id", "human_event_id", "assistant_event_id", "provider_identity", "request_body", "request_digest", "admission_json", "admission_digest", "usage_json", "usage_digest", "created_at", "chunk_count", "observed_bytes", "final_status", "terminal_reason", "finalized_at", "recovered"],
             "invocation_chunks": ["invocation_id", "chunk_sequence", "byte_count", "digest", "payload"]]
+        if schema >= 10 { columns["events"]!.append("source_time_json") }
         if schema >= 3 {
             columns["invocations"]! += ["episode_id", "episode_work_id"]
             columns["episodes"] = ["id", "conversation_id", "project_id", "turn_id", "human_event_id", "limits_json", "limits_digest", "state", "revision", "clock_domain", "created_ticks", "deadline_ticks", "last_ticks", "created_utc", "terminal_reason"]
@@ -885,6 +897,12 @@ enum BackupArchive {
               try db.integer("SELECT count(*) FROM drafts d LEFT JOIN conversations c ON d.conversation_id=c.id WHERE c.id IS NULL") == 0,
               (try (schema == 1 || db.integer("SELECT count(*) FROM invocation_chunks x LEFT JOIN invocations i ON x.invocation_id=i.id WHERE i.id IS NULL") == 0)) else {
             throw BackupError.invalid("invalid event scope or capture state")
+        }
+        if let handle = db.handle {
+            do {
+                if schema >= 10 { try SourceTimeSchema.validate(database: handle) }
+                else { try SourceTimeSchema.requireAbsent(database: handle) }
+            } catch { throw BackupError.invalid("source time metadata failed integrity verification") }
         }
         try db.each("SELECT payload,byte_count,digest FROM events") { row in
             let data = db.blob(row, 0)

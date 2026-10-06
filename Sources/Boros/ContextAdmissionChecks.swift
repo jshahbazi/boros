@@ -179,8 +179,10 @@ enum ContextAdmissionChecks {
             text: String(repeating: "Archived unrelated historical words. ", count: 1000) + "crowdoutkey original decision",
             status: .complete, turnID: "candidate-old-turn", eventID: "candidate-old-source")
         var excluded: Set<String> = []
-        for index in 0..<120 {
-            let id = "candidate-recent-\(index)"
+        // Exceed the 100-candidate raw limit while keeping all complete recent
+        // messages, including v3 metadata, within the unchanged 24 KiB cap.
+        for index in 0..<101 {
+            let id = "r\(index)"
             _ = try store.append(conversationID: chat.id, role: .human, text: "crowdoutkey",
                 status: .complete, turnID: "candidate-turn-\(index)", eventID: id)
             excluded.insert(id)
@@ -193,7 +195,7 @@ enum ContextAdmissionChecks {
         let hybrid = try ChatContextPreparation.prepare(store: store, conversationID: chat.id, projectID: project,
             prompt: prompt, system: "Synthetic host rule", excludingEventID: "synthetic-unsaved-current", semanticIndex: semantic)
         return [
-            "candidate_starvation_fixture_exceeds_raw_cap": recent.includedRecentCount == 120 && recent.omittedRecentCount == 1,
+            "candidate_starvation_fixture_exceeds_raw_cap": recent.includedRecentCount == 101 && recent.omittedRecentCount == 1,
             "lexical_exclusions_apply_before_candidate_limit": try store.search(query: "crowdoutkey", projectID: project,
                 limit: 100, excludingEventIDs: excluded).map(\.eventID) == [old.id],
             "literal_exclusions_apply_before_candidate_limit": try store.literalSearch(query: "crowdoutkey", projectID: project,

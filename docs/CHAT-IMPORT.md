@@ -47,7 +47,7 @@ python3 scripts/import_chat.py \
 
 | Format | Input | Mapping |
 |---|---|---|
-| OpenAI style | Message array; object with `messages` or `conversation`; array/JSONL of those objects | `role`, string `content`, optional `status` |
+| OpenAI style | Message array; object with `messages` or `conversation`; array/JSONL of those objects | `role`, string `content`, optional `status`, optional explicit string `timestamp` |
 | ShareGPT | Object or array/JSONL of objects with `conversations` | `from: human/gpt`, string `value` |
 | BEAM repository | Ordered batches with `turns`, each an ordered message array | One chat in original batch/turn/message order |
 | DevGPT | `Sources` with `ChatgptSharing`, a source record, or source-record array | Each available `Conversations` array becomes one chat; `Prompt` is user, `Answer` is assistant |
@@ -56,13 +56,13 @@ DevGPT preserves file/pair order. Unavailable shares with no conversation and a 
 
 Only text user/assistant roles become source events. `human` and `gpt` are explicit aliases. System, developer, tool, function, multimodal blocks, and invocation fields are rejected. Raw SWE-chat traces, ChatGPT account exports with branch mappings, and Hugging Face Parquet are unsupported; obtain a supported JSON export first. Embedded instructions remain source material and cannot replace Boros's host instructions.
 
-Message text retains exact UTF-8 bytes, whitespace, original order, role, and explicit `complete`, `partial`, `failed`, or `cancelled` capture status. Missing status defaults to `complete`, meaning the source text was fully imported; it does not establish that the original generation finished successfully. Role alternation is not enforced. Event timestamps record ingestion. Original timestamps, IDs, BEAM batch metadata, and DevGPT code representations remain in the private source file; they do not become searchable event fields. Temporal evaluations requiring batch time anchors need a future adapter contract.
+Message text retains exact UTF-8 bytes, whitespace, original order, role, and explicit `complete`, `partial`, `failed`, or `cancelled` capture status. Missing status defaults to `complete`, meaning the source text was fully imported; it does not establish that the original generation finished successfully. Role alternation is not enforced. Event timestamps record ingestion. Explicit OpenAI message `timestamp` strings additionally become validated source-time metadata; missing dates remain unknown. Boros preserves the literal, normalized civil date/time, precision, explicit offset or unspecified timezone, original-file hash and JSON pointer. [Source-time contracts](SOURCE-TIME.md) define accepted formats and civil-day filtering. Original IDs, BEAM batch time anchors and DevGPT share metadata remain in the private source file. Those fields require separate adapter contracts before they can support temporal claims.
 
 ## Publication and provenance
 
 The converter reads strict UTF-8 JSON/JSONL and rejects duplicate keys and nonfinite numbers. Native ingestion independently validates the canonical schema, duplicate keys, sizes, roles, and statuses. Each message must fit the existing 4 MiB event bound; oversize messages fail without truncation. Limits are 100,000 messages per selected chat and 128 MiB per original/canonical document. Embedding the original document means conversion can hit the canonical cap before the original-file cap.
 
-Ingestion uses a private sibling staging directory and `MemoryStore` APIs. It closes and reopens the owner, then compares every message's bytes, digest, role, status, and order before syncing files and publishing with an atomic exclusive rename. Existing destinations are never overwritten. The native destination parent must exist without symlink components. Normal failures remove unpublished staging. Process death can leave a private `.boros-import-*` folder, with the final destination absent. A parent sync failure after rename reports unknown publication durability and retains the completed destination.
+Ingestion uses a private sibling staging directory and `MemoryStore` APIs. It closes and reopens the owner, then compares every message's bytes, digest, role, status, order and optional source-time metadata before syncing files and publishing with an atomic exclusive rename. Existing destinations are never overwritten. The native destination parent must exist without symlink components. Normal failures remove unpublished staging. Process death can leave a private `.boros-import-*` folder, with the final destination absent. A parent sync failure after rename reports unknown publication durability and retains the completed destination.
 
 The private destination contains:
 
@@ -71,11 +71,11 @@ The private destination contains:
 - `chat-import.json`: canonical native input retaining the complete selected chat even for a prefix import.
 - `import-manifest.json`: source provenance, selection, event/turn IDs, per-message hashes, sizes, statuses, and timestamp interpretation.
 
-Directories use mode 0700 and files mode 0600. The manifest records whether original source bytes were supplied and hash-verified. A direct canonical native input may omit `original_json`, leaving its source declaration unverified. Existing Boros backups preserve database sources and journals but omit these importer sidecars; retain them separately when preserving an experiment. Runtime data belongs outside Git.
+Directories use mode 0700 and files mode 0600. The manifest records whether original source bytes were supplied and hash-verified. An undated direct canonical native input may omit `original_json`, leaving its source declaration unverified. Dated v2 input requires the original artifact and verifies every declared date against its exact JSON pointer and literal. The converter associates each timestamp with its actual selected message; native v2 validates the caller-supplied association and date location. Existing Boros backups preserve database sources and journals but omit these importer sidecars; retain them separately when preserving an experiment. Runtime data belongs outside Git.
 
 ## Native command and checks
 
-The canonical version-1 document has `schema_version`, `title`, `source` (`dataset`, optional `url`, original-file `sha256`, `selection`), `messages` (`role`, `content`, `status`), and optional `original_json`.
+The canonical version-1 document has `schema_version`, `title`, `source` (`dataset`, optional `url`, original-file `sha256`, `selection`), `messages` (`role`, `content`, `status`), and optional `original_json`. Version 2 additionally accepts optional `source_time` objects on messages. Each object has exactly `value`, `precision`, `timezone`, `source_sha256`, `locator`, and `original_value`. Explicit nulls and unknown fields are refused. The converter emits v2 when dates are present and retains v1 for undated conversions. Both native versions validate all messages before applying a requested prefix.
 
 ```sh
 .build/boros/Boros.app/Contents/MacOS/Boros \

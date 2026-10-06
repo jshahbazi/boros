@@ -357,7 +357,7 @@ enum MeteredRetrieval {
                 if let match {
                     hits.append(MemoryHit(eventID: source.eventID, conversationID: source.conversationID, projectID: source.projectID,
                         role: source.role, status: source.status, createdAt: source.createdAt, digest: source.digest,
-                        totalBytes: source.byteCount, excerptOffset: match, excerpt: query))
+                        totalBytes: source.byteCount, excerptOffset: match, excerpt: query, sourceTime: source.sourceTime))
                     if hits.count == limit { reason = "result_limit"; break }
                 }
             }

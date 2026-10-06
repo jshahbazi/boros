@@ -106,8 +106,30 @@ class EvaluationContracts(unittest.TestCase):
             with self.assertRaises(self.e.EvaluationError): self.e.run(SimpleNamespace(output=output))
             self.assertTrue(output.read_bytes() == sentinel, "report_not_overwritten")
 
+    def test_source_time_proof_checks_exact_pointer_and_normalization(self):
+        original = '{"messages":[{"timestamp":"2024/02/29 (Thu) 12:03"}],"meta/~date":"2024-02-29","é":"2024-02-29"}'
+        converter, parsed = self.e.dated_original(original)
+        source_hash = self.e.digest(original.encode())
+        evidence = {"value": "2024-02-29T12:03", "precision": "minute", "timezone": "unspecified",
+                    "source_sha256": source_hash, "locator": "/messages/0/timestamp", "original_value": "2024/02/29 (Thu) 12:03"}
+        self.e.validate_source_time(evidence, source_hash, converter, parsed)
+        for key, value in (("locator", "/messages/00/timestamp"), ("locator", "/messages/~2/timestamp"),
+                           ("locator", "/messages/1/timestamp"), ("original_value", "2024/02/29 (Fri) 12:03"),
+                           ("timezone", "Z"), ("source_sha256", "0" * 64), ("unexpected", "x")):
+            bad = {**evidence, key: value}
+            self.assertRejects(lambda: self.e.validate_source_time(bad, source_hash, converter, parsed))
+        escaped = {**evidence, "value": "2024-02-29", "precision": "day", "original_value": "2024-02-29", "locator": "/meta~1~0date"}
+        self.e.validate_source_time(escaped, source_hash, converter, parsed)
+        self.e.validate_source_time({**escaped, "locator": "/é"}, source_hash, converter, parsed)
+        self.assertRejects(lambda: self.e.validate_source_time({**escaped, "locator": "/e\u0301"}, source_hash, converter, parsed))
+        self.assertRejects(lambda: self.e.dated_original('{"é":"2024-02-29","e\u0301":"2024-03-01"}'))
+
 
 class NativeContracts(unittest.TestCase):
+    def assertRejects(self, action):
+        with self.assertRaises(self.e.EvaluationError):
+            action()
+
     @classmethod
     def setUpClass(cls):
         cls.e = load_target()
@@ -166,6 +188,61 @@ class NativeContracts(unittest.TestCase):
                 receipt = probe["protocols"][name]["episodeReceipt"]
                 self.assertTrue(receipt["charged"]["httpAttempts"] == 0 and receipt["charged"]["modelCalls"] == 0, "no_provider_work")
                 self.assertTrue(all(receipt["charged"][key] + receipt["held"][key] <= cap for key, cap in receipt["limits"]["resources"].items()), "bounded_receipt")
+
+    def test_dated_sources_reingest_restart_and_snapshot_bind_exact_metadata(self):
+        original = self.e.canonical({"messages": [{"timestamp": "2024-02-29T12:03:04.001+05:30"}, {}]}).decode()
+        source_hash = self.e.digest(original.encode())
+        evidence = {"value": "2024-02-29T12:03:04.001", "precision": "fractional_second", "timezone": "+05:30",
+                    "source_sha256": source_hash, "locator": "/messages/0/timestamp", "original_value": "2024-02-29T12:03:04.001+05:30"}
+        declaration = {"dataset": "synthetic", "sha256": source_hash, "selection": 0}
+        document = {"schema_version": 2, "title": "Synthetic", "source": declaration, "original_json": original,
+                    "messages": [{"role": "user", "content": "Dated exact source café.", "status": "complete", "source_time": evidence},
+                                 {"role": "assistant", "content": "Unknown original date.", "status": "complete"}]}
+        canonical_bytes = self.e.canonical(document); import_hash = self.e.digest(canonical_bytes)
+        sources = [{"id": f"import-{import_hash}-{i}", "role": "human" if i == 0 else "assistant", "status": "complete",
+                    "text": row["content"], "sha256": self.e.digest(row["content"].encode()), "sourceTime": row.get("source_time")}
+                   for i, row in enumerate(document["messages"])]
+        fixture = {"version": 2, "messages": sources, "probes": self.e.automatic_probes(sources, 1),
+                   "semanticChunks": 0, "indexSeconds": 1, "memoryOperationCap": 24}
+        input_path = self.scratch / "dated-fixture.json"; self.e.private_write(input_path, self.e.canonical(fixture))
+        runtime = self.scratch / "dated-source"
+        for mode in ("warm", "restart"):
+            report = self.e.execute(self.binary, mode, input_path, runtime, self.scratch / f"dated-{mode}.json")
+            self.assertTrue(report["sourcesVerifiedBeforeAndAfter"], "dated_restart_verifies_sources")
+            self.assertTrue(evidence["original_value"] not in json.dumps(report), "date_literal_not_reported")
+        with sqlite3.connect(runtime / "memory.sqlite3") as database:
+            times = [json.loads(bytes(row[0])) if row[0] else None for row in database.execute("SELECT source_time_json FROM events ORDER BY sequence")]
+            self.assertTrue(times == [evidence, None], "dated_reingestion_exact")
+        conversation = json.loads((runtime / "diagnostic-conversation.json").read_bytes())
+        records = [{"ordinal": i, "event_id": row["id"], "turn_id": f"diagnostic-turn-{i}", "role": document["messages"][i]["role"],
+                    "status": row["status"], "sha256": row["sha256"], "source_bytes": len(row["text"].encode())}
+                   for i, row in enumerate(sources)]
+        records[0]["source_time"] = evidence
+        manifest = {"version": 2, "import_sha256": import_hash, "source": declaration, "input_messages": 2,
+                    "original_source_verified": True, "conversation_id": conversation, "project_id": "default", "imported_messages": records}
+        self.e.private_write(runtime / "import-manifest.json", self.e.canonical(manifest))
+        self.e.private_write(runtime / "chat-import.json", canonical_bytes)
+        self.e.private_write(runtime / "chat-source.json", original.encode())
+        def snapshot(name):
+            target = self.scratch / name; target.mkdir(mode=0o700)
+            return self.e.load_import(runtime, target)
+        loaded, provenance = snapshot("dated-copy")
+        self.assertTrue([row["sourceTime"] for row in loaded] == [evidence, None], "snapshot_dates_exact")
+        expected = self.e.digest(self.e.canonical([{key: row[key] for key in ("id", "role", "status", "turnID", "sha256", "sourceTime")} for row in loaded]))
+        self.assertEqual(provenance["orderedMessagesSHA256"], expected)
+        manifest["imported_messages"][0]["source_time"] = {**evidence, "timezone": "Z"}
+        (runtime / "import-manifest.json").write_bytes(self.e.canonical(manifest))
+        self.assertRejects(lambda: snapshot("dated-bad-manifest"))
+        manifest["imported_messages"][0]["source_time"] = evidence
+        (runtime / "import-manifest.json").write_bytes(self.e.canonical(manifest))
+        with sqlite3.connect(runtime / "memory.sqlite3") as database:
+            database.execute("UPDATE events SET source_time_json=? WHERE id=?", (self.e.canonical({**evidence, "timezone": "Z"}), sources[0]["id"]))
+        self.assertRejects(lambda: snapshot("dated-bad-storage"))
+        with sqlite3.connect(runtime / "memory.sqlite3") as database:
+            database.execute("UPDATE events SET source_time_json=? WHERE id=?", (self.e.canonical(evidence), sources[0]["id"]))
+        mutated = {**fixture, "messages": [{**sources[0], "sourceTime": {**evidence, "value": "2024-03-01T12:03:04.001"}}, sources[1]]}
+        mutation_path = self.scratch / "dated-mutated.json"; self.e.private_write(mutation_path, self.e.canonical(mutated))
+        self.assertRejects(lambda: self.e.execute(self.binary, "restart", mutation_path, runtime, self.scratch / "dated-mutated-report.json"))
 
     def test_prompt_echo_and_same_text_in_wrong_source_do_not_score(self):
         texts = ["Originalmarker confidential synthetic value.", "ordinary filler " * 2500,

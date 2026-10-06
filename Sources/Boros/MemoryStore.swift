@@ -62,6 +62,7 @@ struct MemoryEvent: Identifiable, Codable {
     let createdAt: String
     let digest: String
     let byteCount: Int
+    var sourceTime: EventSourceTime? = nil
 }
 
 struct MemoryHit: Identifiable, Codable {
@@ -76,6 +77,7 @@ struct MemoryHit: Identifiable, Codable {
     let totalBytes: Int
     let excerptOffset: Int
     let excerpt: String
+    var sourceTime: EventSourceTime? = nil
     var preview: String { excerpt }
 }
 
@@ -92,6 +94,7 @@ struct MemorySourceReference: Identifiable, Codable, Equatable {
     let createdAt: String
     let digest: String
     let byteCount: Int
+    var sourceTime: EventSourceTime? = nil
 }
 
 extension MemorySourceReference {
@@ -100,6 +103,7 @@ extension MemorySourceReference {
             && episodeIdentifierEqual(lhs.conversationID, rhs.conversationID) && episodeIdentifierEqual(lhs.projectID, rhs.projectID)
             && lhs.role == rhs.role && lhs.status == rhs.status && episodeIdentifierEqual(lhs.createdAt, rhs.createdAt)
             && episodeIdentifierEqual(lhs.digest, rhs.digest) && lhs.byteCount == rhs.byteCount
+            && (try? lhs.sourceTime?.canonicalData()) == (try? rhs.sourceTime?.canonicalData())
     }
 }
 
@@ -221,7 +225,7 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard (0...9).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            guard (0...10).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
             if version == 7, let database { try AuthoritySchemaSeven.validate(database: database) }
             if version == 8, let database {
                 try transaction {
@@ -231,8 +235,15 @@ final class MemoryStore: @unchecked Sendable {
             }
             if version == 9, let database {
                 try transaction {
-                    try AuthoritySchemaEight.validate(database: database, additionalStatements: EpisodeTerminalCleanupJournal.schemaStatements)
+                    try AuthoritySchemaEight.validate(database: database, additionalStatements: AuthoritySchemaNine.cleanupStatements)
                     try Self.validateEpisodeJournal(database: database)
+                }
+            }
+            if let database {
+                if version < 10 { try SourceTimeSchema.requireAbsent(database: database) }
+                else {
+                    try AuthoritySchemaEight.validate(database: database, additionalStatements: EpisodeTerminalCleanupJournal.schemaStatements + SourceTimeSchema.schemaStatements)
+                    try SourceTimeSchema.validate(database: database)
                 }
             }
             if version < 9 {
@@ -336,7 +347,8 @@ final class MemoryStore: @unchecked Sendable {
                 if version < 9 { try EpisodeTerminalCleanupJournal.backfill(database: database) }
                 let violations = try query("PRAGMA foreign_key_check") { string($0, 0) }
                 guard violations.isEmpty else { throw MemoryError.database("episode migration foreign-key failure") }
-                try execute("PRAGMA user_version=9")
+                if version < 10 { try SourceTimeSchema.install(database: database) }
+                try execute("PRAGMA user_version=10")
                 if version == 3 { try episodeMigrationCheckpoint?("beforeCommit") }
             }
             try execute("PRAGMA foreign_keys=ON")
@@ -355,7 +367,8 @@ final class MemoryStore: @unchecked Sendable {
             // Never silently repair a current projection after corruption.
             try transaction {
                 guard let database else { throw MemoryError.database("closed owner") }
-                try AuthoritySchemaEight.validate(database: database, additionalStatements: EpisodeTerminalCleanupJournal.schemaStatements)
+                try AuthoritySchemaEight.validate(database: database, additionalStatements: EpisodeTerminalCleanupJournal.schemaStatements + SourceTimeSchema.schemaStatements)
+                try SourceTimeSchema.validate(database: database)
                 try Self.validateEpisodeJournal(database: database)
                 accountingExternalVersion = try scalarInteger("PRAGMA data_version")
                 accountingWriteGeneration = authorityCacheWrites.accountingGeneration
@@ -1055,7 +1068,7 @@ final class MemoryStore: @unchecked Sendable {
     func events(conversationID: String) throws -> [MemoryEvent] {
         try locked {
             _ = try conversation(conversationID)
-            return try query("SELECT id, conversation_id, project_id, role, status, turn_id, created_at, digest, byte_count, payload FROM events WHERE conversation_id=? ORDER BY sequence", [.text(conversationID)], map: event)
+            return try query("SELECT id, conversation_id, project_id, role, status, turn_id, created_at, digest, byte_count, payload, source_time_json FROM events WHERE conversation_id=? ORDER BY sequence", [.text(conversationID)], map: event)
         }
     }
 
@@ -1078,10 +1091,10 @@ final class MemoryStore: @unchecked Sendable {
                 bindings.append(.integer(maximumBytes))
                 // The window sees only row IDs and byte counts; payload BLOBs
                 // are joined for the fitting recent suffix after that bound.
-                let sql = "WITH recent AS (SELECT sequence,SUM(byte_count) OVER (ORDER BY sequence DESC ROWS UNBOUNDED PRECEDING) AS running_bytes FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?) SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload FROM recent JOIN events e ON e.sequence=recent.sequence WHERE running_bytes<=? ORDER BY e.sequence"
+                let sql = "WITH recent AS (SELECT sequence,SUM(byte_count) OVER (ORDER BY sequence DESC ROWS UNBOUNDED PRECEDING) AS running_bytes FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?) SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload,e.source_time_json FROM recent JOIN events e ON e.sequence=recent.sequence WHERE running_bytes<=? ORDER BY e.sequence"
                 return try queryEvents(sql, bindings)
             }
-            return try queryEvents("SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?", bindings).reversed()
+            return try queryEvents("SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload,source_time_json FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?", bindings).reversed()
         }
     }
 
@@ -1110,13 +1123,13 @@ final class MemoryStore: @unchecked Sendable {
 
     /// Source bytes are read separately using read(eventID:offset:length:).
     /// A fixed upper frontier prevents later publications changing a scan.
-    func sourceManifest(projectID: String, afterSequence: Int, throughSequence: Int? = nil, limit: Int) throws -> [MemorySourceReference] {
+    func sourceManifest(projectID: String, afterSequence: Int, throughSequence: Int? = nil, limit: Int, originalDayRange: ClosedRange<String>? = nil) throws -> [MemorySourceReference] {
         try sourceManifest(projectID: projectID, afterSequence: afterSequence, throughSequence: throughSequence,
-            limit: limit, excludingSourceIDs: ExactSourceIDs([]))
+            limit: limit, excludingSourceIDs: ExactSourceIDs([]), originalDayRange: originalDayRange)
     }
 
     func sourceManifest(projectID: String, afterSequence: Int, throughSequence: Int? = nil, limit: Int,
-                        excludingSourceIDs: ExactSourceIDs) throws -> [MemorySourceReference] {
+                        excludingSourceIDs: ExactSourceIDs, originalDayRange: ClosedRange<String>? = nil) throws -> [MemorySourceReference] {
         try locked {
             try validateIdentifier(projectID, name: "project ID")
             guard afterSequence >= 0, (throughSequence ?? 0) >= 0, (1...1000).contains(limit) else {
@@ -1129,8 +1142,15 @@ final class MemoryStore: @unchecked Sendable {
             if let throughSequence { upperBound = " AND sequence<=?"; bindings.append(.integer(throughSequence)) }
             let exclusions = excludingSourceIDs.isEmpty ? "" : " AND id NOT IN (SELECT value FROM json_each(?))"
             if !excludingSourceIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingSourceIDs.sorted()), as: UTF8.self))) }
+            var sourceDays = ""
+            if let originalDayRange {
+                try SourceTimeSchema.validateDay(originalDayRange.lowerBound)
+                try SourceTimeSchema.validateDay(originalDayRange.upperBound)
+                sourceDays = " AND substr(json_extract(source_time_json,'$.value'),1,10)>=? AND substr(json_extract(source_time_json,'$.value'),1,10)<=?"
+                bindings += [.text(originalDayRange.lowerBound), .text(originalDayRange.upperBound)]
+            }
             bindings.append(.integer(limit))
-            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE project_id=? AND sequence>?" + upperBound + exclusions + " ORDER BY sequence LIMIT ?", bindings, map: sourceReference)
+            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count,source_time_json FROM events WHERE project_id=? AND sequence>?" + upperBound + exclusions + sourceDays + " ORDER BY sequence LIMIT ?", bindings, map: sourceReference)
         }
     }
 
@@ -1138,7 +1158,7 @@ final class MemoryStore: @unchecked Sendable {
         try locked {
             try validateIdentifier(eventID, name: "event ID")
             try validateIdentifier(projectID, name: "project ID")
-            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE id=? AND project_id=?",
+            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count,source_time_json FROM events WHERE id=? AND project_id=?",
                 [.text(eventID), .text(projectID)], map: sourceReference).first
         }
     }
@@ -1152,7 +1172,7 @@ final class MemoryStore: @unchecked Sendable {
                   try sourceReference(eventID: anchor.eventID, projectID: anchor.projectID) == anchor else {
                 throw MemoryError.conflict("neighbor anchor metadata changed")
             }
-            let next = try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE conversation_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT 1",
+            let next = try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count,source_time_json FROM events WHERE conversation_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT 1",
                 [.text(anchor.conversationID), .integer(anchor.sequence), .integer(throughSequence)], map: sourceReference).first
             guard next == nil || episodeIdentifierEqual(next?.projectID, anchor.projectID) else {
                 throw MemoryError.database("neighbor source scope mismatch")
@@ -1183,7 +1203,7 @@ final class MemoryStore: @unchecked Sendable {
             if let throughSequence { bindings.append(.integer(throughSequence)) }
             if !excludingEventIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingEventIDs.sorted()), as: UTF8.self))) }
             bindings.append(.integer(limit))
-            return try self.query("SELECT e.sequence,e.id,e.conversation_id,e.project_id,e.role,e.status,e.created_at,e.digest,e.byte_count FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upper + exclusion + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?", bindings, map: sourceReference)
+            return try self.query("SELECT e.sequence,e.id,e.conversation_id,e.project_id,e.role,e.status,e.created_at,e.digest,e.byte_count,e.source_time_json FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upper + exclusion + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?", bindings, map: sourceReference)
         }
     }
     func loadCandidate(reference: MemorySourceReference) throws -> MemoryEvent {
@@ -1207,9 +1227,9 @@ final class MemoryStore: @unchecked Sendable {
             if let maximumBytes {
                 guard maximumBytes >= 0 else { throw MemoryError.invalid("recent payload byte budget must be nonnegative") }
                 bindings.append(.integer(maximumBytes))
-                return try query("WITH recent AS (SELECT sequence,SUM(byte_count) OVER (ORDER BY sequence DESC ROWS UNBOUNDED PRECEDING) AS running_bytes FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?) SELECT e.sequence,e.id,e.conversation_id,e.project_id,e.role,e.status,e.created_at,e.digest,e.byte_count FROM recent JOIN events e ON e.sequence=recent.sequence WHERE running_bytes<=? ORDER BY e.sequence", bindings, map: sourceReference)
+                return try query("WITH recent AS (SELECT sequence,SUM(byte_count) OVER (ORDER BY sequence DESC ROWS UNBOUNDED PRECEDING) AS running_bytes FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?) SELECT e.sequence,e.id,e.conversation_id,e.project_id,e.role,e.status,e.created_at,e.digest,e.byte_count,e.source_time_json FROM recent JOIN events e ON e.sequence=recent.sequence WHERE running_bytes<=? ORDER BY e.sequence", bindings, map: sourceReference)
             }
-            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?", bindings, map: sourceReference).reversed()
+            return try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count,source_time_json FROM events WHERE conversation_id=?" + exclusion + " ORDER BY sequence DESC LIMIT ?", bindings, map: sourceReference).reversed()
         }
     }
 
@@ -1219,17 +1239,19 @@ final class MemoryStore: @unchecked Sendable {
         }
         return MemorySourceReference(sequence: Int(sqlite3_column_int64(statement, 0)), eventID: string(statement, 1),
             conversationID: string(statement, 2), projectID: string(statement, 3), role: role, status: status,
-            createdAt: string(statement, 6), digest: string(statement, 7), byteCount: Int(sqlite3_column_int64(statement, 8)))
+            createdAt: string(statement, 6), digest: string(statement, 7), byteCount: Int(sqlite3_column_int64(statement, 8)),
+            sourceTime: try SourceTimeSchema.decodeColumn(statement, index: 9))
     }
 
     /// Repeating an identical stable event ID returns the original event. Any
     /// changed role, scope, turn, completion status, or payload is a conflict.
-    func append(conversationID: String, role: MemoryRole, text: String, status: CaptureStatus, turnID: String, eventID: String) throws -> MemoryEvent {
+    func append(conversationID: String, role: MemoryRole, text: String, status: CaptureStatus, turnID: String, eventID: String, sourceTime: EventSourceTime? = nil) throws -> MemoryEvent {
         try locked {
             try validateIdentifier(turnID, name: "turn ID")
             try validateIdentifier(eventID, name: "event ID")
             let payload = try validatePayload(text)
             let digest = Self.digest(payload)
+            let sourceTime = try sourceTime?.validated()
             let scope = try conversation(conversationID)
             guard try query("SELECT id FROM invocations WHERE assistant_event_id=?", [.text(eventID)], map: { string($0, 0) }).isEmpty else {
                 throw MemoryError.conflict("assistant event ID belongs to a durable invocation")
@@ -1237,13 +1259,14 @@ final class MemoryStore: @unchecked Sendable {
             if let existing = try findEvent(eventID) {
                 guard episodeIdentifierEqual(existing.conversationID, conversationID), episodeIdentifierEqual(existing.projectID, scope.projectID),
                       existing.role == role, existing.status == status, episodeIdentifierEqual(existing.turnID, turnID),
-                      existing.digest == digest, episodeIdentifierEqual(existing.text, text) else {
+                      existing.digest == digest, episodeIdentifierEqual(existing.text, text),
+                      (try existing.sourceTime?.canonicalData()) == (try sourceTime?.canonicalData()) else {
                     throw MemoryError.conflict("event ID was already used for different content or metadata")
                 }
                 return existing
             }
             let now = Self.timestamp()
-            let result = MemoryEvent(id: eventID, conversationID: conversationID, projectID: scope.projectID, role: role, text: text, status: status, turnID: turnID, createdAt: now, digest: digest, byteCount: payload.count)
+            let result = MemoryEvent(id: eventID, conversationID: conversationID, projectID: scope.projectID, role: role, text: text, status: status, turnID: turnID, createdAt: now, digest: digest, byteCount: payload.count, sourceTime: sourceTime)
             try transaction {
                 try insertEvent(result, payload: payload)
             }
@@ -1434,7 +1457,7 @@ final class MemoryStore: @unchecked Sendable {
             let expression = terms.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: matching == .allTerms ? " AND " : " OR ")
             let upperBound = throughSequence == nil ? "" : " AND e.sequence<=?"
             let exclusions = excludingEventIDs.isEmpty ? "" : " AND e.id NOT IN (SELECT value FROM json_each(?))"
-            let sql = "SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upperBound + exclusions + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?"
+            let sql = "SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload,e.source_time_json FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upperBound + exclusions + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?"
             var bindings: [Value] = [.text(expression), .text(projectID)]
             if let throughSequence { bindings.append(.integer(throughSequence)) }
             if !excludingEventIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingEventIDs.sorted()), as: UTF8.self))) }
@@ -1458,7 +1481,7 @@ final class MemoryStore: @unchecked Sendable {
             guard !query.isEmpty else { return [] }
             let upperBound = throughSequence == nil ? "" : " AND sequence<=?"
             let exclusions = excludingEventIDs.isEmpty ? "" : " AND id NOT IN (SELECT value FROM json_each(?))"
-            let sql = "SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload FROM events WHERE project_id=? AND instr(payload,?) > 0" + upperBound + exclusions + " ORDER BY sequence DESC LIMIT ?"
+            let sql = "SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload,source_time_json FROM events WHERE project_id=? AND instr(payload,?) > 0" + upperBound + exclusions + " ORDER BY sequence DESC LIMIT ?"
             var bindings: [Value] = [.text(projectID), .blob(Data(query.utf8))]
             if let throughSequence { bindings.append(.integer(throughSequence)) }
             if !excludingEventIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingEventIDs.sorted()), as: UTF8.self))) }
@@ -1538,7 +1561,7 @@ final class MemoryStore: @unchecked Sendable {
     }
 
     private func insertEvent(_ event: MemoryEvent, payload: Data) throws {
-        try execute("INSERT INTO events (id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload) VALUES (?,?,?,?,?,?,?,?,?,?)", [.text(event.id), .text(event.conversationID), .text(event.projectID), .text(event.role.rawValue), .text(event.status.rawValue), .text(event.turnID), .text(event.createdAt), .text(event.digest), .integer(payload.count), .blob(payload)])
+        try execute("INSERT INTO events (id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload,source_time_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)", [.text(event.id), .text(event.conversationID), .text(event.projectID), .text(event.role.rawValue), .text(event.status.rawValue), .text(event.turnID), .text(event.createdAt), .text(event.digest), .integer(payload.count), .blob(payload), try event.sourceTime.map { .blob(try $0.validated().canonicalData()) } ?? .null])
         let rowID = sqlite3_last_insert_rowid(database)
         try execute("INSERT INTO event_fts(rowid,text) VALUES (?,?)", [.integer(Int(rowID)), .text(event.text)])
         try execute("UPDATE conversations SET updated_at=? WHERE id=?", [.text(event.createdAt), .text(event.conversationID)])
@@ -1694,7 +1717,7 @@ final class MemoryStore: @unchecked Sendable {
     }
 
     private func findEvent(_ id: String) throws -> MemoryEvent? {
-        try queryEvents("SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload FROM events WHERE id=?", [.text(id)]).first
+        try queryEvents("SELECT id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload,source_time_json FROM events WHERE id=?", [.text(id)]).first
     }
 
     private func queryEvents(_ sql: String, _ bindings: [Value]) throws -> [MemoryEvent] {
@@ -1707,7 +1730,7 @@ final class MemoryStore: @unchecked Sendable {
         }
         let bytes = Int(sqlite3_column_int64(statement, 8))
         guard text.utf8.count == bytes, Self.digest(Data(text.utf8)) == string(statement, 7) else { throw MemoryError.database("event payload failed integrity verification") }
-        return MemoryEvent(id: string(statement, 0), conversationID: string(statement, 1), projectID: string(statement, 2), role: role, text: text, status: status, turnID: string(statement, 5), createdAt: string(statement, 6), digest: string(statement, 7), byteCount: bytes)
+        return MemoryEvent(id: string(statement, 0), conversationID: string(statement, 1), projectID: string(statement, 2), role: role, text: text, status: status, turnID: string(statement, 5), createdAt: string(statement, 6), digest: string(statement, 7), byteCount: bytes, sourceTime: try SourceTimeSchema.decodeColumn(statement, index: 10))
     }
 
     private func loadText(_ sql: String, _ key: String) throws -> String? {
@@ -1847,7 +1870,7 @@ final class MemoryStore: @unchecked Sendable {
         var length = min(candidate.count, maximumPageBytes)
         while length > 0 && String(data: candidate.prefix(length), encoding: .utf8) == nil { length -= 1 }
         let excerpt = String(decoding: candidate.prefix(length), as: UTF8.self)
-        return MemoryHit(eventID: event.id, conversationID: event.conversationID, projectID: event.projectID, role: event.role, status: event.status, createdAt: event.createdAt, digest: event.digest, totalBytes: event.byteCount, excerptOffset: event.text[..<lower].utf8.count, excerpt: excerpt)
+        return MemoryHit(eventID: event.id, conversationID: event.conversationID, projectID: event.projectID, role: event.role, status: event.status, createdAt: event.createdAt, digest: event.digest, totalBytes: event.byteCount, excerptOffset: event.text[..<lower].utf8.count, excerpt: excerpt, sourceTime: event.sourceTime)
     }
     private static func prepareDirectory(_ url: URL) throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -2732,11 +2755,13 @@ extension MemoryStore: EpisodeLedger {
         }
         guard Set(snapshots).count == snapshots.count else { throw MemoryError.database("duplicate episode archive snapshots") }
         let schemaVersion = try rows("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
-        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 || schemaVersion == 7 || schemaVersion == 8 || schemaVersion == 9 else { throw MemoryError.database("unsupported episode archive schema") }
+        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 || schemaVersion == 7 || schemaVersion == 8 || schemaVersion == 9 || schemaVersion == 10 else { throw MemoryError.database("unsupported episode archive schema") }
         if schemaVersion >= 6 { try AuthorityStateJournal.validate(database: database) }
         if schemaVersion >= 7 { try AuthorityBindingJournal.validate(database: database) }
         if schemaVersion >= 8 { try EpisodeAccountingJournal.validate(database: database) }
         if schemaVersion >= 9 { try EpisodeTerminalCleanupJournal.validate(database: database) }
+        if schemaVersion >= 10 { try SourceTimeSchema.validate(database: database) }
+        else { try SourceTimeSchema.requireAbsent(database: database) }
         struct CheckEpisode { let id: String; let origin: EpisodeOrigin; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
         let originColumns = schemaVersion >= 4 ? ",origin_json,origin_digest" : ""
         var localReadRequestIDs = Set<Data>()

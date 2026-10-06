@@ -19,6 +19,7 @@ private struct ImportedSource: Decodable {
     let turnID: String?
     let text: String
     let sha256: String
+    let sourceTime: EventSourceTime?
 }
 private struct ImportProbe: Decodable {
     let prompt: String
@@ -106,11 +107,15 @@ private enum ImportedChatHarness {
     }
 
     static func validate(_ fixture: ImportFixture) throws {
-        guard fixture.version == 1, !fixture.messages.isEmpty, fixture.messages.count <= 100000,
+        guard [1, 2].contains(fixture.version), !fixture.messages.isEmpty, fixture.messages.count <= 100000,
               (0...4096).contains(fixture.semanticChunks), (1...300).contains(fixture.indexSeconds),
               (0...24).contains(fixture.memoryOperationCap), (1...200).contains(fixture.probes.count),
               Set(fixture.messages.map(\.id)).count == fixture.messages.count else { throw HarnessFailure.invalid }
         for source in fixture.messages {
+            if let time = source.sourceTime {
+                guard fixture.version == 2 else { throw HarnessFailure.invalid }
+                _ = try time.validated()
+            }
             guard source.id.hasPrefix("import-"), source.id.utf8.count <= 256,
                   source.text.utf8.count <= MemoryStore.maximumPayloadBytes,
                   ContextSnapshot.digest(Data(source.text.utf8)) == source.sha256 else { throw HarnessFailure.invalid }
@@ -140,6 +145,7 @@ private enum ImportedChatHarness {
         for (event, source) in zip(events, sources) {
             guard episodeIdentifierEqual(event.id, source.id), event.projectID == "default",
                   event.role == source.role, event.status == source.status, event.digest == source.sha256,
+                  event.sourceTime == source.sourceTime,
                   Data(event.text.utf8) == Data(source.text.utf8) else { throw HarnessFailure.sourceMismatch }
             if let turn = source.turnID, !episodeIdentifierEqual(event.turnID, turn) { throw HarnessFailure.sourceMismatch }
         }
@@ -154,7 +160,7 @@ private enum ImportedChatHarness {
             conversation = try store.createConversation(projectID: "default", title: "Imported chat offline diagnostic").id
             for (ordinal, source) in fixture.messages.enumerated() {
                 _ = try store.append(conversationID: conversation, role: source.role, text: source.text, status: source.status,
-                                     turnID: source.turnID ?? "diagnostic-turn-\(ordinal)", eventID: source.id)
+                                     turnID: source.turnID ?? "diagnostic-turn-\(ordinal)", eventID: source.id, sourceTime: source.sourceTime)
             }
             try JSONEncoder().encode(conversation).write(to: mapping, options: .withoutOverwriting)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: mapping.path)

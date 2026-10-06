@@ -10,10 +10,13 @@ enum ExchangeExpansionChecks {
         let archive = try store.createConversation(projectID: project, title: "Synthetic exchange sources")
         let unrelated = try store.createConversation(projectID: project, title: "Synthetic interleaved conversation")
         let chat = try store.createConversation(projectID: project, title: "Synthetic exchange request")
+        let originalDate = EventSourceTime(value: "2023-05-30T10:42", precision: "minute", timezone: "unspecified",
+            sourceSHA256: String(repeating: "a", count: 64), locator: "/synthetic/message/timestamp", originalValue: "2023/05/30 (Tue) 10:42")
         func append(_ id: String, _ text: String, _ role: MemoryRole = .human, _ status: CaptureStatus = .complete,
             conversationID: String? = nil) throws -> MemoryEvent {
             try store.append(conversationID: conversationID ?? archive.id, role: role, text: text, status: status,
-                turnID: "synthetic-independent-turn-" + id, eventID: id)
+                turnID: "synthetic-independent-turn-" + id, eventID: id,
+                sourceTime: id == "exchange-neighbor-é" ? originalDate : nil)
         }
         let anchor = try append("exchange-anchor-é", "Synthetic anchor")
         _ = try append("exchange-other-conversation", "Synthetic unrelated publication", .assistant, conversationID: unrelated.id)
@@ -70,6 +73,7 @@ enum ExchangeExpansionChecks {
                 && auditBytes.range(of: Data(neighbor.text.utf8)) == nil
         ]
         let repeatedBefore = try lease.checkActive()
+        checks["exchange_following_assistant_preserves_calendar_evidence"] = first.hits[1].sourceTime == originalDate
         _ = try expand([hit(anchor)])
         let repeatedAfter = try lease.checkActive()
         checks["exchange_repeated_prefix_reads_retain_new_debits_without_refund"] = repeatedAfter.charged.rawSourceBytes - repeatedBefore.charged.rawSourceBytes
@@ -243,7 +247,7 @@ enum ExchangeExpansionChecks {
     private static func hit(_ source: MemoryEvent, offset: Int = 0, excerpt: String? = nil) -> MemoryHit {
         MemoryHit(eventID: source.id, conversationID: source.conversationID, projectID: source.projectID, role: source.role,
             status: source.status, createdAt: source.createdAt, digest: source.digest, totalBytes: source.byteCount,
-            excerptOffset: offset, excerpt: excerpt ?? source.text)
+            excerptOffset: offset, excerpt: excerpt ?? source.text, sourceTime: source.sourceTime)
     }
     private static func disposition(_ report: ExchangeExpansionReport) -> String? {
         (report.audit["decisions"] as? [[String: Any]])?.first?["disposition"] as? String

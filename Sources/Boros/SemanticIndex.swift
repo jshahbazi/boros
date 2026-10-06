@@ -977,7 +977,7 @@ final class SemanticIndex: @unchecked Sendable {
                   page.status == result.source.status, Self.digest(Data(page.text.utf8)) == result.excerptDigest else { throw SemanticError.sourceMismatch }
             return MemoryHit(eventID: result.source.eventID, conversationID: result.source.conversationID, projectID: result.source.projectID,
                 role: result.source.role, status: result.source.status, createdAt: result.source.createdAt, digest: result.source.digest,
-                totalBytes: result.source.byteCount, excerptOffset: result.offset, excerpt: page.text)
+                totalBytes: result.source.byteCount, excerptOffset: result.offset, excerpt: page.text, sourceTime: result.source.sourceTime)
         }
     }
 

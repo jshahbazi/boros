@@ -13,6 +13,7 @@ enum ChatImportCommand {
         let role: String
         let content: String
         let status: CaptureStatus
+        let source_time: EventSourceTime?
     }
     struct Source: Codable {
         let dataset: String
@@ -35,6 +36,7 @@ enum ChatImportCommand {
         let status: CaptureStatus
         let source_bytes: Int
         let sha256: String
+        let source_time: EventSourceTime?
     }
     private struct Manifest: Codable {
         let version: Int
@@ -135,10 +137,14 @@ enum ChatImportCommand {
               let source = root["source"] as? [String: Any],
               Set(source.keys).isSubset(of: ["dataset", "url", "sha256", "selection"]),
               Set(source.keys).isSuperset(of: ["dataset", "sha256", "selection"]),
-              let raw = root["messages"] as? [[String: Any]],
-              raw.allSatisfy({ Set($0.keys) == ["role", "content", "status"] }) else { throw Failure.invalid }
+              let raw = root["messages"] as? [[String: Any]] else { throw Failure.invalid }
         let value = try JSONDecoder().decode(Document.self, from: bytes)
-        guard value.schema_version == 1, !value.title.isEmpty, value.title.utf8.count <= 1024,
+        guard [1, 2].contains(value.schema_version), raw.allSatisfy({ message in
+            let keys = Set(message.keys), required: Set<String> = ["role", "content", "status"]
+            return value.schema_version == 1 ? keys == required
+                : required.isSubset(of: keys) && keys.isSubset(of: required.union(["source_time"]))
+                    && (message["source_time"] == nil || message["source_time"] is [String: Any])
+        }), !value.title.isEmpty, value.title.utf8.count <= 1024,
               !value.title.contains("\0"), !value.source.dataset.isEmpty, value.source.dataset.utf8.count <= 256,
               value.source.selection >= 0, value.source.sha256.count == 64,
               value.source.sha256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
@@ -150,11 +156,51 @@ enum ChatImportCommand {
         if let original = value.original_json {
             guard sha256(Data(original.utf8)) == value.source.sha256 else { throw Failure.invalid }
         }
+        if value.messages.contains(where: { $0.source_time != nil }) {
+            guard value.schema_version == 2, let original = value.original_json else { throw Failure.invalid }
+            let originalRoot = try parseDatedOriginal(original)
+            for message in value.messages {
+                guard let time = message.source_time else { continue }
+                _ = try time.validated()
+                guard time.sourceSHA256 == value.source.sha256,
+                      let literal = try resolve(time.locator, in: originalRoot) as? String,
+                      Data(literal.utf8) == Data(time.originalValue.utf8) else { throw Failure.invalid }
+            }
+        }
         // Validate the entire input even for a prefix import. Nothing is
         // accepted with an oversized, unsupported, or malformed later turn.
         guard value.messages.allSatisfy({ ["user", "assistant"].contains($0.role)
             && $0.content.utf8.count <= MemoryStore.maximumPayloadBytes }) else { throw Failure.invalid }
         return value
+    }
+
+    /// Match the converter's JSON/JSONL interpretation while retaining the
+    /// original artifact bytes. Ambiguous Unicode keys are refused for date
+    /// evidence rather than silently merged by Foundation's String dictionary.
+    private static func parseDatedOriginal(_ text: String) throws -> Any {
+        func parse(_ bytes: Data) throws -> Any {
+            var scanner = KeyScanner(bytes: Array(bytes), rejectEquivalentKeys: true); try scanner.scan()
+            return try JSONSerialization.jsonObject(with: bytes)
+        }
+        do { return try parse(Data(text.utf8)) }
+        catch {
+            let lines = text.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            guard lines.count >= 2 else { throw Failure.invalid }
+            return try lines.map { try parse(Data($0.utf8)) }
+        }
+    }
+    private static func resolve(_ pointer: String, in original: Any) throws -> Any {
+        var current = original
+        for token in try EventSourceTime.pointerTokens(pointer) {
+            if let object = current as? [String: Any],
+               let entry = object.first(where: { Data($0.key.utf8) == Data(token.utf8) }) { current = entry.value }
+            else if let array = current as? [Any] {
+                guard !token.isEmpty, token.utf8.allSatisfy({ (48...57).contains($0) }),
+                      token == "0" || !token.hasPrefix("0"), let index = Int(token), array.indices.contains(index) else { throw Failure.invalid }
+                current = array[index]
+            } else { throw Failure.invalid }
+        }
+        return current
     }
 
     private static func ingest(_ document: Document, selected: [Message], digest: String, at directory: URL) throws -> Manifest {
@@ -167,13 +213,15 @@ enum ChatImportCommand {
             let eventID = "import-\(digest)-\(ordinal)"
             let turnID = "import-\(digest)-turn-\(turn)"
             let event = try store.append(conversationID: chat.id, role: message.role == "user" ? .human : .assistant,
-                text: message.content, status: message.status, turnID: turnID, eventID: eventID)
+                text: message.content, status: message.status, turnID: turnID, eventID: eventID, sourceTime: message.source_time)
             records.append(ImportedMessage(ordinal: ordinal, event_id: event.id, turn_id: event.turnID,
-                role: message.role, status: message.status, source_bytes: event.byteCount, sha256: event.digest))
+                role: message.role, status: message.status, source_bytes: event.byteCount, sha256: event.digest, source_time: event.sourceTime))
         }
-        return Manifest(version: 1, import_sha256: digest, source: document.source, conversation_id: chat.id,
+        return Manifest(version: document.schema_version, import_sha256: digest, source: document.source, conversation_id: chat.id,
             project_id: "default", input_messages: document.messages.count, imported_messages: records,
-            timestamps: "Store event timestamps record ingestion. Source order is the original message order; no original chronology is inferred.",
+            timestamps: document.schema_version == 1
+                ? "Store event timestamps record ingestion. Source order is the original message order; no original chronology is inferred."
+                : "Store event timestamps record ingestion. Supplied source times retain verified calendar evidence; missing source times are unknown. Source order remains the original message order.",
             original_source_verified: document.original_json != nil)
     }
 
@@ -187,6 +235,7 @@ enum ChatImportCommand {
                   event.role == (message.role == "user" ? .human : .assistant),
                   event.id == record.event_id, event.turnID == record.turn_id,
                   event.byteCount == record.source_bytes, event.digest == record.sha256,
+                  event.sourceTime == message.source_time, event.sourceTime == record.source_time,
                   event.digest == sha256(Data(message.content.utf8)) else { throw Failure.invalid }
         }
     }
@@ -278,6 +327,7 @@ enum ChatImportCommand {
     /// Foundation. Nesting is bounded independently of total input size.
     private struct KeyScanner {
         let bytes: [UInt8]
+        var rejectEquivalentKeys = false
         var position = 0
         mutating func scan() throws {
             try value(depth: 0); whitespace()
@@ -300,11 +350,12 @@ enum ChatImportCommand {
             whitespace(); guard depth <= 64, position < bytes.count else { throw Failure.invalid }
             switch bytes[position] {
             case 123:
-                position += 1; whitespace(); var keys = Set<Data>()
+                position += 1; whitespace(); var keys = Set<Data>(), equivalentKeys = Set<String>()
                 if position < bytes.count, bytes[position] == 125 { position += 1; return }
                 while true {
-                    let key = Data(try string().utf8)
+                    let literal = try string(), key = Data(literal.utf8)
                     guard keys.insert(key).inserted else { throw Failure.invalid }
+                    if rejectEquivalentKeys && !equivalentKeys.insert(literal).inserted { throw Failure.invalid }
                     try take(58); try value(depth: depth + 1); whitespace()
                     guard position < bytes.count else { throw Failure.invalid }
                     if bytes[position] == 125 { position += 1; return }; try take(44)

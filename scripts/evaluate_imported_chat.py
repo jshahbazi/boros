@@ -6,6 +6,7 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -18,13 +19,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = tuple("Sources/Boros/" + name + ".swift" for name in (
-    "MemoryStore", "AuthorityState", "AuthorityStateJournal", "AuthorityValidatedClock", "AuthorityValidationCache", "EpisodeAccountingJournal", "AuthoritySchemaSeven", "AuthoritySchemaEight", "EpisodeTerminalCleanup", "AuthorityBindings", "AuthorityBindingJournal", "AuthorityValidation", "AuthorityPolicyRendering", "AuthorityInputProof", "BackgroundIndexBudget", "BackgroundIndexJournal", "ContextComponentJournal",
+    "MemoryStore", "EventSourceTime", "SourceTimeSchema", "AuthorityState", "AuthorityStateJournal", "AuthorityValidatedClock", "AuthorityValidationCache", "EpisodeAccountingJournal", "AuthoritySchemaSeven", "AuthoritySchemaEight", "AuthoritySchemaNine", "EpisodeTerminalCleanup", "AuthorityBindings", "AuthorityBindingJournal", "AuthorityValidation", "AuthorityPolicyRendering", "AuthorityInputProof", "BackgroundIndexBudget", "BackgroundIndexJournal", "ContextComponentJournal",
     "QwenTextRendering", "ContextSourceFraming", "HistoricalQueryFormulation", "MeteredExchangeExpansion", "ContextAssembler", "ChatContextPreparation",
     "SemanticIndex", "BackgroundIndexWorker", "EpisodeBudget", "EpisodeLease", "EpisodeSQLFence", "MeteredRetrieval"))
-SUPPORT = ("Tests/Evaluation/ImportedChatHarness.swift", "Sources/CSQLite/module.modulemap", "Sources/CSQLite/shim.h")
+SUPPORT = ("Tests/Evaluation/ImportedChatHarness.swift", "Sources/CSQLite/module.modulemap", "Sources/CSQLite/shim.h", "scripts/import_chat.py")
 PROTOCOLS = ("recent_only", "lexical_context", "hybrid_context", "raw_pages")
 MAX_BYTES = 128 * 1024 * 1024
 SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -80,6 +82,53 @@ def integer(value, low, high):
     return type(value) is int and low <= value <= high
 
 
+def dated_original(text):
+    spec = importlib.util.spec_from_file_location("boros_import_time_contract", ROOT / "scripts/import_chat.py")
+    converter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(converter)
+    original = converter._parse(text.encode("utf-8"))
+    def check(value, depth=0):
+        if depth > 64:
+            raise EvaluationError("source date nesting limit")
+        if isinstance(value, dict):
+            keys = [unicodedata.normalize("NFC", key) for key in value]
+            if len(set(keys)) != len(keys):
+                raise EvaluationError("ambiguous source date keys")
+            for item in value.values(): check(item, depth + 1)
+        elif isinstance(value, list):
+            for item in value: check(item, depth + 1)
+    check(original)
+    return converter, original
+
+
+def validate_source_time(value, declared_hash, converter, original):
+    keys = {"value", "precision", "timezone", "source_sha256", "locator", "original_value"}
+    if (not isinstance(value, dict) or set(value) != keys or not all(isinstance(item, str) for item in value.values())
+            or value["source_sha256"] != declared_hash or not SHA.fullmatch(value["source_sha256"])
+            or len(canonical(value)) > 4096 or not value["locator"].startswith("/")
+            or len(value["locator"].encode()) > 2048 or "\0" in value["locator"]):
+        raise EvaluationError("invalid source time")
+    try:
+        normalized = converter.normalize_time(value["original_value"])
+        if normalized != {key: value[key] for key in ("value", "precision", "timezone")}:
+            raise EvaluationError("source time normalization mismatch")
+        current = original
+        for token in value["locator"][1:].split("/"):
+            if re.search(r"~(?![01])", token):
+                raise EvaluationError("invalid source date pointer")
+            token = token.replace("~1", "/").replace("~0", "~")
+            if isinstance(current, dict):
+                current = current[token]
+            elif isinstance(current, list) and re.fullmatch(r"0|[1-9][0-9]*", token):
+                current = current[int(token)]
+            else:
+                raise EvaluationError("invalid source date pointer")
+        if not isinstance(current, str) or current.encode() != value["original_value"].encode():
+            raise EvaluationError("source date literal mismatch")
+    except (ValueError, TypeError, KeyError, IndexError, OverflowError) as error:
+        raise EvaluationError("invalid source date evidence") from error
+
+
 def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
     """Read-only SQLite backup, then verify only manifest-bound imported events.
 
@@ -91,7 +140,7 @@ def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
         raise EvaluationError("invalid imported store")
     manifest_bytes = read_file(directory / "import-manifest.json")
     manifest = strict_json(manifest_bytes)
-    if not isinstance(manifest, dict) or type(manifest.get("version")) is not int or manifest.get("version") != 1:
+    if not isinstance(manifest, dict) or type(manifest.get("version")) is not int or manifest.get("version") not in (1, 2):
         raise EvaluationError("invalid import manifest")
     records = manifest.get("imported_messages")
     import_hash = manifest.get("import_sha256")
@@ -104,7 +153,7 @@ def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
     if not isinstance(records, list) or not 1 <= len(records) <= 100_000:
         raise EvaluationError("invalid imported messages")
     if (not isinstance(document, dict) or type(document.get("schema_version")) is not int
-            or document.get("schema_version") != 1 or not isinstance(document.get("messages"), list)
+            or document.get("schema_version") != manifest["version"] or not isinstance(document.get("messages"), list)
             or not integer(manifest.get("input_messages"), len(records), 100_000)
             or len(document["messages"]) != manifest["input_messages"]
             or document.get("source") != manifest.get("source")):
@@ -116,6 +165,24 @@ def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
         if (not isinstance(original, str) or not isinstance(declared, str) or not SHA.fullmatch(declared)
                 or digest(original.encode()) != declared or digest(read_file(directory / "chat-source.json")) != declared):
             raise EvaluationError("original source mismatch")
+    source_times = []
+    has_dates = any(isinstance(message, dict) and "source_time" in message for message in document["messages"])
+    converter = original_root = None
+    if has_dates:
+        if manifest["version"] != 2 or not origin_verified:
+            raise EvaluationError("unverified source dates")
+        try:
+            converter, original_root = dated_original(document["original_json"])
+        except (ValueError, TypeError, RecursionError) as error:
+            raise EvaluationError("invalid dated original") from error
+    for message in document["messages"]:
+        if manifest["version"] == 2 and (not isinstance(message, dict)
+                or not {"role", "content", "status"} <= message.keys() <= {"role", "content", "status", "source_time"}):
+            raise EvaluationError("invalid dated canonical message")
+        time_value = message.get("source_time") if isinstance(message, dict) else None
+        if isinstance(message, dict) and "source_time" in message:
+            validate_source_time(time_value, document["source"]["sha256"], converter, original_root)
+        source_times.append(time_value)
     if manifest.get("project_id") != "default" or not isinstance(manifest.get("conversation_id"), str):
         raise EvaluationError("invalid import scope")
     database_path = directory / "memory.sqlite3"
@@ -136,6 +203,9 @@ def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
     messages = []
     total = 0
     with sqlite3.connect(snapshot.as_uri() + "?mode=ro", uri=True) as database:
+        has_time_column = "source_time_json" in {row[1] for row in database.execute("PRAGMA table_info(events)")}
+        if manifest["version"] == 2 and not has_time_column:
+            raise EvaluationError("source date storage missing")
         ordered = database.execute(
             "SELECT id, sequence "
             "FROM events WHERE conversation_id=? ORDER BY sequence", (manifest["conversation_id"],)).fetchall()
@@ -149,7 +219,11 @@ def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
                     or record.get("ordinal") != ordinal or record.get("event_id") != event_id
                     or not integer(record.get("source_bytes"), 0, 4 * 1024 * 1024)):
                 raise EvaluationError("invalid import order")
-            row = database.execute("SELECT id, project_id, role, status, turn_id, payload, digest, sequence "
+            if manifest["version"] == 2 and not {"ordinal", "event_id", "turn_id", "role", "status", "source_bytes", "sha256"} <= record.keys() <= {
+                    "ordinal", "event_id", "turn_id", "role", "status", "source_bytes", "sha256", "source_time"}:
+                raise EvaluationError("invalid dated import record")
+            row = database.execute("SELECT id, project_id, role, status, turn_id, payload, digest, sequence, "
+                                   + ("source_time_json " if has_time_column else "NULL ") +
                                    "FROM events WHERE id=? AND conversation_id=? AND length(payload)<=?",
                                    (event_id, manifest["conversation_id"], 4 * 1024 * 1024)).fetchone()
             if row is None:
@@ -157,6 +231,18 @@ def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
             text_bytes = bytes(row[5])
             role = {"human": "user", "assistant": "assistant"}.get(row[2])
             canonical_message = document["messages"][ordinal]
+            if row[8] is not None and not isinstance(row[8], bytes):
+                raise EvaluationError("source time storage is not a blob")
+            try:
+                stored_time = strict_json(row[8]) if row[8] is not None else None
+            except (ValueError, UnicodeDecodeError) as error:
+                raise EvaluationError("invalid stored source time") from error
+            expected_time = source_times[ordinal]
+            if (stored_time != expected_time or record.get("source_time") != expected_time
+                    or (row[8] is not None and bytes(row[8]) != canonical(stored_time))
+                    or (manifest["version"] == 1 and "source_time" in record)
+                    or (manifest["version"] == 2 and "source_time" in record and expected_time is None)):
+                raise EvaluationError("stored source time mismatch")
             if (not isinstance(canonical_message, dict) or canonical_message.get("role") != role
                     or canonical_message.get("status") != row[3] or not isinstance(canonical_message.get("content"), str)
                     or canonical_message["content"].encode() != text_bytes):
@@ -172,9 +258,12 @@ def load_import(directory: Path, scratch: Path) -> tuple[list[dict], dict]:
                 raise EvaluationError("imported source too large")
             messages.append({"id": row[0], "role": row[2], "status": row[3], "turnID": row[4], "text": text_bytes.decode("utf-8"),
                              "sha256": row[6]})
+            if manifest["version"] == 2:
+                messages[-1]["sourceTime"] = expected_time
     return messages, {"importSHA256": import_hash, "manifestSHA256": digest(manifest_bytes),
                       "orderedMessagesSHA256": digest(canonical([
-                          {key: message[key] for key in ("id", "role", "status", "turnID", "sha256")} for message in messages])),
+                          {key: message[key] for key in (("id", "role", "status", "turnID", "sha256", "sourceTime")
+                           if manifest["version"] == 2 else ("id", "role", "status", "turnID", "sha256"))} for message in messages])),
                       "messageCount": len(messages), "sourceBytes": total,
                       "sourceVerifiedAgainstImportManifest": True,
                       "originalSourceBytesVerified": origin_verified,
@@ -348,7 +437,7 @@ def run(args):
             probes = automatic_probes(messages, args.probes)
             data = canonical(probes)
             probe_mode = "corpus-derived-phrase-diagnostic"
-        fixture = {"version": 1, "messages": messages, "probes": probes,
+        fixture = {"version": 2 if any("sourceTime" in message for message in messages) else 1, "messages": messages, "probes": probes,
                    "semanticChunks": args.semantic_chunks, "indexSeconds": args.index_seconds,
                    "memoryOperationCap": args.memory_operations}
         input_path = scratch / "input.json"
@@ -380,7 +469,7 @@ def run(args):
                                   "partial/unsupported semantic coverage and failures remain in denominators; skipped hybrid is unavailable",
                                   "protocol order fixed; warm caches and OS cache uncontrolled after process restart",
                                   "only verified imported messages reingested; runtime ledgers, later turns and existing vectors excluded",
-                                  "no original timestamp/temporal benchmark adaptation or model answer scoring"]}
+                                  "verified original source time is preserved where supplied; temporal benchmark adaptation and model answer scoring are not run"]}
         output.parent.mkdir(parents=True, exist_ok=True)
         private_write(output, canonical(report) + b"\n")
         for profile, value in profiles.items():

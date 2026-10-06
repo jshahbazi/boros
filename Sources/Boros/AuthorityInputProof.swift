@@ -107,7 +107,7 @@ enum AuthorityInputProofJournal {
               recent.count + historical.count + 1 <= maximumDependencies else { throw AuthorityStateError.limit }
         var dependencies: [Data: AuthoritySourceDependency] = [:]
         func append(_ id: String, offset: Int = 0, length: Int? = nil, excerpt: String? = nil) throws {
-            let source = try source(database: database, id: id)
+            let source = try source(database: database, id: id, dated: selection["version"] as? String == ContextSourceFraming.currentSelectionVersion)
             guard episodeIdentifierEqual(source.projectID, project) else { throw AuthorityStateError.integrity }
             let count = length ?? source.byteCount
             guard offset >= 0, count >= 0, offset <= source.byteCount, count <= source.byteCount - offset,
@@ -161,13 +161,15 @@ enum AuthorityInputProofJournal {
             admission: admission, answerRequest: answerRequest, verifySourceRanges: verifySourceRanges)
         guard try AuthorityStateKernel.canonical(proof) == AuthorityStateKernel.canonical(derived) else { throw AuthorityStateError.integrity }
     }
-    private static func source(database: OpaquePointer, id: String) throws -> MemorySourceReference {
-        let rows = try AuthorityStateKernel.rows(database,
-            "SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE id=?", [.text(id)])
+    private static func source(database: OpaquePointer, id: String, dated: Bool) throws -> MemorySourceReference {
+        let sql = "SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count"
+            + (dated ? ",source_time_json" : "") + " FROM events WHERE id=?"
+        let rows = try AuthorityStateKernel.rows(database, sql, [.text(id)])
         guard rows.count == 1, let role = MemoryRole(rawValue: rows[0][4].string), let status = CaptureStatus(rawValue: rows[0][5].string) else { throw AuthorityStateError.integrity }
         let result = MemorySourceReference(sequence: rows[0][0].integer, eventID: rows[0][1].string,
             conversationID: rows[0][2].string, projectID: rows[0][3].string, role: role, status: status,
-            createdAt: rows[0][6].string, digest: rows[0][7].string, byteCount: rows[0][8].integer)
+            createdAt: rows[0][6].string, digest: rows[0][7].string, byteCount: rows[0][8].integer,
+            sourceTime: dated ? try rows[0][9].bytes.map { try EventSourceTime.decodeCanonical($0) } : nil)
         try AuthorityBindings.validateSource(database: database, source: result, verifyBytes: false)
         return result
     }

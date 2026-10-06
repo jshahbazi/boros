@@ -39,10 +39,11 @@ struct ContextRecentSource: Codable {
     let createdAt: String
     let digest: String
     let byteCount: Int
+    var sourceTime: EventSourceTime? = nil
 
     init(_ event: MemoryEvent) {
         eventID = event.id; conversationID = event.conversationID; projectID = event.projectID
-        role = event.role; status = event.status; createdAt = event.createdAt; digest = event.digest; byteCount = event.byteCount
+        role = event.role; status = event.status; createdAt = event.createdAt; digest = event.digest; byteCount = event.byteCount; sourceTime = event.sourceTime
     }
 }
 
@@ -89,7 +90,7 @@ struct ContextSnapshot {
             guard message.role == "user" || message.role == "assistant" else { throw ContextError.sourceMismatch }
         }
         if !evidence.isEmpty {
-            let expected = ContextAssembler.evidenceMessage(evidence)
+            let expected = try ContextAssembler.evidenceMessage(evidence, selectionVersion: selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion)
             guard messages[includedRecentCount + 1].role == expected.role,
                   episodeIdentifierEqual(messages[includedRecentCount + 1].content, expected.content) else { throw ContextError.sourceMismatch }
         }
@@ -103,7 +104,7 @@ struct ContextSnapshot {
                       source.byteCount >= 0,
                       messages[index + 1].role == (source.role == .human ? "user" : "assistant") else { throw ContextError.sourceMismatch }
                 let prefix = Data(try ContextSourceFraming.recentPrefix(eventID: source.eventID,
-                    role: source.role.rawValue, status: source.status.rawValue, selectionVersion: selectionBinding.version).utf8)
+                    role: source.role.rawValue, status: source.status.rawValue, selectionVersion: selectionBinding.version, capturedAt: source.createdAt, sourceTime: source.sourceTime).utf8)
                 let bytes = Data(messages[index + 1].content.utf8)
                 guard bytes.starts(with: prefix), bytes.count - prefix.count == source.byteCount,
                       Self.digest(Data(bytes.dropFirst(prefix.count))) == source.digest else { throw ContextError.sourceMismatch }
@@ -126,7 +127,7 @@ struct ContextSnapshot {
             "messages_sha256": Self.digest(try serializedMessages()),
             "assignments": messageComponents.map(\.rawValue),
             "recent_source_ids": recentSourceIDs,
-            "recent_sources": try JSONSerialization.jsonObject(with: canonicalJSON(recentSources)),
+            "recent_sources": try recentAudit(),
             "historical_sources": historicalAudit(), "omitted_recent_count": omittedRecentCount]
         if let selectionBinding { value["binding"] = try JSONSerialization.jsonObject(with: canonicalJSON(selectionBinding)) }
         if let selectionAudit { value["selection"] = try JSONSerialization.jsonObject(with: canonicalJSON(selectionAudit)) }
@@ -166,12 +167,29 @@ struct ContextSnapshot {
         return bytes
     }
 
+    private func recentAudit() throws -> [[String: Any]] {
+        guard var sources = try JSONSerialization.jsonObject(with: canonicalJSON(recentSources)) as? [[String: Any]] else { throw ContextError.sourceMismatch }
+        for index in sources.indices {
+            sources[index].removeValue(forKey: "sourceTime")
+            if (selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion) == ContextSourceFraming.currentSelectionVersion {
+                sources[index]["source_time"] = try recentSources[index].sourceTime?.validated().object as Any? ?? NSNull()
+            }
+        }
+        return sources
+    }
+
     private func historicalAudit() -> [[String: Any]] {
         evidence.map { hit in
-            ["event_id": hit.eventID, "conversation_id": hit.conversationID, "project_id": hit.projectID,
+            var source: [String: Any] = ["event_id": hit.eventID, "conversation_id": hit.conversationID, "project_id": hit.projectID,
              "role": hit.role.rawValue, "capture_status": hit.status.rawValue, "source_created_utc": hit.createdAt,
              "source_sha256": hit.digest, "source_bytes": hit.totalBytes, "excerpt_offset": hit.excerptOffset,
              "excerpt_bytes": hit.excerpt.utf8.count, "excerpt_sha256": Self.digest(Data(hit.excerpt.utf8))]
+            if (selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion) == ContextSourceFraming.currentSelectionVersion {
+                source.removeValue(forKey: "source_created_utc")
+                source["captured_utc"] = hit.createdAt
+                source["source_time"] = hit.sourceTime?.object as Any? ?? NSNull()
+            }
+            return source
         }
     }
 
@@ -202,7 +220,7 @@ struct ContextSnapshot {
         guard includedRecentCount > 0 else { return nil }
         let removed = (includedRecentCount + 1) / 2
         let recent = Array(messages.dropFirst().prefix(includedRecentCount).dropFirst(removed))
-        let candidateMessages = [messages[0]] + recent + (evidence.isEmpty ? [] : [ContextAssembler.evidenceMessage(evidence)]) + [messages[messages.count - 1]]
+        let candidateMessages = [messages[0]] + recent + (evidence.isEmpty ? [] : [try ContextAssembler.evidenceMessage(evidence, selectionVersion: selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion)]) + [messages[messages.count - 1]]
         var result = try replacing(messages: candidateMessages, evidence: evidence,
             recentSourceIDs: Array(recentSourceIDs.dropFirst(removed)), recentSources: Array(recentSources.dropFirst(removed)),
             omittedRecentCount: omittedRecentCount + removed)
@@ -219,7 +237,7 @@ struct ContextSnapshot {
         let removed = (evidence.count + 1) / 2
         let retained = Array(evidence.dropLast(removed))
         let recent = Array(messages.dropFirst().prefix(includedRecentCount))
-        let candidateMessages = [messages[0]] + recent + (retained.isEmpty ? [] : [ContextAssembler.evidenceMessage(retained)]) + [messages[messages.count - 1]]
+        let candidateMessages = [messages[0]] + recent + (retained.isEmpty ? [] : [try ContextAssembler.evidenceMessage(retained, selectionVersion: selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion)]) + [messages[messages.count - 1]]
         var result = try replacing(messages: candidateMessages, evidence: retained,
             recentSourceIDs: recentSourceIDs, recentSources: recentSources, omittedRecentCount: omittedRecentCount)
         result.selectionAudit?.evidenceReductionRounds += 1
@@ -376,12 +394,12 @@ enum ContextAssembler {
                     try store.sourceReference(eventID: hit.eventID, projectID: projectID)
                 }), episodeIdentifierEqual(hit.projectID, projectID), episodeIdentifierEqual(hit.conversationID, reference.conversationID),
                       hit.role == reference.role, hit.status == reference.status, episodeIdentifierEqual(hit.digest, reference.digest),
-                      episodeIdentifierEqual(hit.createdAt, reference.createdAt), hit.totalBytes == reference.byteCount else { throw ContextError.sourceMismatch }
+                      episodeIdentifierEqual(hit.createdAt, reference.createdAt), hit.totalBytes == reference.byteCount, try sameSourceTime(hit.sourceTime, reference.sourceTime) else { throw ContextError.sourceMismatch }
                 let original = try MeteredRetrieval.read(store: store, source: reference, offset: hit.excerptOffset,
                     length: hit.excerpt.utf8.count, lease: episodeLease, nested: true, examinedPasses: 2)
                 guard episodeIdentifierEqual(original.text, hit.excerpt), episodeIdentifierEqual(original.digest, hit.digest) else { throw ContextError.sourceMismatch }
                 let candidateEvidence = evidence + [hit]
-                let candidateMessage = evidenceMessage(candidateEvidence)
+                let candidateMessage = try evidenceMessage(candidateEvidence, selectionVersion: binding.version)
                 let candidateMessages = Array(recent.messages.dropLast()) + [candidateMessage, recent.messages.last!]
                 guard try serializedMessages([candidateMessage]).count <= maximumEvidenceBytes else {
                     byteExcluded += 1; record("evidence_byte_limit"); continue
@@ -392,7 +410,7 @@ enum ContextAssembler {
                 evidence = candidateEvidence
                 record("included")
             }
-            let messages = Array(recent.messages.dropLast()) + (evidence.isEmpty ? [] : [evidenceMessage(evidence)]) + [recent.messages.last!]
+            let messages = Array(recent.messages.dropLast()) + (evidence.isEmpty ? [] : [try evidenceMessage(evidence, selectionVersion: binding.version)]) + [recent.messages.last!]
             var result = ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try serializedMessages(messages).count,
                 omittedRecentCount: recent.omittedRecentCount, includedRecentCount: recent.includedRecentCount,
                 recentSourceIDs: recent.recentSourceIDs, retrievalManifestID: recent.retrievalManifestID,
@@ -418,11 +436,11 @@ enum ContextAssembler {
         return try store.loadCandidate(reference: reference)
     }
 
-    static func evidenceMessage(_ evidence: [MemoryHit]) -> ContextMessage {
-        let sources = evidence.map { hit in
-            ContextSourceFraming.evidenceHeader(eventID: hit.eventID, conversationID: hit.conversationID,
+    static func evidenceMessage(_ evidence: [MemoryHit], selectionVersion: String = ContextSourceFraming.currentSelectionVersion) throws -> ContextMessage {
+        let sources = try evidence.map { hit in
+            try ContextSourceFraming.evidenceHeader(eventID: hit.eventID, conversationID: hit.conversationID,
                 role: hit.role.rawValue, status: hit.status.rawValue, createdAt: hit.createdAt,
-                digest: hit.digest, offset: hit.excerptOffset, totalBytes: hit.totalBytes)
+                digest: hit.digest, offset: hit.excerptOffset, totalBytes: hit.totalBytes, selectionVersion: selectionVersion, sourceTime: hit.sourceTime)
                 + hit.excerpt + ContextSourceFraming.evidenceFooter
         }
         return ContextMessage(role: "user", content: ContextSourceFraming.evidencePrefix + sources.joined(separator: ContextSourceFraming.evidenceSeparator))
@@ -520,25 +538,15 @@ enum ContextAssembler {
                     guard let reference = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, { try store.sourceReference(eventID: hit.eventID, projectID: projectID) }),
                           episodeIdentifierEqual(hit.projectID, projectID), episodeIdentifierEqual(hit.conversationID, reference.conversationID),
                           hit.role == reference.role, hit.status == reference.status, hit.digest == reference.digest,
-                          hit.createdAt == reference.createdAt, hit.totalBytes == reference.byteCount,
+                          hit.createdAt == reference.createdAt, hit.totalBytes == reference.byteCount, try sameSourceTime(hit.sourceTime, reference.sourceTime),
                           !hit.excerpt.isEmpty, hit.excerpt.utf8.count <= MemoryStore.maximumPageBytes else { throw ContextError.sourceMismatch }
                     let original = try MeteredRetrieval.read(store: store, source: reference, offset: hit.excerptOffset,
                         length: hit.excerpt.utf8.count, lease: episodeLease, nested: true, examinedPasses: 2)
                     guard episodeIdentifierEqual(original.text, hit.excerpt), original.digest == hit.digest else { throw ContextError.sourceMismatch }
-                    let source = """
-                        BEGIN HISTORICAL SOURCE
-                        event_id: \(hit.eventID)
-                        conversation_id: \(hit.conversationID)
-                        role: \(hit.role.rawValue)
-                        capture_status: \(hit.status.rawValue)
-                        source_created_utc: \(hit.createdAt)
-                        source_sha256: \(hit.digest)
-                        excerpt_utf8_offset: \(hit.excerptOffset)
-                        source_total_bytes: \(hit.totalBytes)
-                        quoted_excerpt:
-                        \(hit.excerpt)
-                        END HISTORICAL SOURCE
-                        """
+                    let source = try ContextSourceFraming.evidenceHeader(eventID: hit.eventID, conversationID: hit.conversationID,
+                        role: hit.role.rawValue, status: hit.status.rawValue, createdAt: hit.createdAt,
+                        digest: hit.digest, offset: hit.excerptOffset, totalBytes: hit.totalBytes, sourceTime: hit.sourceTime)
+                        + hit.excerpt + ContextSourceFraming.evidenceFooter
                     let candidateText = evidenceText.isEmpty ? source : evidenceText + "\n\n" + source
                     let candidateMessage = ContextMessage(role: "user", content: "Historical source excerpts for reference:\n\n" + candidateText)
                     guard try serializedMessages([candidateMessage]).count <= maximumEvidenceBytes,
@@ -576,10 +584,14 @@ enum ContextAssembler {
         try JSONSerialization.data(withJSONObject: messages.map { ["role": $0.role, "content": $0.content] }, options: [.sortedKeys])
     }
 
+    private static func sameSourceTime(_ lhs: EventSourceTime?, _ rhs: EventSourceTime?) throws -> Bool {
+        try lhs?.validated().canonicalData() == rhs?.validated().canonicalData()
+    }
+
     private static func message(_ event: MemoryEvent) throws -> ContextMessage {
         let role = event.role == .human ? "user" : "assistant"
         let text = try ContextSourceFraming.recentPrefix(eventID: event.id, role: event.role.rawValue,
-            status: event.status.rawValue, selectionVersion: ContextSourceFraming.currentSelectionVersion) + event.text
+            status: event.status.rawValue, selectionVersion: ContextSourceFraming.currentSelectionVersion, capturedAt: event.createdAt, sourceTime: event.sourceTime) + event.text
         return ContextMessage(role: role, content: text)
     }
 }

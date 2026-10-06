@@ -232,9 +232,16 @@ enum AuthorityBindings {
     static func validateSource(database:OpaquePointer,source:MemorySourceReference,verifyBytes:Bool)throws {
         for id in [source.eventID,source.projectID,source.conversationID] { try AuthorityStateKernel.identifier(id) }
         guard source.sequence > 0,source.byteCount >= 0,source.byteCount <= 4194304,isDigest(source.digest),source.createdAt.utf8.count <= 256 else { throw AuthorityStateError.integrity }
-        let rows=try AuthorityStateKernel.rows(database,"SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count"+(verifyBytes ? ",payload":"")+" FROM events WHERE id=?",[.text(source.eventID)])
+        let dated = source.sourceTime != nil
+        if let date = source.sourceTime { _ = try date.validated() }
+        let rows=try AuthorityStateKernel.rows(database,"SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count"+(verifyBytes ? ",payload":"")+(dated ? ",source_time_json":"")+" FROM events WHERE id=?",[.text(source.eventID)])
         guard rows.count == 1,let role=MemoryRole(rawValue:rows[0][4].string),let status=CaptureStatus(rawValue:rows[0][5].string) else { throw AuthorityStateError.integrity }
-        let actual=MemorySourceReference(sequence:rows[0][0].integer,eventID:rows[0][1].string,conversationID:rows[0][2].string,projectID:rows[0][3].string,role:role,status:status,createdAt:rows[0][6].string,digest:rows[0][7].string,byteCount:rows[0][8].integer)
+        let time: EventSourceTime?
+        if dated {
+            guard let bytes = rows[0][verifyBytes ? 10 : 9].bytes else { throw AuthorityStateError.integrity }
+            time = try EventSourceTime.decodeCanonical(bytes)
+        } else { time = nil }
+        let actual=MemorySourceReference(sequence:rows[0][0].integer,eventID:rows[0][1].string,conversationID:rows[0][2].string,projectID:rows[0][3].string,role:role,status:status,createdAt:rows[0][6].string,digest:rows[0][7].string,byteCount:rows[0][8].integer,sourceTime:time)
         guard actual == source else { throw AuthorityStateError.integrity }
         if verifyBytes { guard let bytes=rows[0][9].bytes,bytes.count == source.byteCount,String(data:bytes,encoding:.utf8) != nil,AuthorityStateKernel.digest(bytes) == source.digest else { throw AuthorityStateError.integrity } }
     }

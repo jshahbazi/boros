@@ -7,9 +7,11 @@ downloads an explicitly supplied HTTPS source; ingestion invokes local Boros.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
@@ -69,13 +71,48 @@ def load_input(path):
     return _parse(_read(path))
 
 
+def normalize_time(literal):
+    """Preserve explicit calendar precision and zone; never infer an instant."""
+    if not isinstance(literal, str) or len(literal.encode("utf-8")) > 128:
+        raise ValueError("unsupported source time")
+    iso = re.fullmatch(r"([0-9]{4})-([0-9]{2})-([0-9]{2})(?:T([0-9]{2}):([0-9]{2})(?::([0-9]{2})(\.[0-9]{1,9})?)?(Z|[+-][0-9]{2}:[0-9]{2})?)?", literal)
+    local = re.fullmatch(r"([0-9]{4})/([0-9]{2})/([0-9]{2}) \((Sun|Mon|Tue|Wed|Thu|Fri|Sat)\)(?: ([0-9]{2}):([0-9]{2}))?", literal)
+    match = iso or local
+    if match is None:
+        raise ValueError("unsupported source time")
+    parts = match.groups()
+    date = datetime.date(*(int(p) for p in parts[:3]))
+    if local and ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[date.weekday()] != parts[3]:
+        raise ValueError("source weekday mismatch")
+    value, precision, zone = date.isoformat(), "day", "unspecified"
+    hour, minute = parts[4:6] if local else parts[3:5]
+    if hour is not None:
+        if not 0 <= int(hour) <= 23 or not 0 <= int(minute) <= 59:
+            raise ValueError("invalid source time")
+        value += "T" + hour + ":" + minute
+        precision = "minute"
+        if iso:
+            second, fraction, zone = parts[5:8]
+            zone = zone or "unspecified"
+            if second is not None:
+                if not 0 <= int(second) <= 59:
+                    raise ValueError("invalid source time")
+                value += ":" + second + (fraction or "")
+                precision = "fractional_second" if fraction else "second"
+            if zone not in ("Z", "unspecified"):
+                zh, zm = int(zone[1:3]), int(zone[4:6])
+                if zh > 14 or zm > 59 or zh == 14 and zm != 0 or zone == "-00:00":
+                    raise ValueError("unsupported source zone")
+    return {"value": value, "precision": precision, "timezone": zone}
+
+
 def normalize(messages):
     if not isinstance(messages, list) or not 0 < len(messages) <= MAX_MESSAGES:
         raise ValueError("invalid message count")
     result = []
     aliases = {"user": "user", "human": "user", "assistant": "assistant", "gpt": "assistant"}
     for message in messages:
-        if not isinstance(message, dict) or not {"role", "content"} <= message.keys() <= {"role", "content", "status"}:
+        if not isinstance(message, dict) or not {"role", "content"} <= message.keys() <= {"role", "content", "status", "timestamp"}:
             raise ValueError("unsupported message fields")
         role, text, status = message["role"], message["content"], message.get("status", "complete")
         if not isinstance(role, str) or role not in aliases or not isinstance(text, str):
@@ -84,8 +121,44 @@ def normalize(messages):
             raise ValueError("unsupported capture status")
         if len(text.encode("utf-8", errors="strict")) > MAX_MESSAGE_BYTES:
             raise ValueError("message exceeds capture limit")
-        result.append({"role": aliases[role], "content": text, "status": status})
+        normalized = {"role": aliases[role], "content": text, "status": status}
+        if "timestamp" in message:
+            normalize_time(message["timestamp"])
+            normalized["timestamp"] = message["timestamp"]
+        result.append(normalized)
     return result
+
+
+def dated_messages(root, chat, raw):
+    """Bind explicit message timestamps to exact original document locations."""
+    messages = normalize(chat)
+    if not any("timestamp" in message for message in messages):
+        return messages
+    # OpenAI adapters retain the actual source list. Converted BEAM, DevGPT,
+    # and ShareGPT lists contain no accepted timestamp field.
+    if chat is root:
+        prefix = ""
+    elif isinstance(root, dict):
+        keys = [key for key in ("messages", "conversation") if root.get(key) is chat]
+        if len(keys) != 1:
+            raise ValueError("source date location unavailable")
+        prefix = "/" + keys[0]
+    elif isinstance(root, list):
+        found = [(index, key) for index, record in enumerate(root) if isinstance(record, dict)
+                 for key in ("messages", "conversation") if record.get(key) is chat]
+        if len(found) != 1:
+            raise ValueError("source date location unavailable")
+        index, key = found[0]
+        prefix = f"/{index}/{key}"
+    else:
+        raise ValueError("source date location unavailable")
+    digest = hashlib.sha256(raw).hexdigest()
+    for index, message in enumerate(messages):
+        if "timestamp" in message:
+            literal = message.pop("timestamp")
+            message["source_time"] = {**normalize_time(literal), "original_value": literal,
+                                      "source_sha256": digest, "locator": f"{prefix}/{index}/timestamp"}
+    return messages
 
 
 def _message_array(value):
@@ -248,14 +321,15 @@ def main(argv=None):
         parser.error("--destination is required for import")
     try:
         raw = _download(args.url) if args.url else _read(args.input)
-        chats = conversations(_parse(raw), args.format)
+        original = _parse(raw)
+        chats = conversations(original, args.format)
         if args.list:
             for index, chat in enumerate(chats):
                 print(json.dumps(summary(normalize(chat), index), sort_keys=True))
             return 0
         if args.select >= len(chats):
             raise ValueError("selection is outside the source")
-        messages = normalize(chats[args.select])
+        messages = dated_messages(original, chats[args.select], raw)
         if args.through_message is not None and args.through_message > len(messages):
             raise ValueError("prefix is outside the conversation")
         address = args.source_url or args.url
@@ -263,7 +337,7 @@ def main(argv=None):
             _https(address)
         if not isinstance(args.dataset, str) or not 0 < len(args.dataset.encode()) <= 256:
             raise ValueError("invalid dataset name")
-        document = {"schema_version": 1, "title": "Imported test chat",
+        document = {"schema_version": 2 if any("source_time" in m for m in messages) else 1, "title": "Imported test chat",
                     "source": {"dataset": args.dataset, "url": address,
                                "sha256": hashlib.sha256(raw).hexdigest(), "selection": args.select},
                     "messages": messages, "original_json": raw.decode("utf-8")}

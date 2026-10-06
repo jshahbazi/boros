@@ -11,7 +11,9 @@ enum SemanticChecks {
         var store: MemoryStore? = try MemoryStore(directory: directory)
         let first = try store!.createConversation(projectID: "semantic-alpha", title: "Synthetic semantic history")
         let second = try store!.createConversation(projectID: "semantic-beta", title: "Separate synthetic scope")
-        let bike = try store!.append(conversationID: first.id, role: .human, text: "The bicycle has two wheels and its frame is painted blue.", status: .complete, turnID: "bike-turn", eventID: "semantic-bike")
+        let originalDate = EventSourceTime(value: "2023-05-30", precision: "day", timezone: "unspecified",
+            sourceSHA256: String(repeating: "b", count: 64), locator: "/synthetic/messages/0/timestamp", originalValue: "2023-05-30")
+        let bike = try store!.append(conversationID: first.id, role: .human, text: "The bicycle has two wheels and its frame is painted blue.", status: .complete, turnID: "bike-turn", eventID: "semantic-bike", sourceTime: originalDate)
         let cat = try store!.append(conversationID: first.id, role: .assistant, text: "The cat sleeps on a warm cushion near the window.", status: .partial, turnID: "cat-turn", eventID: "semantic-cat")
         let unsupported = try store!.append(conversationID: first.id, role: .human, text: "UNSUPPORTED exact code identifier.swift", status: .complete, turnID: "code-turn", eventID: "semantic-unsupported")
         _ = try store!.append(conversationID: second.id, role: .human, text: bike.text, status: .complete, turnID: "other-turn", eventID: "semantic-foreign-bike")
@@ -27,6 +29,8 @@ enum SemanticChecks {
         _ = try index!.process(projectID: "semantic-beta")
         let after = try index!.search(query: "bike", lexicalQuery: "bike", projectID: "semantic-alpha")
         checks["semantic_real_path_with_no_lexical_match"] = after.hits.contains { $0.eventID == bike.id } && after.manifest.results.first(where: { $0.source.eventID == bike.id })?.retrievalPaths == ["semantic"]
+        checks["semantic_source_date_preserved_in_hybrid_hits_and_manifest"] = after.hits.first(where: { $0.eventID == bike.id })?.sourceTime == originalDate
+            && after.manifest.results.first(where: { $0.source.eventID == bike.id })?.source.sourceTime == originalDate
         checks["semantic_scope_filter_before_rank"] = after.hits.allSatisfy { $0.projectID == "semantic-alpha" && $0.eventID != "semantic-foreign-bike" }
         checks["semantic_typed_source_status_retained"] = after.hits.first(where: { $0.eventID == cat.id })?.status == .partial
         checks["semantic_coverage_holes_are_explicit"] = work.publishedChunks == 3 && after.manifest.coverage.completeSources == 2 && after.manifest.coverage.unsupportedSources == 1 && after.manifest.coverage.unsupportedChunks == 1 && !after.manifest.coverage.complete && after.manifest.coverage.holes.first?.eventID == unsupported.id
@@ -59,6 +63,7 @@ enum SemanticChecks {
         index = try SemanticIndex(store: store!, encoder: FixtureEncoder())
         let restored = try index!.replay(manifestID: originalID, projectID: "semantic-alpha")
         checks["semantic_manifest_replay_after_store_restart"] = restored.manifest == originalManifest && restored.hits.map(\.eventID) == after.hits.map(\.eventID) && restored.hits.map(\.excerpt) == after.hits.map(\.excerpt)
+        checks["semantic_source_date_preserved_after_manifest_restart_replay"] = restored.hits.first(where: { $0.eventID == bike.id })?.sourceTime == originalDate
         checks["semantic_persisted_vectors_after_restart"] = try index!.search(query: "bike", projectID: "semantic-alpha").manifest == originalManifest
 
         // Corrupt only isolated derived fixtures. Foreign source publication

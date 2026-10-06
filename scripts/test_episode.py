@@ -216,7 +216,7 @@ def main():
         harness.write_text(HARNESS)
         binary = scratch / "episode-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "MeteredRetrieval.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "EpisodeChecks.swift")]
+            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "MeteredRetrieval.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "EpisodeChecks.swift")]
         subprocess.run(["swiftc", "-I", str(ROOT / "Sources/CSQLite"), "-o", str(binary),
                         *map(str, sources), str(harness)], check=True)
         checks = parsed(subprocess.run([str(binary)], capture_output=True, text=True, timeout=90))
@@ -243,9 +243,9 @@ def main():
             checks.update({stage + "_" + key: value for key, value in recovered.items()})
             checks["sigkill_migration_" + stage + "_repeat_reopen_stable"] = recovered == repeated
             with sqlite3.connect(migration / "memory.sqlite3") as connection:
-                if connection.execute("PRAGMA user_version").fetchone()[0] != 9 or connection.execute("PRAGMA foreign_key_check").fetchall():
-                    raise RuntimeError("Recovered migration did not publish a complete schema nine")
-            checks["sigkill_migration_" + stage + "_reopens_schema_nine_foreign_keys_intact"] = True
+                if connection.execute("PRAGMA user_version").fetchone()[0] != 10 or connection.execute("PRAGMA foreign_key_check").fetchall():
+                    raise RuntimeError("Recovered migration did not publish a complete current schema")
+            checks["sigkill_migration_" + stage + "_reopens_current_schema_foreign_keys_intact"] = True
         print(json.dumps({"checks": len(checks), "failed": [], "passed": True}, sort_keys=True))
 
 
