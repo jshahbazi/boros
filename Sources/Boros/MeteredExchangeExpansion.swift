@@ -11,6 +11,7 @@ struct ExchangeExpansionReport {
 /// coverage or answer sufficiency. Every added payload read is prefunded.
 enum MeteredExchangeExpansion {
     static let version = "following-assistant-prefix-v2"
+    static let adjacentVersion = "adjacent-exchange-prefix-v3"
     static let maximumCandidates = 16
     private struct PrimarySpan: Hashable {
         let eventID: Data
@@ -73,7 +74,7 @@ enum MeteredExchangeExpansion {
 
     static func expand(store: MemoryStore, projectID: String, primaryHits: [MemoryHit], sourceFrontier: Int,
         excludingSourceIDs: ExactSourceIDs, episodeLease: EpisodeLease? = nil,
-        operationIsNested: Bool = false) throws -> ExchangeExpansionReport {
+        operationIsNested: Bool = false, includePrecedingHuman: Bool = false) throws -> ExchangeExpansionReport {
         _ = try episodeLease?.checkActive(projectID: projectID)
         guard sourceFrontier >= 0, primaryHits.count <= maximumCandidates, excludingSourceIDs.count <= 10000,
               primaryHits.allSatisfy({ episodeIdentifierEqual($0.projectID, projectID) && $0.excerptOffset >= 0
@@ -88,13 +89,30 @@ enum MeteredExchangeExpansion {
             for hit in primaryHits {
                 let key = Data(hit.eventID.utf8)
                 let span = PrimarySpan(eventID: key, offset: hit.excerptOffset, bytes: Data(hit.excerpt.utf8))
-                if promotedSpans.contains(span) {
+                let promotedOriginal = promotedSpans.contains(span)
+                // Deduplication must not hide changed metadata on an exact
+                // repeated span, including a previously funded neighbor.
+                if !excludingSourceIDs.contains(hit.eventID), promotedOriginal || seenSpans.contains(span) {
+                    guard let retainedHit = hits.first(where: { episodeIdentifierEqual($0.eventID, hit.eventID) }),
+                          episodeIdentifierEqual(retainedHit.projectID, hit.projectID),
+                          episodeIdentifierEqual(retainedHit.conversationID, hit.conversationID),
+                          retainedHit.role == hit.role, retainedHit.status == hit.status,
+                          episodeIdentifierEqual(retainedHit.createdAt, hit.createdAt),
+                          episodeIdentifierEqual(retainedHit.digest, hit.digest),
+                          retainedHit.totalBytes == hit.totalBytes, retainedHit.sourceTime == hit.sourceTime else {
+                        throw MeteredRetrievalError.sourceMismatch
+                    }
+                }
+                // A promoted human that was also an original primary retains
+                // its one following-assistant expansion. Neighbor-only sources
+                // never enter this loop and cannot recursively expand.
+                if promotedOriginal && !(includePrecedingHuman && hit.role == .human) {
                     decisions.append(["anchor_event_id": hit.eventID, "disposition": "promoted_primary_retained"]); continue
                 }
                 guard hits.count < maximumCandidates else {
                     decisions.append(["anchor_event_id": hit.eventID, "disposition": "candidate_limit"]); continue
                 }
-                guard !excludingSourceIDs.contains(hit.eventID), !seenSpans.contains(span) else {
+                guard !excludingSourceIDs.contains(hit.eventID), promotedOriginal || !seenSpans.contains(span) else {
                     decisions.append(["anchor_event_id": hit.eventID,
                         "disposition": excludingSourceIDs.contains(hit.eventID) ? "excluded_primary" : "duplicate_primary"]); continue
                 }
@@ -102,11 +120,13 @@ enum MeteredExchangeExpansion {
                     try store.sourceReference(eventID: hit.eventID, projectID: projectID)
                 }), anchor.sequence <= sourceFrontier, episodeIdentifierEqual(anchor.conversationID, hit.conversationID),
                       anchor.role == hit.role, anchor.status == hit.status, episodeIdentifierEqual(anchor.createdAt, hit.createdAt),
-                      episodeIdentifierEqual(anchor.digest, hit.digest), anchor.byteCount == hit.totalBytes else {
+                      episodeIdentifierEqual(anchor.digest, hit.digest), anchor.byteCount == hit.totalBytes,
+                      hit.sourceTime == anchor.sourceTime else {
                     throw MeteredRetrievalError.sourceMismatch
                 }
-                hits.append(hit); seenSpans.insert(span); retained += 1
-                guard anchor.role == .human else { continue }
+                if !promotedOriginal { hits.append(hit); seenSpans.insert(span); retained += 1 }
+                guard anchor.role == .human || includePrecedingHuman && anchor.role == .assistant else { continue }
+                let preceding = anchor.role == .assistant
                 guard expandedAnchors.insert(key).inserted else {
                     decisions.append(["anchor_event_id": hit.eventID, "disposition": "duplicate_anchor"]); continue
                 }
@@ -114,15 +134,17 @@ enum MeteredExchangeExpansion {
                     decisions.append(["anchor_event_id": hit.eventID, "disposition": "candidate_limit"]); continue
                 }
                 let neighbor = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 2) {
-                    try store.followingSourceReference(anchor: anchor, throughSequence: sourceFrontier)
+                    try preceding ? store.precedingSourceReference(anchor: anchor, throughSequence: sourceFrontier)
+                        : store.followingSourceReference(anchor: anchor, throughSequence: sourceFrontier)
                 }
                 var decision: [String: Any] = ["anchor_event_id": hit.eventID]
+                if includePrecedingHuman { decision["direction"] = preceding ? "preceding_human" : "following_assistant" }
                 guard let neighbor else {
                     decision["disposition"] = "no_neighbor"; decisions.append(decision); continue
                 }
                 decision["neighbor_event_id"] = neighbor.eventID
-                guard neighbor.role == .assistant else {
-                    decision["disposition"] = "human_boundary"; decisions.append(decision); continue
+                guard neighbor.role == (preceding ? .human : .assistant) else {
+                    decision["disposition"] = preceding ? "assistant_boundary" : "human_boundary"; decisions.append(decision); continue
                 }
                 guard !excludingSourceIDs.contains(neighbor.eventID) else {
                     decision["disposition"] = "excluded_neighbor"; decisions.append(decision); continue
@@ -166,7 +188,7 @@ enum MeteredExchangeExpansion {
                 decision["disposition"] = "included_prefix"; decision["excerpt_bytes"] = page.byteCount
                 decision["prefix_truncated"] = page.byteCount < neighbor.byteCount; decisions.append(decision)
             }
-            return ExchangeExpansionReport(hits: hits, audit: ["version": version, "source_frontier": sourceFrontier,
+            return ExchangeExpansionReport(hits: hits, audit: ["version": includePrecedingHuman ? adjacentVersion : version, "source_frontier": sourceFrontier,
                 "primary_count": primaryHits.count, "retained_primary_count": retained,
                 "dropped_primary_count": primaryHits.count - retained, "added_neighbor_count": added,
                 "promoted_primary_count": promoted,
@@ -177,6 +199,6 @@ enum MeteredExchangeExpansion {
         episodeIdentifierEqual(hit.eventID, source.eventID) && episodeIdentifierEqual(hit.projectID, source.projectID)
             && episodeIdentifierEqual(hit.conversationID, source.conversationID) && hit.role == source.role && hit.status == source.status
             && episodeIdentifierEqual(hit.createdAt, source.createdAt) && episodeIdentifierEqual(hit.digest, source.digest)
-            && hit.totalBytes == source.byteCount
+            && hit.totalBytes == source.byteCount && hit.sourceTime == source.sourceTime
     }
 }

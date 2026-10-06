@@ -222,6 +222,265 @@ enum ExchangeExpansionChecks {
         }
         checks.merge(try exhaustionChecks(store: store, chat: chat, project: project, anchor: anchor, frontier: frontier, clock: clock)) { _, latest in latest }
         checks.merge(try completionChecks()) { _, latest in latest }
+        checks.merge(try reverseChecks()) { _, latest in latest }
+        return checks
+    }
+
+    private static func reverseChecks() throws -> [String: Bool] {
+        let directory = try fixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory), project = "synthetic-reverse-exchange-project"
+        let archive = try store.createConversation(projectID: project, title: "Synthetic reverse sources")
+        let unrelated = try store.createConversation(projectID: project, title: "Synthetic reverse interleaving")
+        let chat = try store.createConversation(projectID: project, title: "Synthetic reverse request")
+        let date = EventSourceTime(value: "2023-05-30T10:42", precision: "minute", timezone: "unspecified",
+            sourceSHA256: String(repeating: "c", count: 64), locator: "/synthetic/reverse/date", originalValue: "2023/05/30 (Tue) 10:42")
+        func append(_ id: String, _ text: String, _ role: MemoryRole = .human, _ status: CaptureStatus = .complete,
+            conversationID: String? = nil, sourceTime: EventSourceTime? = nil) throws -> MemoryEvent {
+            try store.append(conversationID: conversationID ?? archive.id, role: role, text: text, status: status,
+                turnID: "synthetic-reverse-turn-" + id, eventID: id, sourceTime: sourceTime)
+        }
+        let firstAssistant = try append("reverse-first", "Synthetic first publication", .assistant)
+        let human = try append("reverse-human-é", "Synthetic human café\u{0} e\u{301} retained", .human, .partial, sourceTime: date)
+        _ = try append("reverse-other-conversation", "Synthetic interleaved publication", .human, conversationID: unrelated.id)
+        let assistant = try append("reverse-assistant-é", "Synthetic assistant retained", .assistant, .cancelled, sourceTime: date)
+        let otherHuman = try append("reverse-human-e\u{301}", "Synthetic distinct human")
+        let otherAssistant = try append("reverse-assistant-e\u{301}", "Synthetic distinct assistant", .assistant)
+        let boundaryHuman = try append("reverse-boundary-human", "Synthetic older human")
+        let boundaryAssistant = try append("reverse-boundary-assistant", "Synthetic intervening assistant", .assistant)
+        let boundaryTarget = try append("reverse-boundary-target", "Synthetic later assistant", .assistant)
+        let longHuman = try append("reverse-long-human", String(repeating: "x", count: 4095) + "é" + "tail", .human, .failed)
+        let longAssistant = try append("reverse-long-assistant", "Synthetic long-source assistant", .assistant)
+        let emptyHuman = try append("reverse-empty-human", "")
+        let emptyAssistant = try append("reverse-empty-assistant", "Synthetic empty-source assistant", .assistant)
+        let promotedHuman = try append("reverse-promoted-human", "Synthetic promoted original human")
+        let largeAssistant = try append("reverse-promoted-large-assistant", String(repeating: "a", count: 5000), .assistant, .partial)
+        var cappedHumans: [MemoryEvent] = [], cappedAssistants: [MemoryEvent] = []
+        for ordinal in 0..<9 {
+            cappedHumans.append(try append("reverse-cap-human-\(ordinal)", "Synthetic bounded human"))
+            cappedAssistants.append(try append("reverse-cap-assistant-\(ordinal)", "Synthetic bounded assistant", .assistant))
+        }
+        let frontier = try store.sourceFrontier(projectID: project)
+        let future = try append("reverse-future-assistant", "Synthetic later publication", .assistant)
+        let foreignChat = try store.createConversation(projectID: "synthetic-reverse-foreign", title: "Synthetic foreign reverse scope")
+        let foreign = try append("reverse-foreign", "Synthetic foreign assistant", .assistant, conversationID: foreignChat.id)
+        let clock = Clock(), episodeID = UUID().uuidString, currentID = "reverse-current-request"
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "synthetic-reverse-request-turn",
+            humanEventID: currentID, episodeID: episodeID, text: "Synthetic reverse request", limits: EpisodeLimits(), clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
+        func expand(_ primary: [MemoryHit], exclusions: [String] = [], nested: Bool = false) throws -> ExchangeExpansionReport {
+            try MeteredExchangeExpansion.expand(store: store, projectID: project, primaryHits: primary,
+                sourceFrontier: frontier, excludingSourceIDs: ExactSourceIDs(exclusions + [currentID]),
+                episodeLease: lease, operationIsNested: nested, includePrecedingHuman: true)
+        }
+        func direction(_ report: ExchangeExpansionReport) -> String? {
+            (report.audit["decisions"] as? [[String: Any]])?.first?["direction"] as? String
+        }
+        let before = try lease.checkActive(), first = try expand([hit(assistant)]), after = try lease.checkActive()
+        let auditBytes = try JSONSerialization.data(withJSONObject: first.audit)
+        var checks: [String: Bool] = [
+            "reverse_immediate_human_preserves_unicode_nul_status_date_and_scope": first.hits.count == 2
+                && first.hits.map { Data($0.eventID.utf8) } == [Data(assistant.id.utf8), Data(human.id.utf8)]
+                && Data(first.hits[1].excerpt.utf8) == Data(human.text.utf8) && first.hits[1].excerptOffset == 0
+                && first.hits[1].digest == human.digest && first.hits[1].totalBytes == human.byteCount
+                && first.hits[1].status == .partial && first.hits[1].sourceTime == date
+                && first.hits[1].projectID == project && first.hits[1].conversationID == archive.id,
+            "reverse_original_lease_prefunds_exact_bounded_neighbor_recipe": after.id == before.id && after.limits == before.limits
+                && after.charged.memoryOperations - before.charged.memoryOperations == 1
+                && after.charged.metadataRows - before.charged.metadataRows == 4
+                && after.charged.rawSourceBytes - before.charged.rawSourceBytes == 2 * (human.byteCount + 1)
+                && after.charged.modelCalls == before.charged.modelCalls && after.charged.encoderInputBytes == before.charged.encoderInputBytes,
+            "reverse_opt_in_audit_has_direction_and_no_payload": first.audit["version"] as? String == "adjacent-exchange-prefix-v3"
+                && direction(first) == "preceding_human" && first.audit["added_neighbor_count"] as? Int == 1
+                && auditBytes.range(of: Data(human.text.utf8)) == nil && auditBytes.range(of: Data(assistant.text.utf8)) == nil
+        ]
+        let assistantReference = try store.sourceReference(eventID: assistant.id, projectID: project)!
+        let originalHumanReference = try store.sourceReference(eventID: human.id, projectID: project)!
+        checks["reverse_metadata_helper_uses_same_conversation_publication_order"] = try store.precedingSourceReference(
+            anchor: assistantReference, throughSequence: frontier) == originalHumanReference
+        let noPrior = try expand([hit(firstAssistant)])
+        checks["reverse_first_conversation_publication_has_no_prior"] = noPrior.hits.map(\.eventID) == [firstAssistant.id]
+            && disposition(noPrior) == "no_neighbor" && direction(noPrior) == "preceding_human"
+        let boundary = try expand([hit(boundaryTarget)])
+        checks["reverse_previous_assistant_is_boundary_without_earlier_human_skip"] = boundary.hits.map(\.eventID) == [boundaryTarget.id]
+            && disposition(boundary) == "assistant_boundary" && decisionNeighbor(boundary) == boundaryAssistant.id
+            && !boundary.hits.contains { $0.eventID == boundaryHuman.id }
+        let following = try expand([hit(human)])
+        checks["reverse_opt_in_human_primary_keeps_following_assistant_direction"] = following.hits.map(\.eventID) == [human.id, assistant.id]
+            && direction(following) == "following_assistant" && following.hits[1].status == assistant.status
+        let ordered = try expand([hit(assistant), hit(otherAssistant)])
+        checks["reverse_rank_interleaving_keeps_utf8_distinct_source_ids"] = ordered.hits.map { Data($0.eventID.utf8) }
+            == [assistant, human, otherAssistant, otherHuman].map { Data($0.id.utf8) }
+        let excludedBefore = try lease.checkActive(), excluded = try expand([hit(assistant)], exclusions: [human.id])
+        checks["reverse_excluded_neighbor_reads_no_payload_and_does_not_skip"] = try excluded.hits.map(\.eventID) == [assistant.id]
+            && disposition(excluded) == "excluded_neighbor" && decisionNeighbor(excluded) == human.id
+            && lease.checkActive().charged.rawSourceBytes == excludedBefore.charged.rawSourceBytes
+        let excludedPrimaryBefore = try lease.checkActive(), excludedPrimary = try expand([hit(assistant)], exclusions: [assistant.id])
+        checks["reverse_excluded_primary_reads_no_metadata_or_payload"] = try excludedPrimary.hits.isEmpty
+            && disposition(excludedPrimary) == "excluded_primary"
+            && lease.checkActive().charged.metadataRows == excludedPrimaryBefore.charged.metadataRows
+            && lease.checkActive().charged.rawSourceBytes == excludedPrimaryBefore.charged.rawSourceBytes
+        let longBefore = try lease.checkActive(), long = try expand([hit(longAssistant)]), longAfter = try lease.checkActive()
+        checks["reverse_oversized_human_prefix_is_scalar_safe_and_preserves_total_digest_status"] = long.hits.count == 2
+            && long.hits[1].excerpt.utf8.count == 4095 && long.hits[1].excerpt == String(repeating: "x", count: 4095)
+            && long.hits[1].totalBytes == longHuman.byteCount && long.hits[1].digest == longHuman.digest
+            && long.hits[1].status == .failed && long.audit["prefix_truncated_count"] as? Int == 1
+            && longAfter.charged.rawSourceBytes - longBefore.charged.rawSourceBytes == 2 * 4097
+        let emptyBefore = try lease.checkActive(), empty = try expand([hit(emptyAssistant)])
+        checks["reverse_empty_human_has_explicit_disposition_without_payload_read"] = try empty.hits.map(\.eventID) == [emptyAssistant.id]
+            && disposition(empty) == "empty_neighbor" && decisionNeighbor(empty) == emptyHuman.id
+            && lease.checkActive().charged.rawSourceBytes == emptyBefore.charged.rawSourceBytes
+        let promotionBefore = try lease.checkActive(), promoted = try expand([hit(assistant), hit(human)]), promotionAfter = try lease.checkActive()
+        checks["reverse_complete_future_human_primary_promotes_once_without_payload_read"] = promoted.hits.map(\.eventID) == [assistant.id, human.id]
+            && promoted.audit["promoted_primary_count"] as? Int == 1 && promoted.audit["retained_primary_count"] as? Int == 2
+            && promoted.audit["dropped_primary_count"] as? Int == 0 && promotionAfter.charged.rawSourceBytes == promotionBefore.charged.rawSourceBytes
+            && promotionAfter.charged.metadataRows - promotionBefore.charged.metadataRows == 6
+        // Independent regression requests retain the ordinary allowance; do
+        // not consume the boundary fixture's 24-operation episode budget.
+        let regressionID = UUID().uuidString, regressionCurrent = "reverse-promotion-regression-request"
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "reverse-promotion-regression-turn",
+            humanEventID: regressionCurrent, episodeID: regressionID, text: "Synthetic promotion regression",
+            limits: EpisodeLimits(), clock: clock.now())
+        let regressionLease = EpisodeLease(ledger: store, episodeID: regressionID, clock: clock)
+        func regressionExpand(_ primary: [MemoryHit]) throws -> ExchangeExpansionReport {
+            try MeteredExchangeExpansion.expand(store: store, projectID: project, primaryHits: primary,
+                sourceFrontier: frontier, excludingSourceIDs: ExactSourceIDs([currentID, regressionCurrent]),
+                episodeLease: regressionLease, includePrecedingHuman: true)
+        }
+        let largeFragment = hit(largeAssistant, offset: 10, excerpt: String(largeAssistant.text.dropFirst(10).prefix(32)))
+        let completedLarge = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: project,
+            primaryHits: [largeFragment, hit(promotedHuman)], sourceFrontier: frontier,
+            excludingSourceIDs: ExactSourceIDs([currentID]), episodeLease: regressionLease)
+        checks["reverse_large_assistant_primary_remains_original_fragment_before_expansion"] = completedLarge.hits.count == 2
+            && completedLarge.hits[0].excerptOffset == 10 && Data(completedLarge.hits[0].excerpt.utf8) == Data(largeFragment.excerpt.utf8)
+            && completedLarge.audit["completed_primary_count"] as? Int == 0
+        let largePromotionBefore = try regressionLease.checkActive(), largePromotion = try regressionExpand(completedLarge.hits), largePromotionAfter = try regressionLease.checkActive()
+        checks["reverse_promoted_original_human_still_expands_following_large_assistant_prefix"] = largePromotion.hits.count == 3
+            && largePromotion.hits.map(\.eventID) == [largeAssistant.id, promotedHuman.id, largeAssistant.id]
+            && largePromotion.hits[0].excerptOffset == 10 && Data(largePromotion.hits[0].excerpt.utf8) == Data(largeFragment.excerpt.utf8)
+            && Data(largePromotion.hits[1].excerpt.utf8) == Data(promotedHuman.text.utf8)
+            && largePromotion.hits[2].excerptOffset == 0 && largePromotion.hits[2].excerpt == String(repeating: "a", count: 4096)
+            && largePromotion.hits[2].totalBytes == largeAssistant.byteCount && largePromotion.hits[2].digest == largeAssistant.digest
+            && largePromotion.hits[2].status == .partial && largePromotion.audit["retained_primary_count"] as? Int == 2
+            && largePromotion.audit["promoted_primary_count"] as? Int == 1 && largePromotion.audit["added_neighbor_count"] as? Int == 1
+            && largePromotion.audit["dropped_primary_count"] as? Int == 0 && largePromotion.audit["prefix_truncated_count"] as? Int == 1
+        checks["reverse_promoted_original_human_following_prefix_has_exact_original_lease_funding"] = largePromotionAfter.id == largePromotionBefore.id
+            && largePromotionAfter.limits == largePromotionBefore.limits
+            && largePromotionAfter.charged.metadataRows - largePromotionBefore.charged.metadataRows == 7
+            && largePromotionAfter.charged.rawSourceBytes - largePromotionBefore.charged.rawSourceBytes == 2 * 4097
+            && largePromotionAfter.charged.memoryOperations - largePromotionBefore.charged.memoryOperations == 1
+            && largePromotionAfter.charged.modelCalls == largePromotionBefore.charged.modelCalls
+        let neighborOnlyBefore = try regressionLease.checkActive(), neighborOnly = try regressionExpand([largeFragment]), neighborOnlyAfter = try regressionLease.checkActive()
+        checks["reverse_neighbor_only_human_does_not_recursively_expand_large_assistant"] = neighborOnly.hits.count == 2
+            && neighborOnly.hits.map(\.eventID) == [largeAssistant.id, promotedHuman.id]
+            && neighborOnly.hits[0].excerptOffset == 10 && Data(neighborOnly.hits[0].excerpt.utf8) == Data(largeFragment.excerpt.utf8)
+            && Data(neighborOnly.hits[1].excerpt.utf8) == Data(promotedHuman.text.utf8)
+            && neighborOnly.audit["added_neighbor_count"] as? Int == 1 && neighborOnly.audit["promoted_primary_count"] as? Int == 0
+            && (neighborOnly.audit["decisions"] as? [[String: Any]])?.count == 1
+            && neighborOnlyAfter.charged.metadataRows - neighborOnlyBefore.charged.metadataRows == 4
+            && neighborOnlyAfter.charged.rawSourceBytes - neighborOnlyBefore.charged.rawSourceBytes == 2 * (promotedHuman.byteCount + 1)
+        _ = try regressionLease.finish(reason: .cancelled)
+        let fragment = hit(human, offset: 10, excerpt: String(human.text.dropFirst(10)))
+        let fragmentBefore = try lease.checkActive(), fragmented = try expand([hit(assistant), fragment]), fragmentAfter = try lease.checkActive()
+        checks["reverse_incomplete_nonzero_human_primary_cannot_suppress_complete_prefix"] = fragmented.hits.count == 3
+            && fragmented.hits.map(\.eventID) == [assistant.id, human.id, human.id]
+            && fragmented.hits[1].excerptOffset == 0 && Data(fragmented.hits[1].excerpt.utf8) == Data(human.text.utf8)
+            && fragmented.hits[2].excerptOffset == 10 && Data(fragmented.hits[2].excerpt.utf8) == Data(fragment.excerpt.utf8)
+            && fragmented.audit["promoted_primary_count"] as? Int == 0
+            && fragmentAfter.charged.rawSourceBytes - fragmentBefore.charged.rawSourceBytes == 2 * (human.byteCount + 1)
+        let shortBefore = try lease.checkActive(), short = try expand([hit(assistant), hit(human, excerpt: String(human.text.prefix(5)))]), shortAfter = try lease.checkActive()
+        checks["reverse_short_offset_zero_human_primary_cannot_suppress_complete_prefix"] = short.hits.count == 3
+            && Data(short.hits[1].excerpt.utf8) == Data(human.text.utf8) && short.hits[2].excerpt.utf8.count == 5
+            && short.audit["promoted_primary_count"] as? Int == 0
+            && shortAfter.charged.rawSourceBytes - shortBefore.charged.rawSourceBytes == 2 * (human.byteCount + 1)
+        let coveredBefore = try lease.checkActive(), covered = try expand([hit(human), hit(assistant)]), coveredAfter = try lease.checkActive()
+        checks["reverse_already_retained_full_pair_has_no_duplicate_payload_read"] = covered.hits.map(\.eventID) == [human.id, assistant.id]
+            && covered.audit["added_neighbor_count"] as? Int == 0 && coveredAfter.charged.rawSourceBytes == coveredBefore.charged.rawSourceBytes
+        let duplicateBefore = try lease.checkActive(), duplicate = try expand([hit(assistant), hit(assistant)]), duplicateAfter = try lease.checkActive()
+        checks["reverse_duplicate_assistant_span_keeps_single_human_prefix"] = duplicate.hits.map(\.eventID) == [assistant.id, human.id]
+            && duplicate.audit["added_neighbor_count"] as? Int == 1 && duplicate.audit["retained_primary_count"] as? Int == 1
+            && duplicateAfter.charged.rawSourceBytes - duplicateBefore.charged.rawSourceBytes == 2 * (human.byteCount + 1)
+        let distinctBefore = try lease.checkActive(), distinct = try expand([hit(assistant), hit(assistant, offset: 10, excerpt: String(assistant.text.dropFirst(10)))]), distinctAfter = try lease.checkActive()
+        checks["reverse_distinct_assistant_spans_expand_previous_human_only_once"] = distinct.hits.count == 3
+            && distinct.hits[2].excerptOffset == 10 && distinct.audit["added_neighbor_count"] as? Int == 1
+            && distinctAfter.charged.rawSourceBytes - distinctBefore.charged.rawSourceBytes == 2 * (human.byteCount + 1)
+        let cappedBefore = try lease.checkActive(), capped = try expand(cappedAssistants.map { hit($0) }), cappedAfter = try lease.checkActive()
+        let cappedIDs = (0..<8).flatMap { [cappedAssistants[$0].id, cappedHumans[$0].id] }
+        checks["reverse_candidate_cap_interleaves_eight_pairs_and_reports_dropped_primary"] = capped.hits.map(\.eventID) == cappedIDs
+            && capped.hits.count == 16 && capped.audit["retained_primary_count"] as? Int == 8
+            && capped.audit["dropped_primary_count"] as? Int == 1 && capped.audit["added_neighbor_count"] as? Int == 8
+        checks["reverse_candidate_cap_never_reads_dropped_primary_or_neighbor"] = cappedAfter.charged.metadataRows - cappedBefore.charged.metadataRows == 32
+            && cappedAfter.charged.rawSourceBytes - cappedBefore.charged.rawSourceBytes == 8 * 2 * (cappedHumans[0].byteCount + 1)
+        let promotedCapBefore = try lease.checkActive(), promotedCap = try expand([hit(assistant)] + cappedAssistants.prefix(8).map { hit($0) } + [hit(human)]), promotedCapAfter = try lease.checkActive()
+        checks["reverse_tail_human_primary_promotion_survives_candidate_cap"] = promotedCap.hits.count == 16
+            && Array(promotedCap.hits.prefix(2)).map(\.eventID) == [assistant.id, human.id]
+            && promotedCap.audit["promoted_primary_count"] as? Int == 1 && promotedCap.audit["retained_primary_count"] as? Int == 9
+            && promotedCap.audit["dropped_primary_count"] as? Int == 1 && promotedCap.audit["added_neighbor_count"] as? Int == 7
+            && promotedCapAfter.charged.rawSourceBytes - promotedCapBefore.charged.rawSourceBytes == 7 * 2 * (cappedHumans[0].byteCount + 1)
+        let nestedBefore = try lease.checkActive(); _ = try expand([hit(assistant)], nested: true); let nestedAfter = try lease.checkActive()
+        checks["reverse_nested_composite_does_not_duplicate_operation_charge"] = nestedAfter.charged.memoryOperations == nestedBefore.charged.memoryOperations
+        let repeatedBefore = try lease.checkActive(); _ = try expand([hit(assistant)]); let repeatedAfter = try lease.checkActive()
+        checks["reverse_repeated_neighbor_reads_retain_original_debits"] = repeatedAfter.charged.rawSourceBytes - repeatedBefore.charged.rawSourceBytes == 2 * (human.byteCount + 1)
+        let futureBefore = try lease.checkActive()
+        do { _ = try expand([hit(future)]); checks["reverse_future_primary_refused_before_payload"] = false }
+        catch {
+            let now = try lease.checkActive()
+            checks["reverse_future_primary_refused_before_payload"] = error is MeteredRetrievalError
+                && now.charged.rawSourceBytes == futureBefore.charged.rawSourceBytes
+                && now.charged.metadataRows == futureBefore.charged.metadataRows + 1
+        }
+        do { _ = try store.precedingSourceReference(anchor: assistantReference, throughSequence: assistantReference.sequence - 1)
+            checks["reverse_metadata_helper_refuses_anchor_beyond_frontier"] = false }
+        catch { checks["reverse_metadata_helper_refuses_anchor_beyond_frontier"] = error is MemoryError }
+        var alteredReference = assistantReference; alteredReference.sourceTime = nil
+        do { _ = try store.precedingSourceReference(anchor: alteredReference, throughSequence: frontier)
+            checks["reverse_metadata_helper_refuses_changed_calendar_metadata"] = false }
+        catch { checks["reverse_metadata_helper_refuses_changed_calendar_metadata"] = error is MemoryError }
+        let foreignBefore = try lease.checkActive()
+        do { _ = try expand([hit(foreign)]); checks["reverse_foreign_project_primary_refused_before_debits"] = false }
+        catch { checks["reverse_foreign_project_primary_refused_before_debits"] = try error is MeteredRetrievalError
+            && lease.checkActive().charged == foreignBefore.charged }
+        let forgedScope = MemoryHit(eventID: foreign.id, conversationID: foreign.conversationID, projectID: project,
+            role: foreign.role, status: foreign.status, createdAt: foreign.createdAt, digest: foreign.digest,
+            totalBytes: foreign.byteCount, excerptOffset: 0, excerpt: foreign.text, sourceTime: foreign.sourceTime)
+        do { _ = try expand([forgedScope]); checks["reverse_forged_source_scope_refused_before_payload"] = false }
+        catch { checks["reverse_forged_source_scope_refused_before_payload"] = try error is MeteredRetrievalError
+            && lease.checkActive().charged.rawSourceBytes == foreignBefore.charged.rawSourceBytes }
+        let forgedDate = MemoryHit(eventID: assistant.id, conversationID: assistant.conversationID, projectID: project,
+            role: assistant.role, status: assistant.status, createdAt: assistant.createdAt, digest: assistant.digest,
+            totalBytes: assistant.byteCount, excerptOffset: 0, excerpt: assistant.text, sourceTime: nil)
+        let forgedDateBefore = try lease.checkActive()
+        do { _ = try expand([forgedDate]); checks["reverse_forged_primary_calendar_metadata_refused_before_payload"] = false }
+        catch { checks["reverse_forged_primary_calendar_metadata_refused_before_payload"] = try error is MeteredRetrievalError
+            && lease.checkActive().charged.rawSourceBytes == forgedDateBefore.charged.rawSourceBytes }
+        let forgedPromotion = MemoryHit(eventID: human.id, conversationID: human.conversationID, projectID: project,
+            role: human.role, status: human.status, createdAt: human.createdAt, digest: human.digest,
+            totalBytes: human.byteCount, excerptOffset: 0, excerpt: human.text, sourceTime: nil)
+        do { _ = try expand([hit(assistant), forgedPromotion]); checks["reverse_forged_future_primary_calendar_metadata_is_not_promoted"] = false }
+        catch { checks["reverse_forged_future_primary_calendar_metadata_is_not_promoted"] = error is MeteredRetrievalError }
+        var exhaustedLimits = EpisodeLimits(); exhaustedLimits.resources.rawSourceBytes = 0
+        let exhaustedID = UUID().uuidString
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "reverse-exhaustion-turn",
+            humanEventID: "reverse-exhaustion-request", episodeID: exhaustedID, text: "Synthetic exhausted reverse request",
+            limits: exhaustedLimits, clock: clock.now())
+        let exhaustedLease = EpisodeLease(ledger: store, episodeID: exhaustedID, clock: clock)
+        let exhaustedBefore = try exhaustedLease.checkActive()
+        do {
+            _ = try MeteredExchangeExpansion.expand(store: store, projectID: project, primaryHits: [hit(assistant)], sourceFrontier: frontier,
+                excludingSourceIDs: ExactSourceIDs([]), episodeLease: exhaustedLease, includePrecedingHuman: true)
+            checks["reverse_raw_exhaustion_preserves_prefunded_metadata_and_original_limits"] = false
+        } catch {
+            let now = try store.episodeReceipt(id: exhaustedID, clock: clock.now())
+            checks["reverse_raw_exhaustion_preserves_prefunded_metadata_and_original_limits"] = (error as? EpisodeBudgetError) == .exhausted
+                && now.charged.rawSourceBytes == exhaustedBefore.charged.rawSourceBytes
+                && now.charged.metadataRows - exhaustedBefore.charged.metadataRows == 4
+                && now.charged.memoryOperations - exhaustedBefore.charged.memoryOperations == 1 && now.limits == exhaustedLimits
+        }
+        _ = try lease.finish(reason: .cancelled)
+        let terminal = try store.episodeReceipt(id: episodeID, clock: clock.now())
+        do { _ = try expand([hit(assistant)]); checks["reverse_terminal_lease_cannot_renew_neighbor_budget"] = false }
+        catch { checks["reverse_terminal_lease_cannot_renew_neighbor_budget"] = try error is EpisodeBudgetError
+            && store.episodeReceipt(id: episodeID, clock: clock.now()).charged == terminal.charged }
         return checks
     }
 

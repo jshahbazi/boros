@@ -148,6 +148,7 @@ enum RetrievalStrategyChecks {
         checks.merge(try anchorSelectionChecks()) { _, latest in latest }
         checks.merge(try directTraceChecks()) { _, latest in latest }
         checks.merge(try semanticRangeChecks()) { _, latest in latest }
+        checks.merge(try precedingHumanChecks()) { _, latest in latest }
         return checks
     }
 
@@ -159,8 +160,8 @@ enum RetrievalStrategyChecks {
     }
 
     private enum FixtureCase: String, CaseIterable {
-        case hybridDefault, hybridExplicit, recentOnly, recentOnlyWithoutIndex, recentOnlyEnvelope
-        var strategy: ContextRetrievalStrategy { self == .hybridDefault || self == .hybridExplicit ? .hybrid : .recentOnly }
+        case hybridDefault, hybridExplicit, recentOnly, recentOnlyWithoutIndex, recentOnlyEnvelope, precedingHuman
+        var strategy: ContextRetrievalStrategy { self == .hybridDefault || self == .hybridExplicit || self == .precedingHuman ? .hybrid : .recentOnly }
     }
     private final class IntegrationSuite {
         let baseURL: String, completion: ([String: Bool]) -> Void
@@ -181,7 +182,7 @@ enum RetrievalStrategyChecks {
     private final class IntegrationAttempt {
         let kind: FixtureCase, directory: URL, store: MemoryStore, chat: StoredConversation
         let clock = Clock(), encoder = Encoder(), lease: EpisodeLease
-        let index: SemanticIndex, recentSources: [MemoryEvent], archivedSource: MemoryEvent, callsAfterBuild: Int
+        let index: SemanticIndex, recentSources: [MemoryEvent], archivedSource: MemoryEvent, archivedHuman: MemoryEvent?, callsAfterBuild: Int
         let prompt = "fixturePipeline Where is strategyneedle? 日本語 e\u{301}"
         let currentID = "strategy-component-current", completion: ([String: Bool]) -> Void
         var settings = GenerationSettings(), operation: ComponentContextPreparationOperation?
@@ -191,7 +192,9 @@ enum RetrievalStrategyChecks {
             store = try MemoryStore(directory: directory)
             chat = try store.createConversation(projectID: "synthetic-strategy-components", title: "Synthetic strategy preparation")
             let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic strategy evidence")
-            archivedSource = try append(store, archive.id, "strategy-component-archive", "strategyneedle archived original source")
+            archivedHuman = kind == .precedingHuman ? try append(store, archive.id, "strategy-component-human", "Synthetic original human anchor café\0", status: .partial) : nil
+            archivedSource = try append(store, archive.id, "strategy-component-archive", "strategyneedle archived original source",
+                role: kind == .precedingHuman ? .assistant : .human)
             var recent: [MemoryEvent] = []
             for sourceID in ["strategy-component-old-0", "strategy-component-old-1", "strategy-component-é", "strategy-component-e\u{301}"] {
                 recent.append(try append(store, chat.id, sourceID, "Synthetic recent source " + String(repeating: "r", count: 2500),
@@ -271,7 +274,15 @@ enum RetrievalStrategyChecks {
                         && (try count(store, "SELECT count(*) FROM episode_work WHERE kind='queryEmbedding'")) == 1
                         && (try mode(prepared.snapshot)) == "hybrid"
                     checks[prefix + "_trace_retains_original_query_and_candidates_after_actual_reduction"] = try validTrace(prepared.snapshot,
-                        query: "fixturepipeline strategyneedle 日本語 e\u{301}", indices: [0, 3, 4, 5], originals: recentSources + [archivedSource])
+                        query: "fixturepipeline strategyneedle 日本語 e\u{301}", indices: [0, 3, 4, 5], originals: recentSources + [archivedSource] + (archivedHuman.map { [$0] } ?? []))
+                    if let archivedHuman {
+                        checks[prefix + "_counted_preceding_human_and_assistant_both_delivered"] = prepared.snapshot.evidence.contains { $0.eventID == archivedSource.id }
+                            && prepared.snapshot.evidence.contains { $0.eventID == archivedHuman.id && $0.excerpt.utf8.elementsEqual(archivedHuman.text.utf8)
+                                && $0.status == .partial } && proof.evidence.tokens > 0
+                        let expansion = try object(prepared.snapshot.retrievalAuditJSON!)["exchange_expansion"] as? [String: Any]
+                        checks[prefix + "_counted_expansion_direction_remains_in_admission_audit"] = expansion?["version"] as? String == MeteredExchangeExpansion.adjacentVersion
+                            && (expansion?["decisions"] as? [[String: Any]])?.contains { $0["direction"] as? String == "preceding_human" } == true
+                    }
                     let delivered = try object(prepared.snapshot.deliveryAudit())["retrieval"] as? [String: Any]
                     checks[prefix + "_delivered_trace_matches_final_snapshot_audit"] = try canonical(delivered?["selection_trace"] ?? NSNull())
                         == canonical(trace(prepared.snapshot))
@@ -323,6 +334,51 @@ enum RetrievalStrategyChecks {
             calls += 1; lastInput = Data(text.utf8); try willEncode?(); return .vector([1, 0, 0])
         }
     }
+    private static func precedingHumanChecks() throws -> [String: Bool] {
+        let directory = try fixtureDirectory(prefix: "boros-preceding-strategy-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory), project = "synthetic-preceding-strategy"
+        let archive = try store.createConversation(projectID: project, title: "Synthetic archived exchange")
+        let chat = try store.createConversation(projectID: project, title: "Synthetic current request")
+        let date = EventSourceTime(value: "2023-05-30", precision: "day", timezone: "unspecified",
+            sourceSHA256: String(repeating: "b", count: 64), locator: "/synthetic/session/date", originalValue: "2023-05-30")
+        let human = try store.append(conversationID: archive.id, role: .human, text: "Synthetic original human café e\u{301}\0",
+            status: .partial, turnID: "preceding-original-human-turn", eventID: "preceding-original-human", sourceTime: date)
+        let assistant = try append(store, archive.id, "preceding-selected-assistant", "adjacencyneedle synthetic assistant reply", role: .assistant)
+        let prompt = "adjacencyneedle", current = "preceding-current", episode = UUID().uuidString, clock = Clock()
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "preceding-current-turn",
+            humanEventID: current, episodeID: episode, text: prompt, limits: EpisodeLimits(), clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: episode, clock: clock)
+        let recent = try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
+            prompt: prompt, system: "Synthetic host", excludingEventID: current, episodeLease: lease)
+        let before = try lease.checkActive()
+        let recalled = try ChatContextPreparation.prepareEvidence(recent: recent, store: store, conversationID: chat.id,
+            projectID: project, prompt: prompt, excludingEventID: current, episodeLease: lease)
+        let after = try lease.checkActive()
+        let audit = try object(recalled.retrievalAuditJSON!), expansion = audit["exchange_expansion"] as? [String: Any]
+        let beforeRecentOnly = try lease.checkActive()
+        let onlyRecent = try ChatContextPreparation.prepareEvidence(recent: recent, store: store, conversationID: chat.id,
+            projectID: project, prompt: prompt, excludingEventID: current, retrievalStrategy: .recentOnly, episodeLease: lease)
+        let afterRecentOnly = try lease.checkActive()
+        _ = try lease.finish(reason: .cancelled)
+        return [
+            "strategy_shared_lexical_fallback_recovers_preceding_human_without_query_match": recalled.evidence.map(\.eventID) == [assistant.id, human.id],
+            "strategy_preceding_human_preserves_exact_bytes_status_time_and_mandatory_prompt": recalled.evidence.last?.excerpt.utf8.elementsEqual(human.text.utf8) == true
+                && recalled.evidence.last?.sourceTime == date && recalled.evidence.last?.status == .partial
+                && recalled.messages.last?.content == prompt
+                && recalled.selectionBinding?.projectID == recent.selectionBinding?.projectID
+                && recalled.selectionBinding?.conversationID == recent.selectionBinding?.conversationID
+                && recalled.selectionBinding?.acceptedHumanEventID == current
+                && recalled.selectionBinding?.mandatoryMessagesSHA256 == recent.selectionBinding?.mandatoryMessagesSHA256
+                && recalled.selectionBinding?.version == recent.selectionBinding?.version,
+            "strategy_adjacent_expansion_is_audited_and_funded_under_original_lease": expansion?["version"] as? String == MeteredExchangeExpansion.adjacentVersion
+                && expansion?["added_neighbor_count"] as? Int == 1 && after.id == before.id && after.limits == before.limits
+                && after.charged.rawSourceBytes >= before.charged.rawSourceBytes + 2 * (human.byteCount + 1),
+            "strategy_recent_only_still_avoids_preceding_human_source_work": onlyRecent.evidence.isEmpty
+                && sourceWorkEqual(beforeRecentOnly.charged, afterRecentOnly.charged)
+        ]
+    }
+
     private static func semanticRangeChecks() throws -> [String: Bool] {
         let directory = try fixtureDirectory(prefix: "boros-semantic-range-")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -522,7 +578,7 @@ enum RetrievalStrategyChecks {
             "strategy_anchor_and_neighbor_work_charged_to_original_episode": after.id == episodeID
                 && after.charged.memoryOperations == before.charged.memoryOperations + 1
                 && after.charged.rawSourceBytes > before.charged.rawSourceBytes && after.charged.metadataRows > before.charged.metadataRows,
-            "strategy_adjacent_selection_audit_reports_two_bounded_additions": expanded["version"] as? String == "following-assistant-prefix-v2"
+            "strategy_adjacent_selection_audit_reports_two_bounded_additions": expanded["version"] as? String == MeteredExchangeExpansion.adjacentVersion
                 && expanded["added_neighbor_count"] as? Int == 2 && expanded["dropped_primary_count"] as? Int == 0,
             "strategy_quoted_query_trace_binds_selected_originals": try validTrace(selected,
                 query: "rivet cobalt lattice thimble quote exactly first nonempty", indices: [10, 13, 11, 14, 0, 1, 2, 3],

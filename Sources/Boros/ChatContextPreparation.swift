@@ -147,7 +147,7 @@ enum ChatContextPreparation {
                     episodeLease: episodeLease, operationIsNested: true)
                 let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
                     primaryHits: completed.hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
-                    episodeLease: episodeLease, operationIsNested: true)
+                    episodeLease: episodeLease, operationIsNested: true, includePrecedingHuman: true)
                 var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
                     projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
                     episodeLease: episodeLease, operationIsNested: true)
@@ -192,7 +192,7 @@ enum ChatContextPreparation {
                 episodeLease: episodeLease, operationIsNested: true)
             let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
                 primaryHits: completed.hits, sourceFrontier: report.manifest.sourceFrontier, excludingSourceIDs: excluded,
-                episodeLease: episodeLease, operationIsNested: true)
+                episodeLease: episodeLease, operationIsNested: true, includePrecedingHuman: true)
             var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
                 projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
                 episodeLease: episodeLease, operationIsNested: true)
