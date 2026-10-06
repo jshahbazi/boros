@@ -38,7 +38,8 @@ def witness_eligibility(native, item, pack, document, operational):
     evidence_valid = (isinstance(witness, dict)
         and native.get("witness_mode") == controls.VERSION and item.get("witness_mode") == controls.VERSION
         and native.get("input_sha256") == e.digest(canonical_json(document))
-        and native.get("public_projection_sha256") == metadata["projection_sha256"]
+        and native.get("public_projection_sha256") == e.digest(canonical_json(
+            {key: value for key, value in document.items() if key != "configuration"}))
         and native.get("native_configuration_sha256") == native_configuration_pin
         and witness.get("version") == controls.VALIDATION_VERSION
         and type(witness.get("declared_source_count")) is int
@@ -60,6 +61,8 @@ def witness_eligibility(native, item, pack, document, operational):
 
 def score_native(native, directory, pack, document):
     controls.validate_pack(pack)
+    if canonical_json(document) != canonical_json(controls.runner_input(pack, document["configuration"])):
+        raise e.EvaluationError("evidence control runner document mismatch")
     if native.get("input_sha256") is not None and native["input_sha256"] != e.digest(canonical_json(document)):
         raise e.EvaluationError("evidence control runner input provenance mismatch")
     attempts = e.score_driver_report(native, directory, pack, document["attempts"], developer.score)
@@ -88,14 +91,14 @@ def summarize(attempts):
         "overall_control_success_rate": verified_successes / len(attempts) if attempts else None}
 
 
-def run(source, output, *, timeout=10800, format_instructions=False):
+def run(source, output, *, timeout=10800, format_instructions=False, json_object=False):
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise e.EvaluationError("report already exists")
     if type(timeout) is not int or not 60 <= timeout <= 21600:
         raise e.EvaluationError("invalid runner timeout")
     packs = controls.prepare(source)
-    configuration = controls.selected_configuration(format_instructions=format_instructions)
+    configuration = controls.selected_configuration(format_instructions=format_instructions, json_object=json_object)
     configuration_pin, native_configuration_pin, amendment = controls.configuration_pins(configuration)
     documents = [controls.runner_input(pack, configuration) for pack in packs]
     pack_annotations = [controls.metadata(pack) for pack in packs]
@@ -106,6 +109,9 @@ def run(source, output, *, timeout=10800, format_instructions=False):
                    "packs": pack_annotations}
     if amendment is not None:
         declaration["development_amendment"] = amendment
+    if json_object:
+        declaration["runner_document_version"] = 3
+        declaration["runner_projection_sha256"] = list(controls.JSON_OBJECT_PROJECTION_SHA256)
     declaration_bytes = canonical_json(declaration)
     # All source/projection/configuration/oracle pins are frozen before compile.
     with tempfile.TemporaryDirectory(prefix="boros-evidence-controls-") as temporary:
@@ -127,6 +133,8 @@ def run(source, output, *, timeout=10800, format_instructions=False):
             results.append({"pack": pack_annotations[index], "attempts": attempts,
                 "pack_metadata_sha256": e.digest(canonical_json(pack_annotations[index])),
                 "driver": e.native_metadata(native), "runner_input_sha256": e.digest(canonical_json(document))})
+            if json_object:
+                results[-1]["runner_projection_sha256"] = controls.JSON_OBJECT_PROJECTION_SHA256[index]
         attempts = [attempt for result in results for attempt in result["attempts"]]
         report = {"evidence_control_evaluation_version": 1, "witness_mode": controls.VERSION,
             "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -153,7 +161,10 @@ def run(source, output, *, timeout=10800, format_instructions=False):
                 "controlled evidence availability does not establish general recall, model-instance identity or economics"]}
         if amendment is not None:
             report["development_amendment"] = amendment
-            report["limitations"].append("generic JSON output instruction amendment changes only System text; original control and paired inputs remain frozen")
+            report["limitations"].append("generic JSON output instruction amendment changes only System text; original control and paired inputs remain frozen"
+                if format_instructions else "provider JSON-object amendment adds a counted server format instruction and decoder constraint; response validity and exact answer still require scoring")
+        if json_object:
+            report["runner_document_version"] = 3
         output.parent.mkdir(parents=True, exist_ok=True)
         e.private_write(output, canonical_json(report) + b"\n")
     return report
@@ -164,11 +175,15 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=10800)
-    parser.add_argument("--format-instructions", action="store_true",
+    amendment_options = parser.add_mutually_exclusive_group()
+    amendment_options.add_argument("--format-instructions", action="store_true",
                         help="Separate pinned System-only JSON format instruction amendment")
+    amendment_options.add_argument("--json-object", action="store_true",
+                        help="Separate pinned provider JSON-object amendment with original System text")
     args = parser.parse_args()
     try:
-        report = run(args.source, args.output, timeout=args.timeout, format_instructions=args.format_instructions)
+        report = run(args.source, args.output, timeout=args.timeout,
+                     format_instructions=args.format_instructions, json_object=args.json_object)
         print(json.dumps({"declared_attempts": report["summary"]["declared_attempts"],
                           "five_category_quality_gate": "inconclusive"}, sort_keys=True))
         return 0

@@ -280,7 +280,8 @@ class NativeContracts(unittest.TestCase):
                     if messages and messages[0].get("role") == "system" and messages[0].get("content", "").startswith(saved_instructions + "\n\n"):
                         observed["saved_instruction_answers"] += 1
                     observed["prior_overlay_leaked"] |= any("controlledwronganswersentinel" in message.get("content", "") for message in body.get("messages", []))
-                    chunks = [{"model": fixture.MODEL, "choices": [{"delta": {"content": "controlledwronganswersentinel"}, "finish_reason": None}]},
+                    output = '{"synthetic":true}' if body.get("response_format") == {"type": "json_object"} and body.get("seed") == 43 else "controlledwronganswersentinel"
+                    chunks = [{"model": fixture.MODEL, "choices": [{"delta": {"content": output}, "finish_reason": None}]},
                               {"model": fixture.MODEL, "choices": [{"delta": {}, "finish_reason": "stop"}],
                                "usage": {"prompt_tokens": count, "completion_tokens": 1, "total_tokens": count + 1}}]
                     encoded = b"".join(b"data: " + json.dumps(chunk).encode() + b"\n\n" for chunk in chunks) + b"data: [DONE]\n\n"
@@ -320,7 +321,7 @@ class NativeContracts(unittest.TestCase):
             self.assertTrue(item["episode"]["charged"]["httpAttempts"] > 0)
             self.assertTrue(item["episode"]["charged"]["modelCalls"] >= 2)
 
-    def test_native_shared_gui_send_and_stop(self):
+    def test_native_shared_gui_send_stop_and_json_output(self):
         process = subprocess.run([str(NATIVE_BINARY), "--ui-shared-answer-integration-test",
                                   f"http://127.0.0.1:{self.server.server_port}/v1"],
                                  capture_output=True, timeout=100,
@@ -330,9 +331,17 @@ class NativeContracts(unittest.TestCase):
         self.assertTrue(all(type(value) is bool and value for value in checks.values()))
 
         self.assertTrue(checks.get("gui_shared_saved_instructions_restored_at_launch") is True)
-        for outcome in ("success", "stop"):
-            self.assertTrue(checks.get(f"gui_shared_{outcome}_durable_v3_original_input_proof_revalidated") is True)
-        self.assertTrue(self.observed["saved_instruction_answers"] == 2)
+        for outcome in ("success", "stop", "json_success", "json_invalid"):
+            for contract in ("durable_v3_original_input_proof_revalidated", "frozen_output_option_matches_setting",
+                             "capture_preserves_provider_bytes", "json_requires_frozen_thinking_off",
+                             "original_answer_work_charges_counted_input",
+                             "output_preference_saved_without_instruction_changes",
+                             "invalid_json_warning_matches_captured_output", "operational_outcome"):
+                self.assertTrue(checks.get(f"gui_shared_{outcome}_{contract}") is True)
+        for outcome in ("json_success", "json_invalid"):
+            self.assertTrue(checks.get(f"gui_shared_{outcome}_captured_object_validity") is True)
+            self.assertTrue(checks.get(f"gui_shared_{outcome}_captured_provider_output_unchanged") is True)
+        self.assertTrue(self.observed["saved_instruction_answers"] == 4)
         self.assertTrue(self.saved_instructions.encode() not in process.stdout + process.stderr)
 
     def test_native_sufficient_evidence_control_contracts(self):
@@ -354,6 +363,12 @@ class NativeContracts(unittest.TestCase):
                     "witness_contract_format_configuration_requires_separate_pin",
                     "witness_contract_original_configuration_preserved_with_amendment",
                     "witness_contract_format_configuration_other_settings_rejected",
+                    "witness_contract_json_object_version_three_accepted",
+                    "witness_contract_json_object_field_rejected_in_version_two",
+                    "witness_contract_version_three_requires_format",
+                    "witness_json_complete_actual_v3_source_body_count_revalidated",
+                    "witness_json_complete_actual_frozen_request_mode",
+                    "witness_json_complete_captured_receipt_archive_restore_preserved",
                     "witness_complete_actual_v3_source_body_count_revalidated",
                     "witness_reduced_original_pack_outcome_explicit",
                     "witness_reduced_entire_original_union_tamper_rejected",

@@ -13,15 +13,24 @@ MODES = ["good", "http-error", "sse-error", "unfinished", "length", "redirect", 
 ADMISSION_MODES = ["template-mismatch", "version-mismatch", "model-mismatch", "count-mismatch", "bad-tokenizer", "admission-redirect", "admission-cancel",
                    "calibration-stop", "calibration-zero", "calibration-negative", "calibration-missing", "calibration-excess",
                    "calibration-wrong-model-missing", "calibration-wrong-model-invalid",
-                   "component-model-drift", "component-capability-drift", "component-template-drift", "component-version-drift"]
+                   "component-model-drift", "component-capability-drift", "component-template-drift", "component-version-drift",
+                   "json-capability-missing"]
 METADATA_LOCK = threading.Lock()
 MODEL_READS = {}
 CREATED_COUNTER = 1770000000
 LOW = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration."
+JSON_OBJECT_INSTRUCTION = "Respond with valid JSON only. No other text, no markdown fences (no ``` or ```json), no explanation. Begin your response with `{` or `[`."
 
 
 def render(body):
-    messages = [m for m in body["messages"] if m["content"] != ""]
+    messages = [dict(m) for m in body["messages"] if m["content"] != ""]
+    if "response_format" in body:
+        if body["response_format"] != {"type": "json_object"}:
+            raise ValueError("unsupported synthetic response format")
+        if messages[0]["role"] == "system":
+            messages[0]["content"] += "\n\n" + JSON_OBJECT_INSTRUCTION
+        else:
+            messages.insert(0, {"role": "system", "content": JSON_OBJECT_INSTRUCTION})
     system = messages[0]["content"].strip(" \t\r\n\v\f") if messages[0]["role"] == "system" else ""
     instruction = LOW if body["enable_thinking"] else ""
     text = ""
@@ -104,7 +113,7 @@ class Fixture(BaseHTTPRequestHandler):
             self.json_response({"data": [{"id": "wrong-model" if mode == "model-mismatch" or (drift and mode == "component-model-drift") else MODEL,
                 "owned_by": "mlx-serve", "loaded": True, "state": "ready", "created": created,
                 "context_length": 32768, "max_model_len": 32768,
-                "capabilities": ["chat"] if drift and mode == "component-capability-drift" else ["chat", "streaming"],
+                "capabilities": ["chat", "streaming"] if mode == "json-capability-missing" else (["chat"] if drift and mode == "component-capability-drift" else ["chat", "streaming", "json_schema"]),
                 "input_modalities": ["text"],
                 "meta": {"engine": "mlx", "architecture": "qwen4_exp"}}]})
         elif urlsplit(self.path).path == "/props":

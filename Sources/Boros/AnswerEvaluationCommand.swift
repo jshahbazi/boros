@@ -37,6 +37,18 @@ enum AnswerEvaluationCommand {
     /// Separate system-only development amendment; original settings and
     /// projection pins remain accepted exactly as declared.
     static let formatInstructionConfigurationSHA256 = "f13e87eb29ce2ecf88746293d3f01d74841394dc0a0aca3d2e9d5747dda53361"
+    static let jsonObjectConfigurationSHA256 = "8aef45d2a8c7d20b8ee669606df5094f9d4ec960f82496841e8680dd433167cd"
+    static let jsonObjectCorpusProjectionSHA256: Set<String> = [
+        "7eaa4b959959b0afcb5f9895634e552eae1bac062e3100ab1f0d2d8d2653bdcb",
+        "ab841b6f5611ed3df034b384ec440a23c46e9968ffecf61482eea572dce97ade",
+        "52150ae4979989ebf12a9628a6ad0aecd2960150f5b15e897c85c0ba2d02c32e",
+        "42cdff1f9aa72c7b2c7ce8724d26c6397038b9288e354cb5f1346b5d80e2f790",
+        "fa40c8a36239be193de2f88bc80b10ef54a1eb1b476b9d8fad58ff8d2d9fb2b7",
+        "eaa7aa2b33c5c51acbb42f805e82709ff7409a72acaa36702cdcc5c66770a835",
+        "5238c51f6ec58ad3908a3654ae0fbe1f0a373dd13bec9ff040338459cb138218",
+        "09316ffa9fc3f26d2dc81acad2eb7ede0c1c1c9b12dd678e6c80d38ed9c8230c",
+        "eedf2f3ca33017e90b1ad449be99ef50bddba4f792b5f9635f44001151cbccdb"
+    ]
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
     private struct Event: Decodable {
@@ -65,12 +77,14 @@ enum AnswerEvaluationCommand {
         let maximum_output: Int
         let context_limit: Int
         let safety_tokens: Int
+        let response_format: String?
         var settings: GenerationSettings {
             var value = GenerationSettings()
             value.profile = .customLocal; value.endpointURL = endpoint; value.endpointModel = model
             value.system = system; value.temperature = temperature; value.seed = seed
             value.thinkingEnabled = thinking; value.maximumOutput = maximum_output
             value.endpointContextLimit = context_limit; value.endpointSafetyTokens = safety_tokens
+            value.endpointJSONOutput = response_format == "json_object"
             return value
         }
     }
@@ -114,10 +128,13 @@ enum AnswerEvaluationCommand {
     private struct InputPins {
         let ordinary: Set<String>, witness: Set<String>, witnessConfiguration: String
         var formatConfiguration: String? = nil
+        var jsonWitness: Set<String> = []
+        var jsonConfiguration: String? = nil
         static var production: InputPins {
             InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
                 witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256,
-                formatConfiguration: formatInstructionConfigurationSHA256)
+                formatConfiguration: formatInstructionConfigurationSHA256,
+                jsonWitness: jsonObjectCorpusProjectionSHA256, jsonConfiguration: jsonObjectConfigurationSHA256)
         }
     }
     private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
@@ -128,22 +145,28 @@ enum AnswerEvaluationCommand {
               events.allSatisfy({ Set($0.keys) == ["id", "project_id", "conversation_key", "role", "status", "text"] }),
               let attempts = root["attempts"] as? [[String: Any]],
               attempts.allSatisfy({ Set($0.keys) == ["probe_id", "project_id", "conversation_key", "prompt", "strategy", "replicate"] }),
-              let configuration = root["configuration"] as? [String: Any],
-              Set(configuration.keys) == ["endpoint", "model", "system", "temperature", "seed", "thinking", "maximum_output", "context_limit", "safety_tokens"] else { throw Failure.invalid }
+              let configuration = root["configuration"] as? [String: Any] else { throw Failure.invalid }
         var publicProjection = root
         publicProjection.removeValue(forKey: "configuration")
         let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
             options: [.sortedKeys, .withoutEscapingSlashes]))
         guard let mode = root["version"] as? NSNumber, CFGetTypeID(mode) != CFBooleanGetTypeID(),
-              mode.doubleValue == Double(mode.intValue), mode.intValue == 1 || mode.intValue == 2 else { throw Failure.invalid }
+              mode.doubleValue == Double(mode.intValue), (1...3).contains(mode.intValue) else { throw Failure.invalid }
+        let baseKeys: Set<String> = ["endpoint", "model", "system", "temperature", "seed", "thinking", "maximum_output", "context_limit", "safety_tokens"]
+        guard Set(configuration.keys) == (mode.intValue == 3 ? baseKeys.union(["response_format"]) : baseKeys),
+              mode.intValue != 3 || configuration["response_format"] as? String == "json_object" else { throw Failure.invalid }
         if mode.intValue == 1 {
             guard pins.ordinary.contains(projectionDigest) else { throw Failure.invalid }
-        } else {
+        } else if mode.intValue == 2 {
             let configurationDigest = digest(try JSONSerialization.data(withJSONObject: configuration,
                 options: [.sortedKeys, .withoutEscapingSlashes]))
             guard pins.witness.contains(projectionDigest),
                   configurationDigest == pins.witnessConfiguration
                     || configurationDigest == pins.formatConfiguration else { throw Failure.invalid }
+        } else {
+            guard pins.jsonWitness.contains(projectionDigest),
+                  digest(try JSONSerialization.data(withJSONObject: configuration,
+                    options: [.sortedKeys, .withoutEscapingSlashes])) == pins.jsonConfiguration else { throw Failure.invalid }
         }
         let value = try JSONDecoder().decode(Document.self, from: bytes)
         guard value.split == "development", identifier(value.history_id),
@@ -163,7 +186,7 @@ enum AnswerEvaluationCommand {
                   (0...100).contains(attempt.replicate),
                   attemptsSeen.insert("\(attempt.probe_id)|\(attempt.strategy.rawValue)|\(attempt.replicate)").inserted else { throw Failure.invalid }
         }
-        if value.version == 2 {
+        if value.version >= 2 {
             guard value.attempts.count == 1, let attempt = value.attempts.first,
                   attempt.strategy == .recentOnly, attempt.replicate == 0,
                   value.events.count == 2 || value.events.count == 4,
@@ -346,7 +369,7 @@ enum AnswerEvaluationCommand {
                             }
                             item["delivered_ranges"] = ranges
                         }
-                        if self.document.version == 2 {
+                        if self.document.version >= 2 {
                             item["witness_validation"] = validateWitness(document: self.document, completion: completion,
                                 directory: restored, conversationID: self.conversations[key(attempt.project_id, attempt.conversation_key)]!)
                         }
@@ -396,7 +419,7 @@ enum AnswerEvaluationCommand {
             report.append(witnessMetadata(item))
         }
         private func witnessMetadata(_ item: [String: Any]) -> [String: Any] {
-            guard document.version == 2 else { return item }
+            guard document.version >= 2 else { return item }
             var result = item
             result["witness_mode"] = witnessMode
             if result["witness_validation"] == nil {
@@ -434,11 +457,12 @@ enum AnswerEvaluationCommand {
                         "context_limit": c.context_limit, "safety_tokens": c.safety_tokens,
                         "episode_limits": configuration, "background_limits": try object(BackgroundIndexLimits.development)],
                     "unknowns": ["apple_input_tokens", "local_billed_cost", "first_useful_answer"]]
-                if document.version == 2 {
+                if document.version >= 2 {
                     value["witness_mode"] = witnessMode
-                    let frozenConfiguration: [String: Any] = ["endpoint": c.endpoint, "model": c.model,
+                    var frozenConfiguration: [String: Any] = ["endpoint": c.endpoint, "model": c.model,
                         "system": c.system, "temperature": c.temperature, "seed": c.seed, "thinking": c.thinking,
                         "maximum_output": c.maximum_output, "context_limit": c.context_limit, "safety_tokens": c.safety_tokens]
+                    if let format = c.response_format { frozenConfiguration["response_format"] = format }
                     value["native_configuration_sha256"] = digest(try JSONSerialization.data(withJSONObject: frozenConfiguration,
                         options: [.sortedKeys, .withoutEscapingSlashes]))
                 }
@@ -714,10 +738,10 @@ extension AnswerEvaluationCommand {
         catch { completion(["witness_contract_fixture_started": false]) }
     }
 
-    private static func witnessFixture(baseURL: String, large: Bool = false) -> [String: Any] {
+    private static func witnessFixture(baseURL: String, large: Bool = false, json: Bool = false) -> [String: Any] {
         let texts = large ? (0..<4).map { "Public synthetic source \($0) " + String(repeating: "x", count: 5000) }
             : ["Public synthetic decision café e\u{301}.", "Public synthetic assistant decision κ.\r\n"]
-        return ["version": 2, "split": "development", "history_id": "synthetic-witness-evidence-control",
+        var root: [String: Any] = ["version": 2, "split": "development", "history_id": "synthetic-witness-evidence-control",
             "events": texts.enumerated().map { index, text in
                 ["id": "synthetic-witness-source-\(index)", "project_id": "synthetic-witness-project",
                  "conversation_key": "synthetic-witness-chat", "role": index % 2 == 0 ? "user" : "assistant",
@@ -728,13 +752,25 @@ extension AnswerEvaluationCommand {
             "configuration": ["endpoint": baseURL, "model": Qwen38TextRendering.modelID,
                 "system": "Use complete public synthetic sources and exact citations.", "temperature": 0,
                 "seed": 42, "thinking": false, "maximum_output": 64, "context_limit": 32768, "safety_tokens": 256]]
+        if json {
+            root["version"] = 3
+            var configuration = root["configuration"] as! [String: Any]
+            configuration["response_format"] = "json_object"
+            root["configuration"] = configuration
+        }
+        return root
     }
     private static func witnessFixtureBytes(_ root: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .withoutEscapingSlashes])
     }
     private static func witnessFixturePins(_ root: [String: Any], ordinary: Set<String> = []) throws -> InputPins {
-        InputPins(ordinary: ordinary, witness: [try projectionSHA256(witnessFixtureBytes(root))],
-            witnessConfiguration: digest(try witnessFixtureBytes(root["configuration"] as! [String: Any])))
+        let projection = try projectionSHA256(witnessFixtureBytes(root))
+        let configuration = digest(try witnessFixtureBytes(root["configuration"] as! [String: Any]))
+        if root["version"] as? Int == 3 {
+            return InputPins(ordinary: ordinary, witness: [], witnessConfiguration: witnessConfigurationSHA256,
+                jsonWitness: [projection], jsonConfiguration: configuration)
+        }
+        return InputPins(ordinary: ordinary, witness: [projection], witnessConfiguration: configuration)
     }
     private static func witnessDecodeChecks(baseURL: String) throws -> [String: Bool] {
         let root = witnessFixture(baseURL: baseURL), bytes = try witnessFixtureBytes(root), pins = try witnessFixturePins(root)
@@ -748,6 +784,20 @@ extension AnswerEvaluationCommand {
             do { _ = try decode(witnessFixtureBytes(value), pins: selected); return false } catch { return true }
         }
         checks["witness_contract_synthetic_pack_not_production_authority"] = refused(root, using: .production)
+        let jsonRoot = witnessFixture(baseURL: baseURL, json: true)
+        let jsonPins = try witnessFixturePins(jsonRoot)
+        checks["witness_contract_json_object_version_three_accepted"] = try decode(witnessFixtureBytes(jsonRoot), pins: jsonPins).configuration.settings.endpointJSONOutput
+        checks["witness_contract_json_object_original_pins_reject"] = refused(jsonRoot, using: pins)
+        for (name, value) in [("schema", "json_schema" as Any), ("unknown", "other" as Any),
+                               ("null", NSNull() as Any), ("boolean", true as Any)] {
+            var invalidRoot = jsonRoot; var invalidConfiguration = jsonRoot["configuration"] as! [String: Any]
+            invalidConfiguration["response_format"] = value; invalidRoot["configuration"] = invalidConfiguration
+            checks["witness_contract_json_object_invalid_format_\(name)_rejected"] = refused(invalidRoot, using: try witnessFixturePins(invalidRoot))
+        }
+        var legacyFormat = jsonRoot; legacyFormat["version"] = 2
+        checks["witness_contract_json_object_field_rejected_in_version_two"] = refused(legacyFormat, using: try witnessFixturePins(legacyFormat))
+        var unformattedV3 = root; unformattedV3["version"] = 3
+        checks["witness_contract_version_three_requires_format"] = refused(unformattedV3, using: try witnessFixturePins(unformattedV3))
         var formatRoot = root
         var formatConfiguration = root["configuration"] as! [String: Any]
         formatConfiguration["system"] = "Follow the public synthetic requested JSON structure."
@@ -782,7 +832,7 @@ extension AnswerEvaluationCommand {
             var rows = changed["events"] as! [[String: Any]], tries = changed["attempts"] as! [[String: Any]]
             switch name {
             case "boolean_version": changed["version"] = true
-            case "unsupported_version": changed["version"] = 3
+            case "unsupported_version": changed["version"] = 4
             case "hybrid": tries[0]["strategy"] = "hybrid"
             case "replicate": tries[0]["replicate"] = 1
             case "extra_attempt": var extra = tries[0]; extra["probe_id"] = "synthetic-other-probe"; tries.append(extra)
@@ -811,7 +861,7 @@ extension AnswerEvaluationCommand {
 
     private final class WitnessCheckSuite {
         let baseURL: String, completion: ([String: Bool]) -> Void
-        var checks: [String: Bool], cases = ["complete", "reduced", "stopped"]
+        var checks: [String: Bool], cases = ["complete", "reduced", "stopped", "json_complete"]
         var current: WitnessCheckAttempt?
         init(baseURL: String, checks: [String: Bool], completion: @escaping ([String: Bool]) -> Void) {
             self.baseURL = baseURL; self.checks = checks; self.completion = completion
@@ -836,7 +886,7 @@ extension AnswerEvaluationCommand {
         var coordinator: AnswerAttemptCoordinator?
         init(baseURL: String, kind: String, completion: @escaping ([String: Bool]) -> Void) throws {
             self.kind = kind; self.completion = completion
-            let root = witnessFixture(baseURL: baseURL, large: kind == "reduced")
+            let root = witnessFixture(baseURL: baseURL, large: kind == "reduced", json: kind == "json_complete")
             document = try decode(witnessFixtureBytes(root), pins: witnessFixturePins(root))
             guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.io }
             let path = String(cString: resolved); free(resolved)
@@ -879,10 +929,26 @@ extension AnswerEvaluationCommand {
                 && (kind == "stopped" ? result.captureStatus == .cancelled : result.captureStatus == .complete)
             do {
                 let originalCharge = try store.episodeReceipt(id: result.identifiers.episodeID, clock: SystemEpisodeClock().now()).charged
+                if kind == "json_complete" {
+                    guard let original = try store.invocation(id: result.identifiers.invocationID),
+                          let request = try JSONSerialization.jsonObject(with: original.requestBody) as? [String: Any] else { throw Failure.invalid }
+                    checks[prefix + "actual_frozen_request_mode"] = (request["response_format"] as? [String: String]) == ["type": "json_object"]
+                    let savedArchive = directory.appendingPathComponent("captured-archive")
+                    let savedRestore = directory.appendingPathComponent("captured-restore")
+                    _ = try BackupArchive.create(from: store, at: savedArchive)
+                    _ = try BackupArchive.restore(from: savedArchive, to: savedRestore, authority: .unmanagedNoDeletion)
+                    let reopened = try MemoryStore(directory: savedRestore)
+                    let restoredInvocation = try reopened.invocation(id: result.identifiers.invocationID)
+                    let restoredCharge = try reopened.episodeReceipt(id: result.identifiers.episodeID, clock: SystemEpisodeClock().now()).charged
+                    checks[prefix + "captured_receipt_archive_restore_preserved"] = restoredInvocation?.requestBody == original.requestBody
+                        && restoredInvocation?.admissionJSON == original.admissionJSON
+                        && restoredInvocation?.finalStatus == original.finalStatus
+                        && restoredCharge == originalCharge
+                }
                 _ = validateWitness(document: document, completion: result, directory: restored, conversationID: conversationID)
                 checks[prefix + "verification_does_not_change_original_debits"] = try store.episodeReceipt(id: result.identifiers.episodeID,
                     clock: SystemEpisodeClock().now()).charged == originalCharge
-                var changedRoot = witnessFixture(baseURL: document.configuration.endpoint, large: kind == "reduced")
+                var changedRoot = witnessFixture(baseURL: document.configuration.endpoint, large: kind == "reduced", json: kind == "json_complete")
                 var configuration = changedRoot["configuration"] as! [String: Any]; configuration["system"] = "Changed public synthetic host."
                 changedRoot["configuration"] = configuration
                 let changed = try decode(witnessFixtureBytes(changedRoot), pins: witnessFixturePins(changedRoot))

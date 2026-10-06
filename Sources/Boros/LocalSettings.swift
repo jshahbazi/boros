@@ -12,6 +12,7 @@ struct LocalSettings: Codable {
     var profile = ModelProfile.customLocal.rawValue
     // Optional so existing settings JSON retains its conversation selection.
     var endpointTokenBudget: Int?
+    var endpointJSONOutput: Bool?
     // Missing keeps the historical default; empty deliberately clears it.
     var systemInstructions: String?
     static let maximumInstructionBytes = 131072

@@ -86,6 +86,9 @@ enum ContextComponentJournal {
             modelIdentity = try JSONDecoder().decode(ProviderObservedModelIdentity.self,
                 from: canonical(proofIdentity)).validated()
         } catch { throw invalid("unsupported model observation") }
+        guard body["response_format"] == nil || modelIdentity.capabilities.contains("json_schema") else {
+            throw invalid("unsupported JSON format capability")
+        }
         guard bodyBytes.count <= 2 * 1_048_576,
               equal(proof["episodeID"], episodeID), equal(proof["projectID"], projectID),
               equal(receipt["episodeID"], episodeID), equal(receipt["modelID"], Qwen38TextRendering.modelID),

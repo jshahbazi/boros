@@ -247,6 +247,7 @@ struct ProviderComponentProof: Codable {
               reductionVersion == frozenPolicy.reductionVersion,
               bodyDigest == EndpointRequest.digest(body), assignmentDigest == Self.assignmentsDigest(assignments),
               let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              object["response_format"] == nil || modelIdentity.capabilities.contains("json_schema"),
               object["enable_thinking"] as? Bool == thinkingEnabled,
               ProviderUsage.integer(object["max_tokens"]) == outputReserve,
               let rendered = try? Qwen38TextAdapter.renderAttributed(object, assignments: assignments),
@@ -320,6 +321,10 @@ enum EndpointRequest {
             body["enable_thinking"] = settings.thinkingEnabled
             body["reasoning_effort"] = settings.thinkingEnabled ? "low" : "none"
             body["chat_template_kwargs"] = ["preserve_thinking": true]
+        }
+        if settings.endpointJSONOutput {
+            guard settings.endpointModel == Qwen38TextAdapter.modelID, !settings.thinkingEnabled else { throw ProviderAdmissionError.unverifiedAdapter }
+            body["response_format"] = ["type": "json_object"]
         }
         return try serialize(body)
     }
@@ -715,6 +720,9 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                 guard let models = object["data"] as? [[String: Any]],
                       let model = models.first(where: { $0["id"] as? String == Qwen38TextAdapter.modelID }),
                       let identity = try? ProviderObservedModelIdentity.observe(model: model) else { self.finish(.failure(.unverifiedAdapter)); return }
+                if self.payload["response_format"] != nil && !identity.capabilities.contains("json_schema") {
+                    self.finish(.failure(.unverifiedAdapter)); return
+                }
                 self.observedModelIdentity = identity
                 // The server exposes no load generation. This legacy slot is
                 // unused; the explicit observation mode is authoritative.

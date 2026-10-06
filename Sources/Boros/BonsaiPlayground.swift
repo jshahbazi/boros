@@ -44,6 +44,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private let servedModelField = NSTextField(string: "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
     private let keyField = NSSecureTextField(string: "")
     private let endpointTokenLimit = NSTextField(string: "32768")
+    private let jsonOutput = NSButton(checkboxWithTitle: "JSON object", target: nil, action: nil)
     private let memoryButton = NSButton(title: "Search Memory", target: nil, action: nil)
     private var credentialOrigin: String?
     private var store: MemoryStore?
@@ -201,6 +202,11 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         return field
     }
 
+    private static func isJSONObject(_ text: String) -> Bool {
+        guard let value = try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed]) else { return false }
+        return value is [String: Any]
+    }
+
     private func row(_ views: [NSView]) -> NSStackView {
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal
@@ -297,6 +303,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         endpointField.stringValue = preferences.endpointURL
         servedModelField.stringValue = preferences.endpointModel
         endpointTokenLimit.stringValue = String(preferences.endpointTokenBudget ?? 32768)
+        jsonOutput.state = preferences.endpointJSONOutput == true ? .on : .off
+        jsonOutput.target = self; jsonOutput.action = #selector(jsonOutputChanged)
+        jsonOutput.toolTip = "Request a JSON object from the selected Qwen server with thinking off. Specify its fields in your question. Output validity is checked after capture."
         endpointField.placeholderString = "http://localhost:11234/v1/"
         servedModelField.placeholderString = "Served model ID from /v1/models"
         keyField.placeholderString = "Optional API key · stored in macOS Keychain"
@@ -306,12 +315,13 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let keyRow = row([label("API key"), keyField, saveEndpoint])
         endpointTokenLimit.toolTip = "Maximum total prompt and response tokens. Admission also respects the server's current safe capacity and reserves a safety margin."
         let tokenRow = row([label("API token budget"), endpointTokenLimit])
-        for item in [endpointRow, servedRow, keyRow, tokenRow] {
+        let outputRow = row([label("API output"), jsonOutput])
+        for item in [endpointRow, servedRow, keyRow, tokenRow, outputRow] {
             panel.addArrangedSubview(item)
             item.widthAnchor.constraint(equalTo: panel.widthAnchor).isActive = true
         }
         for field in [endpointField, servedModelField, keyField] { field.setContentHuggingPriority(.defaultLow, for: .horizontal) }
-        settingsControls += [endpointField, servedModelField, keyField, endpointTokenLimit, saveEndpoint]
+        settingsControls += [endpointField, servedModelField, keyField, endpointTokenLimit, jsonOutput, saveEndpoint]
         if !CommandLine.arguments.contains("--ui-self-test") { reloadCredential() }
         else { credentialOrigin = try? LocalCredentialStore.origin(for: endpointField.stringValue) }
         modelField.stringValue = selectedProfile.defaultModelPath
@@ -334,7 +344,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     }
 
     private var requestedThinkingEnabled: Bool {
-        (selectedProfile.supportsThinking || usesQwenMLXThinkingToggle) && thinking.state == .on
+        !requestedJSONOutput && (selectedProfile.supportsThinking || usesQwenMLXThinkingToggle) && thinking.state == .on
+    }
+
+    private var requestedJSONOutput: Bool {
+        selectedProfile == .customLocal && servedModelField.stringValue == Qwen38TextAdapter.modelID
+            && jsonOutput.state == .on
     }
 
     private func configureReasoningControls(for profile: ModelProfile, session: ChatSession? = nil) {
@@ -353,13 +368,16 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
 
     private func refreshReasoningControls() {
         let isAPI = selectedProfile == .customLocal
-        if isAPI && !usesQwenMLXThinkingToggle { thinking.state = .off }
+        jsonOutput.isEnabled = !generating && isAPI && servedModelField.stringValue == Qwen38TextAdapter.modelID
+        if requestedJSONOutput || (isAPI && !usesQwenMLXThinkingToggle) { thinking.state = .off }
         thinking.title = isAPI ? "Request thinking" : "Think before answering"
-        thinking.isEnabled = !generating && (selectedProfile.supportsThinkingToggle || usesQwenMLXThinkingToggle)
+        thinking.isEnabled = !generating && !requestedJSONOutput
+            && (selectedProfile.supportsThinkingToggle || usesQwenMLXThinkingToggle)
         thinkingBudget.isEnabled = !generating && selectedProfile.supportsThinking && thinking.state == .on
         samplingPreset.isEnabled = !generating && !isAPI
         context.isEnabled = !generating && !isAPI
-        if isAPI { thinkingHint.stringValue = "Qwen mlx-serve uses this toggle; other API models use server defaults." }
+        if requestedJSONOutput { thinkingHint.stringValue = "JSON output requires thinking off." }
+        else if isAPI { thinkingHint.stringValue = "Qwen mlx-serve uses this toggle; other API models use server defaults." }
         else if !selectedProfile.supportsThinking { thinkingHint.stringValue = "This model answers directly." }
         else if thinking.state == .off { thinkingHint.stringValue = "Direct answers. Thinking is off." }
         else {
@@ -380,6 +398,11 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         if thinking.state == .off { samplingPreset.selectItem(at: 0) }
         temperature.doubleValue = selectedProfile.sampling(preset: selectedSamplingPreset, thinking: thinking.state == .on).temperature
         updateTemperature()
+        refreshReasoningControls()
+    }
+
+    @objc private func jsonOutputChanged() {
+        guard !generating else { return }
         refreshReasoningControls()
     }
 
@@ -687,6 +710,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 status.stringValue = "API token budget must be an integer between 1 and 262144."; return
             }
             preferences.endpointTokenBudget = budget
+            preferences.endpointJSONOutput = jsonOutput.state == .on
             savePreferences()
             if memoryHealthy { status.stringValue = "API settings saved. Credentials use macOS Keychain." }
         } catch { status.stringValue = "API settings could not be saved. Use a loopback HTTP address and an available Keychain." }
@@ -744,6 +768,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         settings.seed = seed
         settings.endpointURL = endpointField.stringValue
         settings.endpointModel = servedModelField.stringValue
+        settings.endpointJSONOutput = requestedJSONOutput
         if selectedProfile == .customLocal {
             guard let origin = try? LocalCredentialStore.origin(for: settings.endpointURL), origin == credentialOrigin else {
                 reloadCredential(); status.stringValue = "Check the API address and its server-specific credentials."; return
@@ -989,6 +1014,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 self.pendingCaptureFailure = !completion.captureHealthy
                 self.scheduleSemanticMaintenance()
                 self.presentGenerationCompletion(completion.generation, captureStatus: completion.captureStatus ?? .failed)
+                if settings.endpointJSONOutput, completion.captureStatus == .complete,
+                   !Self.isJSONObject(text), self.memoryHealthy {
+                    self.status.stringValue += " The response is not a valid JSON object."
+                }
                 self.sharedCompletionObserverForChecks?(completion)
             })
         pendingSharedAttempt = attempt
@@ -1001,6 +1030,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             preferences.endpointURL = settings.endpointURL
             preferences.endpointModel = settings.endpointModel
             preferences.endpointTokenBudget = settings.endpointContextLimit
+            preferences.endpointJSONOutput = settings.endpointJSONOutput
             preferences.profile = selectedProfile.rawValue
             try preferences.save(in: store.directory)
         } catch {
@@ -1393,20 +1423,40 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
 
     private func savedInstructionChecks(store: MemoryStore) throws -> [String: Bool] {
         let originalPreferences = preferences, originalText = systemEditor.string
+        let originalJSONState = jsonOutput.state
         let destination = store.directory.appendingPathComponent("settings.json")
         let originalBytes = try Data(contentsOf: destination)
         defer {
-            preferences = originalPreferences; systemEditor.string = originalText
+            preferences = originalPreferences; systemEditor.string = originalText; jsonOutput.state = originalJSONState
             try? FileManager.default.removeItem(at: destination)
             try? originalBytes.write(to: destination, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
         }
         var checks: [String: Bool] = [:]
+        let migrationDirectory = store.directory.appendingPathComponent("json-settings-migration-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: migrationDirectory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: migrationDirectory) }
+        var legacy = try JSONSerialization.jsonObject(with: originalBytes) as! [String: Any]
+        legacy.removeValue(forKey: "endpointJSONOutput")
+        try JSONSerialization.data(withJSONObject: legacy).write(to: migrationDirectory.appendingPathComponent("settings.json"))
+        let migrated = LocalSettings.load(in: migrationDirectory)
+        checks["gui_legacy_settings_keep_chat_and_instructions_with_json_off"] = migrated.endpointJSONOutput != true
+            && migrated.conversationID == originalPreferences.conversationID
+            && migrated.systemInstructions.map { Data($0.utf8) } == originalPreferences.systemInstructions.map { Data($0.utf8) }
+        checks["gui_json_validation_requires_object_root"] = Self.isJSONObject("{\"synthetic\":true}")
+            && !Self.isJSONObject("[1]") && !Self.isJSONObject("\"text\"") && !Self.isJSONObject("{invalid}")
         let instructions = "  Synthetic saved café e\u{301}\r\nCite exact sources.\n  "
         systemEditor.string = instructions
         saveSystemInstructions()
         let persisted = LocalSettings.load(in: store.directory)
         checks["gui_explicit_instruction_save_preserves_exact_utf8"] = persisted.systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+        jsonOutput.state = .on
+        saveAPISettings()
+        checks["gui_json_api_preference_save_keeps_exact_instructions"] = LocalSettings.load(in: store.directory).endpointJSONOutput == true
+            && LocalSettings.load(in: store.directory).systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+        jsonOutput.state = .off
+        saveAPISettings()
+        checks["gui_json_api_preference_can_be_disabled"] = LocalSettings.load(in: store.directory).endpointJSONOutput == false
         systemEditor.string = "Synthetic unsaved replacement"
         savePreferences()
         checks["gui_unrelated_preference_save_keeps_saved_instructions"] = LocalSettings.load(in: store.directory).systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
@@ -1552,8 +1602,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         return true
     }
 
-    // Exercise the actual controls in an undisplayed window. No system input,
-    // clipboard changes, model calls, or conversation text leave this process.
+    // Exercise ordinary Send against the supplied controlled local fixture
+    // in an undisplayed window, with synthetic content and no system input.
     func sharedAnswerIntegrationChecks(baseURL: String, completion: @escaping ([String: Bool]) -> Void) {
         guard let store else { completion(["gui_shared_fixture_store": false]); return }
         var checks: [String: Bool] = [:]
@@ -1564,7 +1614,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         var firstDeltaDurable = true
         var stopFenced = false
         var stopped = false
-        func next(cancel: Bool) {
+        func next(cancel: Bool, json: Bool = false, invalidJSON: Bool = false) {
+            let caseName = json ? (invalidJSON ? "json_invalid" : "json_success") : (cancel ? "stop" : "success")
+            let prefix = "gui_shared_" + caseName
             do {
                 let chat = try store.createConversation(projectID: projectID, title: "Public shared GUI fixture")
                 activeChat = chat
@@ -1577,11 +1629,13 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 servedModelField.stringValue = Qwen38TextAdapter.modelID
                 maximumOutput.selectItem(withTitle: "128")
                 endpointTokenLimit.stringValue = "32768"
-                seedField.stringValue = "42"
+                jsonOutput.state = json ? .on : .off
+                jsonOutputChanged()
+                seedField.stringValue = json ? (invalidJSON ? "44" : "43") : "42"
                 replaceDraft("Give a concise answer for the public GUI fixture.")
                 sharedAttemptObserverForChecks = { attempt in
-                    checks["gui_shared_\(cancel ? "stop" : "success")_accepted_original_lease"] = attempt.lease.episodeID == attempt.identifiers.episodeID
-                    checks["gui_shared_\(cancel ? "stop" : "success")_human_committed_before_preparation"] = (try? store.events(conversationID: chat.id))?
+                    checks[prefix + "_accepted_original_lease"] = attempt.lease.episodeID == attempt.identifiers.episodeID
+                    checks[prefix + "_human_committed_before_preparation"] = (try? store.events(conversationID: chat.id))?
                         .contains { $0.id == attempt.identifiers.humanEventID && $0.status == .complete } == true
                 }
                 sharedVisibleObserverForChecks = { [self] in
@@ -1599,7 +1653,6 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     }
                 }
                 sharedCompletionObserverForChecks = { [self] result in
-                    let prefix = "gui_shared_" + (cancel ? "stop" : "success")
                     checks[prefix + "_committed_delta_precedes_visible_text"] = deliveredCount > 0 && firstDeltaDurable
                     checks[prefix + "_shared_admission_and_selection_proof"] = result.preparation?.admission.componentProof != nil
                         && result.preparation?.sourceSelectionWorkID != nil
@@ -1614,25 +1667,62 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                         checks[prefix + "_saved_instructions_in_actual_counted_request"] = messages.first?["role"] == "system"
                             && Data(system.utf8) == Data(ContextAssembler.mandatoryMessages(prompt: "", system: savedInstructions)[0].content.utf8)
                             && result.preparation?.admission.componentProof != nil
-                    } else { checks[prefix + "_saved_instructions_in_actual_counted_request"] = false }
+                        checks[prefix + "_json_requires_frozen_thinking_off"] = !json
+                            || body["enable_thinking"] as? Bool == false
+                        checks[prefix + "_frozen_output_option_matches_setting"] = json
+                            ? (body["response_format"] as? [String: String]) == ["type": "json_object"]
+                            : body["response_format"] == nil
+                        checks[prefix + "_capture_preserves_provider_bytes"] = invocation.observedBytes == assistant?.text.utf8.count
+                            && result.responseBytes == assistant?.text.utf8.count
+                            && result.responseDigest == assistant.map { EndpointRequest.digest(Data($0.text.utf8)) }
+                        if let preparation = result.preparation,
+                           let work = try? store.episodeWork(episodeID: result.identifiers.episodeID,
+                               operationID: preparation.answerWorkID) {
+                            checks[prefix + "_original_answer_work_charges_counted_input"] =
+                                work.charged.inputTokens == preparation.admission.promptTokens
+                                && work.request.resources.inputTokens == preparation.admission.promptTokens
+                                && work.charged.modelCalls == 1 && work.charged.httpAttempts == 1
+                        } else { checks[prefix + "_original_answer_work_charges_counted_input"] = false }
+                    } else {
+                        checks[prefix + "_saved_instructions_in_actual_counted_request"] = false
+                        checks[prefix + "_frozen_output_option_matches_setting"] = false
+                        checks[prefix + "_json_requires_frozen_thinking_off"] = false
+                        checks[prefix + "_capture_preserves_provider_bytes"] = false
+                        checks[prefix + "_original_answer_work_charges_counted_input"] = false
+                    }
+                    checks[prefix + "_output_preference_saved_without_instruction_changes"] =
+                        LocalSettings.load(in: store.directory).endpointJSONOutput == json
+                        && LocalSettings.load(in: store.directory).systemInstructions.map { Data($0.utf8) }
+                            == savedInstructions.map { Data($0.utf8) }
                     checks[prefix + "_durable_v3_original_input_proof_revalidated"] =
                         (try? revalidateSharedInputProof(store: store, result: result)) == true
                     checks[prefix + "_durable_text_matches_visible_transcript"] = assistant?.text.isEmpty == false
                         && responseView.string.contains(assistant!.text) && assistant?.status == result.captureStatus
                     checks[prefix + "_operational_outcome"] = result.episode?.state == (cancel ? .cancelled : .completed)
                         && result.captureStatus == (cancel ? .partial : .complete)
-                    if cancel {
-                        checks[prefix + "_stop_fences_original_lease"] = stopFenced
+                    checks[prefix + "_invalid_json_warning_matches_captured_output"] =
+                        status.stringValue.contains("The response is not a valid JSON object.") == invalidJSON
+                    if json {
+                        checks[prefix + "_captured_object_validity"] = assistant.map { Self.isJSONObject($0.text) } == !invalidJSON
+                        let expected = invalidJSON ? "controlledwronganswersentinel" : "{\"synthetic\":true}"
+                        checks[prefix + "_captured_provider_output_unchanged"] = assistant.map { Data($0.text.utf8) } == Data(expected.utf8)
+                    }
+                    if cancel { checks[prefix + "_stop_fences_original_lease"] = stopFenced }
+                    deliveredCount = 0; firstDeltaDurable = true
+                    if invalidJSON {
                         sharedAttemptObserverForChecks = nil; sharedVisibleObserverForChecks = nil
                         sharedCompletionObserverForChecks = nil
                         completion(checks)
+                    } else if json {
+                        DispatchQueue.main.async { next(cancel: false, json: true, invalidJSON: true) }
+                    } else if cancel {
+                        DispatchQueue.main.async { next(cancel: false, json: true) }
                     } else {
-                        deliveredCount = 0; firstDeltaDurable = true
                         DispatchQueue.main.async { next(cancel: true) }
                     }
                 }
                 sendPrompt()
-                checks["gui_shared_\(cancel ? "stop" : "success")_ordinary_send_selects_shared_coordinator"] = pendingSharedAttempt != nil
+                checks[prefix + "_ordinary_send_selects_shared_coordinator"] = pendingSharedAttempt != nil
                     && pendingEpisode === pendingSharedAttempt?.lease && generating
                 if !generating {
                     checks["gui_shared_fixture_send_refused"] = false
@@ -1761,13 +1851,20 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     && snapshot.messages.last?.content == "Synthetic follow-up"
                 checks.merge(try sendContextChecks(store: store)) { _, new in new }
                 let before = responseView.string
+                let priorJSONState = jsonOutput.state
+                jsonOutput.state = .on
                 modelSelector.selectItem(at: ModelProfile.selectableProfiles.firstIndex(of: .qwen35)!)
                 selectModel()
                 checks["model_switch_keeps_durable_chat"] = self.activeChat?.id == activeChat.id && responseView.string == before
+                checks["gui_native_profile_disables_json_option"] = !jsonOutput.isEnabled
+                    && !requestedJSONOutput && jsonOutput.state == .on
                 modelSelector.selectItem(at: 0); selectModel()
                 checks["api_profile_is_default_selection"] = selectedProfile == .customLocal
                 checks["api_address_and_served_id_configurable"] = endpointField.isEditable && servedModelField.isEditable
+                checks["gui_qwen_api_enables_json_option"] = jsonOutput.isEnabled
+                    && requestedJSONOutput && jsonOutput.state == .on
                 checks["api_key_uses_secure_control"] = (keyField as NSView) is NSSecureTextField
+                jsonOutput.state = .off; jsonOutputChanged()
                 checks["qwen_api_thinking_defaults_off_and_can_be_requested"] = thinking.isEnabled
                     && thinking.state == .off && !requestedThinkingEnabled
                 let apiTemperature = temperature.doubleValue
@@ -1777,17 +1874,33 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 checks["api_unsupported_context_and_sampling_controls_disabled"] = !context.isEnabled
                     && !samplingPreset.isEnabled && samplingHint.stringValue.contains("server defaults")
                     && thinkingHint.stringValue.contains("Qwen mlx-serve uses this toggle")
+                jsonOutput.state = .on; jsonOutputChanged()
+                checks["gui_json_selection_clears_and_disables_thinking"] = requestedJSONOutput
+                    && !requestedThinkingEnabled && thinking.state == .off && !thinking.isEnabled
+                    && thinkingHint.stringValue == "JSON output requires thinking off."
+                checks["gui_json_option_has_refresh_action"] = jsonOutput.target === self
+                    && jsonOutput.action == #selector(jsonOutputChanged)
                 servedModelField.stringValue = "synthetic-other-api-model"
                 controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: servedModelField))
+                checks["gui_other_api_model_disables_json_option"] = !jsonOutput.isEnabled
+                    && !requestedJSONOutput && jsonOutput.state == .on
                 checks["other_api_models_use_server_reasoning_defaults"] = !thinking.isEnabled
                     && thinking.state == .off && !requestedThinkingEnabled && !thinkingBudget.isEnabled
                 servedModelField.stringValue = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
                 controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: servedModelField))
                 setGenerating(true)
                 checks["generation_disables_qwen_api_thinking_toggle"] = !thinking.isEnabled
+                checks["gui_generation_disables_json_option"] = !jsonOutput.isEnabled
                 setGenerating(false)
+                checks["gui_idle_qwen_api_restores_json_option"] = jsonOutput.isEnabled
+                    && requestedJSONOutput && jsonOutput.state == .on
+                jsonOutput.state = .off; jsonOutputChanged()
+                checks["gui_disabled_json_preference_omits_request_option"] = !requestedJSONOutput
+                checks["gui_json_deselection_restores_thinking_toggle_off"] = thinking.isEnabled
+                    && thinking.state == .off && !requestedThinkingEnabled
                 checks["generation_restores_only_supported_api_controls"] = thinking.isEnabled
                     && !thinkingBudget.isEnabled && !context.isEnabled && !samplingPreset.isEnabled
+                jsonOutput.state = priorJSONState; jsonOutputChanged()
                 clearPrompt()
                 checks["new_chat_preserves_previous_durable_history"] = try store.events(conversationID: activeChat.id).count == 2
                     && self.activeChat?.id != activeChat.id && responseView.string.isEmpty

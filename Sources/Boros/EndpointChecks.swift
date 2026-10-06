@@ -4,6 +4,7 @@ import CSQLite
 enum EndpointChecks {
     static func runIntegration(baseURL: String) -> [String: Bool] {
         var checks = ProviderAdmissionChecks.runIntegration(baseURL: baseURL)
+        checks.merge(runJSONRequestChecks(baseURL: baseURL)) { _, replacement in replacement }
         for (index, mode) in ["good", "http-error", "sse-error", "unfinished", "length", "redirect", "malformed", "cancel", "usage-missing", "usage-mismatch", "stream-model-mismatch"].enumerated() {
             let runner = EndpointRunner()
             var settings = GenerationSettings()
@@ -49,6 +50,69 @@ enum EndpointChecks {
         }
         checks.merge(runEpisodeIntegration(baseURL: baseURL)) { _, replacement in replacement }
         checks.merge(runRealStoreUnknownViolationChecks(baseURL: baseURL)) { _, replacement in replacement }
+        return checks
+    }
+
+    /// Request-building checks need no additional provider fixture behavior.
+    private static func runJSONRequestChecks(baseURL: String) -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        do {
+            var settings = GenerationSettings(); settings.profile = .customLocal
+            settings.endpointURL = baseURL; settings.endpointModel = Qwen38TextAdapter.modelID
+            settings.messagesOverride = [["role": "system", "content": "Synthetic host \t\n"],
+                ["role": "user", "content": "Synthetic request"]]
+            let original = try EndpointRequest.build(prompt: "", settings: settings, conversation: Conversation())
+            let originalObject = try JSONSerialization.jsonObject(with: original) as! [String: Any]
+            checks["json_output_defaults_to_absent_request_option"] = !settings.endpointJSONOutput && originalObject["response_format"] == nil
+            settings.endpointJSONOutput = true
+            let formatted = try EndpointRequest.build(prompt: "", settings: settings, conversation: Conversation())
+            var formattedObject = try JSONSerialization.jsonObject(with: formatted) as! [String: Any]
+            let option = formattedObject.removeValue(forKey: "response_format") as? [String: String]
+            checks["json_output_adds_only_exact_object_request_option"] = option == ["type": "json_object"]
+                && NSDictionary(dictionary: formattedObject).isEqual(to: originalObject)
+            let originalRender = try Qwen38TextAdapter.render(originalObject)
+            let formattedRender = try Qwen38TextAdapter.render(try JSONSerialization.jsonObject(with: formatted) as! [String: Any])
+            checks["json_output_binds_changed_body_and_mandatory_rendering"] = original != formatted
+                && EndpointRequest.digest(original) != EndpointRequest.digest(formatted)
+                && originalRender != formattedRender && formattedRender.contains(Qwen38TextRendering.jsonObjectInstruction)
+            settings.thinkingEnabled = true
+            checks["json_output_joint_thinking_request_refused_before_admission"] =
+                (try? EndpointRequest.build(prompt: "", settings: settings, conversation: Conversation())) == nil
+            settings.thinkingEnabled = false
+            settings.endpointJSONOutput = false
+            checks["json_output_disabled_restores_exact_legacy_request_bytes"] = original == (try EndpointRequest.build(prompt: "", settings: settings, conversation: Conversation()))
+            // An ordinary request remains supported by a text-only provider;
+            // requesting JSON must fail at discovery before tokenization or inference.
+            for requested in [false, true] {
+                settings.endpointJSONOutput = requested
+                let body = try EndpointRequest.build(prompt: "", settings: settings, conversation: Conversation())
+                var result: Result<EndpointAdmissionReceipt, ProviderAdmissionError>?
+                var completions = 0
+                let operation = ProviderAdmission.prepare(requestBody: body, address: baseURL,
+                    apiKey: "synthetic-json-capability-missing", contextLimit: 32768, safetyTokens: 256) {
+                    result = $0; completions += 1
+                }
+                let deadline = Date().addingTimeInterval(8)
+                while result == nil && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.005)) }
+                if result == nil { operation.cancel(); RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+                if requested {
+                    let refused: Bool
+                    if case .failure(.unverifiedAdapter) = result { refused = true } else { refused = false }
+                    checks["json_output_missing_capability_refused_before_model_work"] = completions == 1
+                        && refused
+                        && operation.accounting.httpRequestCount == 1
+                        && operation.accounting.tokenizerRequestCount == 0
+                        && operation.accounting.calibrationRequestCount == 0
+                } else {
+                    if case .success(let receipt) = result {
+                        checks["json_output_text_only_provider_keeps_ordinary_admission"] = completions == 1
+                            && receipt.accepts(body: body, address: baseURL) && operation.accounting.calibrationRequestCount == 1
+                    } else { checks["json_output_text_only_provider_keeps_ordinary_admission"] = false }
+                }
+            }
+        } catch {
+            checks["json_output_request_fixture_valid"] = false
+        }
         return checks
     }
 

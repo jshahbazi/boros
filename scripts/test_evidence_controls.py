@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -34,6 +35,7 @@ def controlled_packs():
                     "events": copy.deepcopy([history["events"][i] for i in positions]),
                     "episodes": [copy.deepcopy(probe)], "original_source_positions": positions})
         stack.enter_context(patch.object(controls, "PROJECTION_SHA256", tuple(e.digest(canonical_json(controls.projection(p))) for p in packs)))
+        stack.enter_context(patch.object(controls, "JSON_OBJECT_PROJECTION_SHA256", tuple(e.digest(canonical_json(controls.projection(p, json_object=True))) for p in packs)))
         stack.enter_context(patch.object(controls, "ORACLE_SHA256", tuple(e.digest(canonical_json(p["episodes"][0]["oracle"])) for p in packs)))
         yield histories, packs
 
@@ -57,7 +59,7 @@ def native_report(pack, document, directory, *, correct=True):
     return {"version": 1, "attempts": [item], "witness_mode": controls.VERSION,
         "native_configuration_sha256": controls.configuration_pins(document["configuration"])[1],
         "input_sha256": e.digest(canonical_json(document)),
-        "public_projection_sha256": e.digest(canonical_json(controls.projection(pack)))}
+        "public_projection_sha256": e.digest(canonical_json({key: value for key, value in document.items() if key != "configuration"}))}
 
 
 class Contracts(unittest.TestCase):
@@ -131,6 +133,38 @@ class Contracts(unittest.TestCase):
             with self.assertRaises(e.EvaluationError): controls.validate_configuration({**amended, field: value})
         for value in (None, 0, 1, "true"):
             with self.assertRaises(e.EvaluationError): controls.selected_configuration(format_instructions=value)
+
+    def test_json_object_configuration_changes_only_new_field_and_pins(self):
+        baseline = controls.selected_configuration()
+        selected = controls.selected_configuration(json_object=True)
+        self.assertTrue(selected == {**baseline, "response_format": "json_object"})
+        self.assertTrue(developer.CONFIGURATION == baseline)
+        self.assertTrue(e.digest(canonical_json(selected)) == controls.JSON_OBJECT_CONFIGURATION_SHA256)
+        self.assertTrue(e.digest(canonical_json({**selected, "temperature": 0})) == controls.JSON_OBJECT_NATIVE_CONFIGURATION_SHA256)
+        self.assertTrue(controls.configuration_pins(selected) == (controls.JSON_OBJECT_CONFIGURATION_SHA256,
+            controls.JSON_OBJECT_NATIVE_CONFIGURATION_SHA256, "provider-json-object-v1"))
+
+    def test_json_object_configuration_arbitrary_changes_and_mixed_amendment_refused(self):
+        selected = controls.selected_configuration(json_object=True)
+        for field, value in (("response_format", "json_schema"), ("response_format", {"type": "json_object"}),
+                             ("system", controls.FORMAT_INSTRUCTION_SYSTEM), ("maximum_output", 2049),
+                             ("temperature", 0), ("extra", True)):
+            with self.assertRaises(e.EvaluationError): controls.validate_configuration({**selected, field: value})
+        with self.assertRaises(e.EvaluationError): controls.selected_configuration(format_instructions=True, json_object=True)
+        for value in (None, 0, 1, "true"):
+            with self.assertRaises(e.EvaluationError): controls.selected_configuration(json_object=value)
+
+    def test_json_object_documents_change_only_version_and_configuration_field(self):
+        with controlled_packs() as (_histories, packs):
+            for index, pack in enumerate(packs):
+                baseline = controls.runner_input(pack, controls.selected_configuration())
+                selected = controls.runner_input(pack, controls.selected_configuration(json_object=True))
+                expected = {**baseline, "version": 3,
+                            "configuration": {**baseline["configuration"], "response_format": "json_object"}}
+                self.assertTrue(selected == expected)
+                self.assertTrue(e.digest(canonical_json(controls.projection(pack, json_object=True)))
+                                == controls.JSON_OBJECT_PROJECTION_SHA256[index])
+                self.assertTrue(not any(key in canonical_json(selected).decode() for key in ('"oracle"', '"expected_answers"', '"goldSpans"')))
 
     def test_projection_source_order_scope_role_question_tampering(self):
         with controlled_packs() as (_histories, packs):
@@ -216,6 +250,20 @@ class Contracts(unittest.TestCase):
             native.pop("native_configuration_sha256")
             self.assertTrue(diagnostic.score_native(native, directory, pack, doc)[0]["conditional_task_score"] is None)
 
+    def test_json_object_conditional_requires_v3_projection_and_actual_configuration(self):
+        with controlled_packs() as (_histories, packs), tempfile.TemporaryDirectory() as temporary:
+            pack = packs[0]
+            doc = controls.runner_input(pack, controls.selected_configuration(json_object=True))
+            directory = Path(temporary) / "output"; native = native_report(pack, doc, directory)
+            self.assertTrue(diagnostic.score_native(native, directory, pack, doc)[0]["conditional_task_score"] == 1)
+            wrong_projection = {**native, "public_projection_sha256": controls.PROJECTION_SHA256[0]}
+            self.assertTrue(diagnostic.score_native(wrong_projection, directory, pack, doc)[0]["conditional_task_score"] is None)
+            wrong_configuration = {**native, "native_configuration_sha256": controls.NATIVE_CONFIGURATION_SHA256}
+            self.assertTrue(diagnostic.score_native(wrong_configuration, directory, pack, doc)[0]["conditional_task_score"] is None)
+            with self.assertRaises(e.EvaluationError): diagnostic.score_native(native, directory, pack, {**doc, "version": 2})
+            native.pop("native_configuration_sha256")
+            self.assertTrue(diagnostic.score_native(native, directory, pack, doc)[0]["conditional_task_score"] is None)
+
     def test_positive_witness_cannot_replace_actual_pack_delivery(self):
         with controlled_packs() as (_histories, packs), tempfile.TemporaryDirectory() as temporary:
             pack = packs[0]; doc = controls.runner_input(pack, developer.CONFIGURATION)
@@ -287,6 +335,36 @@ class Contracts(unittest.TestCase):
             self.assertTrue(report["configuration"] == {key: value for key, value in developer.CONFIGURATION.items() if key != "system"})
             self.assertTrue(report["declaration_sha256"] == e.digest(canonical_json(report["declaration"])))
             with self.assertRaises(e.EvaluationError): diagnostic.run(Path("controlled-public-source"), output, format_instructions=True)
+
+    def test_json_object_declaration_before_compile_retains_nine_denominators(self):
+        with controlled_packs() as (_histories, _packs), tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "json-object-report.json"
+            def compile_declared(scratch):
+                declaration = e.strict_json((scratch / "declared-controls.json").read_bytes())
+                self.assertTrue(declaration["development_amendment"] == "provider-json-object-v1")
+                self.assertTrue(declaration["runner_document_version"] == 3 and declaration["declared_attempts"] == 9)
+                self.assertTrue(declaration["runner_projection_sha256"] == list(controls.JSON_OBJECT_PROJECTION_SHA256))
+                self.assertTrue(declaration["configuration_sha256"] == controls.JSON_OBJECT_CONFIGURATION_SHA256)
+                self.assertTrue(declaration["native_configuration_sha256"] == controls.JSON_OBJECT_NATIVE_CONFIGURATION_SHA256)
+                return Path("unused-driver"), {}
+            with (patch.object(e, "compile_driver", side_effect=compile_declared),
+                  patch.object(e, "execute", return_value={"version": 1, "attempts": []}) as execute_call):
+                report = diagnostic.run(Path("controlled-public-source"), output, json_object=True)
+            self.assertTrue(execute_call.call_count == 9 and report["development_amendment"] == "provider-json-object-v1")
+            self.assertTrue(report["runner_document_version"] == 3 and report["summary"]["declared_attempts"] == 9)
+            self.assertTrue(report["summary"]["operational_failures"] == 9 and report["summary"]["overall_control_success_rate"] == 0)
+            self.assertTrue(report["configuration"] == {key: value for key, value in controls.selected_configuration(json_object=True).items() if key != "system"})
+            self.assertTrue([result["runner_projection_sha256"] for result in report["packs"]] == list(controls.JSON_OBJECT_PROJECTION_SHA256))
+            with self.assertRaises(e.EvaluationError): diagnostic.run(Path("controlled-public-source"), output, json_object=True)
+
+    def test_cli_amendment_flags_are_mutually_exclusive_before_run(self):
+        stderr = io.StringIO()
+        with (patch.object(sys, "argv", ["evaluate_evidence_controls.py", "--source", "unused", "--output", "unused",
+                                        "--json-object", "--format-instructions"]),
+              patch.object(diagnostic, "run") as run_call, contextlib.redirect_stderr(stderr)):
+            with self.assertRaises(SystemExit) as error: diagnostic.main()
+        self.assertTrue(error.exception.code == 2 and not run_call.called)
+        self.assertTrue(stderr.getvalue() == "Invalid answer-evaluation arguments.\n")
 
     def test_pin_failure_precedes_compile_or_provider_work(self):
         with controlled_packs() as (_histories, _packs), tempfile.TemporaryDirectory() as temporary:

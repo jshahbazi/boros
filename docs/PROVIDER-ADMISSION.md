@@ -39,6 +39,18 @@ The canonical body explicitly sets `enable_thinking`, `reasoning_effort` (`low` 
 
 The reviewed public source is identified above. The live server reports its version; Boros does not attest the running binary against that public commit.
 
+## Optional JSON-object output
+
+For the selected adapter, `endpointJSONOutput` requests the exact optional wire field `response_format: { "type": "json_object" }`. Its default is off. Absent fields preserve the previous body bytes and renderer/proof versions, including ordinary thinking requests and historical archives. Other formats, schemas and joint JSON/thinking requests are refused. Initial model discovery, component handoff and offline journal validation require the advertised `json_schema` capability for a JSON body.
+
+The `mlx-serve-qwen38-json-object-v1` sub-contract follows [tagged v26.10.1 preprocessing](https://github.com/ddalcu/mlx-serve/blob/02bee553f48cd3bc7d82aba0f8073820bd924738/src/server.zig#L8684). Exactly empty plain messages are dropped first. The server appends its fixed 137-byte instruction to the first retained raw System message, or inserts a System message, before template trimming. The instruction's SHA-256 is `7291d7ca4c4f2045ce0f23a5ce750792eb630b6bb2541ca69759cd3811a4f14a`. It belongs to mandatory input. Recent and historical allocation strings remain unchanged; the whole transformed prompt is counted and charged under the original allowance. `/tokenize` consumes the already-rendered text and supplies no response-format preprocessing.
+
+The server can rerender a JSON request with thinking off after resolving runtime reasoning protocol/budget state. That state is not fully exposed by current metadata. A live synthetic JSON/thinking request reported 54 prompt tokens against the requested-thinking render's 78; explicit thinking off matched 54/54. The restricted adapter therefore supports JSON only with thinking off. The GUI clears and disables thinking when JSON is selected. Unsupported joint requests fail before admission.
+
+An independent pinned Jinja/Swift oracle passed **107 cases**: 45 exact full/attributed renders and 62 refusals. All **45 live synthetic requests** matched the provider's prompt counts, totaling 2,101 input and 45 output tokens with a one-token output cap. These direct probes are outside Boros runtime accounting and do not measure complete JSON or answer accuracy. Records: `.build/json-object-provider-oracle-final.log` and `.build/evaluation/json-thinking-preprocessing-20261006.json`.
+
+Grammar initialization can fail and leave prompt-only enforcement. Complete output is always retained, with no JSON repair or rewriting. The GUI reports a complete non-object response after capture; the diagnostic independently validates JSON shape, exact answers and citations. See [the separate frozen amendment](EVIDENCE-CONTROL.md#provider-json-object-amendment).
+
 ## Calibration and incurred work
 
 For each independent preparation operation or component session, Boros performs one synthetic calibration request with a one-token output cap. It first counts the calibration prompt through `/tokenize`, then requires the provider's generated usage to report exactly that prompt count. The synthetic history exercises multilingual text, a previous assistant, literal template text, source markup, and repeated closing think tags. Component counts and reductions share that session's calibration, original validity period and episode allowance. Calibration cannot be reused across independent sessions because the provider exposes no stable loaded-instance identifier. Metadata and the entire actual prompt are still checked and counted for every candidate request.

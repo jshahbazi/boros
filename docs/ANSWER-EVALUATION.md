@@ -1,6 +1,6 @@
 # Production-path answering evaluation
 
-Status: shared GUI lifecycle and public development diagnostic implemented and verified, October 5, 2026. The first paired Qwen diagnostic completed; all 18 attempts and failures are retained. No new registered quality protocol is frozen. The full architecture and release gates remain unfinished in [STATUS.md](STATUS.md).
+Status: shared GUI lifecycle, public development diagnostic and separate JSON-object control implemented and verified, October 6, 2026. The original October 5 paired pilot retains all 18 attempts and failures. Subsequent developer-history and complete-pack amendments remain separate unregistered development diagnostics; no new registered quality protocol is frozen. The full architecture and release gates remain unfinished in [STATUS.md](STATUS.md).
 
 ## Implementation contract
 
@@ -43,6 +43,8 @@ This diagnostic establishes that the production measurement path works. Represen
 The version-1 paired answer runner receives history events, question, public probe ID, scope/conversation mapping, strategy and generation settings. It receives no gold spans, expected answers, targeted search queries, sufficient-evidence witnesses or grading rubric.
 
 The separately pinned version-2 [sufficient-evidence control](EVIDENCE-CONTROL.md) intentionally supplies curated complete original exchanges. It retains oracle separation and the shared production lifecycle. Its packs and scores remain separate from paired retrieval inputs and denominators.
+
+Version 3 supplies the separately allowlisted provider JSON-object amendment for those same nine packs. Only its exact `response_format: json_object` configuration and separately pinned version-3 projections are accepted. Version-1 and version-2 inputs continue to reject that field. Original questions, strict rubrics, System text, source bytes and caps remain fixed. The shared path counts the provider's added mandatory instruction and preserves actual body/source/count evidence through capture, reopen and archives; output format and task accuracy are scored separately after terminalization.
 
 The model receives only the production request body. No filesystem, SQL, source-dump, shell, MCP or additional HTTP tool is enabled. Host ingestion supplies the synthetic corpus; shared production preparation is the source-selection path. Focused access/accounting tests must catch accidental historical reads in recent-only and unmetered helper use.
 

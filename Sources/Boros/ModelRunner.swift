@@ -26,6 +26,8 @@ struct GenerationSettings {
     var preparedEndpointBody: Data?
     var endpointContextLimit = 32768
     var endpointSafetyTokens = 256
+    // Optional supported provider output mode; frozen in the counted request.
+    var endpointJSONOutput = false
     var endpointAdmission: EndpointAdmissionReceipt?
     var preparedNativeBody: Data?
     // One durable allowance spans preparation, calibration and answering.

@@ -91,7 +91,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"data": [{"id": "foreign-synthetic-model" if drift else MODEL,
                                       "created": created, "owned_by": "mlx-serve", "loaded": True,
                                       "state": "ready", "context_length": 32768, "max_model_len": 32768,
-                                      "capabilities": ["chat", "streaming"], "input_modalities": ["text"],
+                                      "capabilities": ["chat", "streaming"] if mode == "json-capability-missing" else ["chat", "streaming", "json_schema"], "input_modalities": ["text"],
                                       "meta": {"engine": "mlx", "architecture": "qwen4_exp"}}]})
         elif parts.path == "/props":
             drift = self.mode() == "component-version-drift" and self.drifting()

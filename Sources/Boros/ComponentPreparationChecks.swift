@@ -14,6 +14,7 @@ enum ComponentPreparationChecks {
         case mandatory, scope, boundary, pipeline, envelope, httpLimit, cancel, deadline
         case identityModel, identityTemplate, identityRuntime
         case legacyVersion
+        case jsonCapability
     }
     private final class Clock: EpisodeClockSource {
         private let lock = NSLock()
@@ -122,6 +123,7 @@ enum ComponentPreparationChecks {
             settings.endpointModel = Qwen38TextAdapter.modelID; settings.maximumOutput = 64
             settings.endpointSafetyTokens = 256; settings.endpointContextLimit = kind == .envelope ? 9000 : 32768
             settings.temperature = 0; settings.episodeLease = lease
+            settings.endpointJSONOutput = kind == .jsonCapability
             switch kind {
             case .identityModel: settings.endpointAPIKey = "synthetic-component-model-drift"
             case .identityTemplate: settings.endpointAPIKey = "synthetic-component-template-drift"
@@ -406,6 +408,43 @@ enum ComponentPreparationChecks {
                 .first { episodeIdentifierEqual($0.id, currentID) }.map { Data($0.text.utf8) } == Data(prompt.utf8)
             return checks
         }
+        /// Alter only capability observation and its matching adapter references.
+        /// Body, assignments, rendered hashes, count work IDs and original caps
+        /// remain those of the actual independently counted preparation. The
+        /// text-only positive control proves rejection is conditional on format.
+        private func jsonCapabilityProofChecks(_ prepared: PreparedComponentContext) throws -> [String: Bool] {
+            guard let original = prepared.receipt.componentProof,
+                  let binding = prepared.settings.preparedContextComponents else { throw ProviderAdmissionError.countMismatch }
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            var candidate = try JSONSerialization.jsonObject(with: encoder.encode(original)) as! [String: Any]
+            var identity = candidate["modelIdentity"] as! [String: Any]
+            identity["capabilities"] = original.modelIdentity.capabilities.filter { $0 != "json_schema" }
+            let identityBytes = try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys])
+            let textOnly = try JSONDecoder().decode(ProviderObservedModelIdentity.self, from: identityBytes)
+            let adapter = ProviderAdmission.adapterIdentity(endpoint: original.endpoint,
+                modelIdentity: textOnly, thinking: original.thinkingEnabled)
+            candidate["modelIdentity"] = identity; candidate["adapterIdentity"] = adapter
+            for key in ["recent", "evidence", "wholePrompt"] {
+                var count = candidate[key] as! [String: Any]
+                count["adapterIdentity"] = adapter; candidate[key] = count
+            }
+            let changed = try JSONDecoder().decode(ProviderComponentProof.self,
+                from: JSONSerialization.data(withJSONObject: candidate, options: [.sortedKeys]))
+            func accepts(_ proof: ProviderComponentProof) -> Bool {
+                proof.accepts(body: prepared.body, assignments: binding.assignments,
+                    sourceSnapshotDigest: binding.sourceSnapshotDigest, policyDigest: binding.policyDigest,
+                    episodeLease: lease, address: prepared.settings.endpointURL)
+            }
+            let prefix = "component_preparation_" + kind.rawValue
+            return [prefix + "_original_capability_proof_accepts": accepts(original),
+                prefix + "_capability_change_retains_exact_body_and_counts": changed.bodyDigest == original.bodyDigest
+                    && changed.assignmentDigest == original.assignmentDigest
+                    && changed.recent.renderedDigest == original.recent.renderedDigest
+                    && changed.evidence.renderedDigest == original.evidence.renderedDigest
+                    && changed.wholePrompt.renderedDigest == original.wholePrompt.renderedDigest
+                    && changed.wholePrompt.tokens == original.wholePrompt.tokens,
+                prefix + "_text_only_capability_bound_to_actual_mode": accepts(changed) == !prepared.settings.endpointJSONOutput]
+        }
         private func finish(_ outcome: Result<PreparedComponentContext, Error>) {
             guard !completed else { return }
             completed = true
@@ -473,7 +512,14 @@ enum ComponentPreparationChecks {
                             && prepared.snapshot.selectionAudit?.recentEnvelopeExcludedCount == 0
                         checks[prefix + "_whole_recount_not_component_sum"] = proof.wholePrompt.tokens == 4100
                             && proof.evidence.tokens == 0 && proof.evidence.tokenizerWorkID == nil
+                    case .jsonCapability:
+                        let body = try JSONSerialization.jsonObject(with: prepared.body) as! [String: Any]
+                        checks[prefix + "_actual_optional_body_counted"] = (body["response_format"] as? [String: String]) == ["type": "json_object"]
+                            && proof.modelIdentity.capabilities.contains("json_schema")
                     default: checks[prefix + "_expected_failure"] = false
+                    }
+                    if kind == .pipeline || kind == .jsonCapability {
+                        checks.merge(try jsonCapabilityProofChecks(prepared)) { _, latest in latest }
                     }
                     checks.merge(try inputProofChecks(prepared)) { _, latest in latest }
                     try capturePrepared(prepared)
@@ -630,7 +676,7 @@ enum ComponentPreparationChecks {
                     "count work resource mismatch", "counted text differs from dispatch", "count evidence missing",
                     "provider count evidence mismatch", "count work not unique", "component allowance mismatch",
                     "answer count linkage mismatch", "frozen policy lacks proof", "proof has no frozen policy",
-                    "unsupported model observation", "model observation linkage mismatch"]
+                    "unsupported model observation", "model observation linkage mismatch", "unsupported JSON format capability"]
                 let journalPrefix = "component journal "
                 if reason.hasPrefix(journalPrefix) {
                     let suffix = String(reason.dropFirst(journalPrefix.count))

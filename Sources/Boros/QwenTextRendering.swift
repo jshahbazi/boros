@@ -205,6 +205,12 @@ enum Qwen38TextRendering {
     static let templateDigest = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
     static let serverVersion = "26.10.1"
     static let lowInstructions = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration."
+    /// Optional preprocessing pinned independently of the unchanged base
+    /// renderer/policy. Absent response_format retains the original bytes.
+    /// mlx-serve 02bee553f48cd3bc7d82aba0f8073820bd924738, server.zig:8729–8749.
+    static let jsonObjectRenderingVersion = "mlx-serve-qwen38-json-object-v1"
+    static let jsonObjectInstructionSHA256 = "7291d7ca4c4f2045ce0f23a5ce750792eb630b6bb2541ca69759cd3811a4f14a"
+    static let jsonObjectInstruction = "Respond with valid JSON only. No other text, no markdown fences (no ``` or ```json), no explanation. Begin your response with `{` or `[`."
 
     static func render(_ body: [String: Any]) throws -> String {
         try renderAttributed(body, assignments: nil).complete
@@ -222,6 +228,12 @@ enum Qwen38TextRendering {
               body["tools"] == nil, body["continue_final_message"] == nil else {
             throw QwenTextRenderingError.unverifiedAdapter
         }
+        let jsonObject: Bool
+        if let format = body["response_format"] {
+            guard let value = format as? [String: Any], Set(value.keys) == ["type"],
+                  value["type"] as? String == "json_object", !thinking else { throw QwenTextRenderingError.unverifiedAdapter }
+            jsonObject = true
+        } else { jsonObject = false }
         // mlx-serve drops exactly empty plain text messages before Jinja rendering.
         if let assignments {
             guard assignments.count == raw.count,
@@ -238,7 +250,14 @@ enum Qwen38TextRendering {
                   return message["role"] == "user" && !(value.hasPrefix("<tool_response>") && value.hasSuffix("</tool_response>"))
               }) else { throw QwenTextRenderingError.invalidRequest }
         var rendered = "", recent = "", evidence = ""
-        let system = messages.first?["role"] == "system" ? trim(messages[0]["content"] ?? "") : ""
+        let retainedSystem = messages.first?["role"] == "system"
+        var rawSystem = retainedSystem ? messages[0]["content"] ?? "" : ""
+        // Server filters exactly empty messages, then appends to raw System
+        // content or inserts System, and only then invokes Jinja trimming.
+        // Injection belongs entirely to mandatory input; indexed historical
+        // messages and their original provenance assignments stay untouched.
+        if jsonObject { rawSystem = retainedSystem ? rawSystem + "\n\n" + jsonObjectInstruction : jsonObjectInstruction }
+        let system = trim(rawSystem)
         let instruction = thinking ? lowInstructions : ""
         if !system.isEmpty || !instruction.isEmpty {
             rendered += "<|im_start|>system\n" + instruction

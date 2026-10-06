@@ -25,6 +25,20 @@ FORMAT_INSTRUCTION_SYSTEM = ("Be helpful, concise, and accurate. Follow the user
     "without Markdown fences or explanatory text.")
 FORMAT_CONFIGURATION_SHA256 = "2b1535b93ea3bbb16035bbe3f744b6e4c980eac9837ea8694925fc5554d37e69"
 FORMAT_NATIVE_CONFIGURATION_SHA256 = "f13e87eb29ce2ecf88746293d3f01d74841394dc0a0aca3d2e9d5747dda53361"
+JSON_OBJECT_AMENDMENT = "provider-json-object-v1"
+JSON_OBJECT_CONFIGURATION_SHA256 = "9bc6d9649f9c9c4cc40682f79fc0babbe3397a0211856d708a577d907d44c297"
+JSON_OBJECT_NATIVE_CONFIGURATION_SHA256 = "8aef45d2a8c7d20b8ee669606df5094f9d4ec960f82496841e8680dd433167cd"
+JSON_OBJECT_PROJECTION_SHA256 = (
+    "7eaa4b959959b0afcb5f9895634e552eae1bac062e3100ab1f0d2d8d2653bdcb",
+    "ab841b6f5611ed3df034b384ec440a23c46e9968ffecf61482eea572dce97ade",
+    "52150ae4979989ebf12a9628a6ad0aecd2960150f5b15e897c85c0ba2d02c32e",
+    "42cdff1f9aa72c7b2c7ce8724d26c6397038b9288e354cb5f1346b5d80e2f790",
+    "fa40c8a36239be193de2f88bc80b10ef54a1eb1b476b9d8fad58ff8d2d9fb2b7",
+    "eaa7aa2b33c5c51acbb42f805e82709ff7409a72acaa36702cdcc5c66770a835",
+    "5238c51f6ec58ad3908a3654ae0fbe1f0a373dd13bec9ff040338459cb138218",
+    "09316ffa9fc3f26d2dc81acad2eb7ede0c1c1c9b12dd678e6c80d38ed9c8230c",
+    "eedf2f3ca33017e90b1ad449be99ef50bddba4f792b5f9635f44001151cbccdb",
+)
 PROJECTION_SHA256 = (
     "ae74877c63469436c0e8e17c16f9f4098eeee06e34f5a52f68ddaf8ae0f32aee",
     "5dd12260c9eaedf39965285cdb1d0cd821bde4d8a3ce53d67546854dc06b950a",
@@ -49,9 +63,11 @@ ORACLE_SHA256 = (
 )
 
 
-def projection(pack):
+def projection(pack, *, json_object=False):
+    if type(json_object) is not bool:
+        raise e.EvaluationError("invalid evidence control amendment option")
     probe = pack["episodes"][0]
-    return {"version": 2, "split": "development", "history_id": pack["id"],
+    return {"version": 3 if json_object else 2, "split": "development", "history_id": pack["id"],
         "events": [{"id": event["id"], "project_id": event["projectID"],
                     "conversation_key": event["conversationKey"],
                     "role": {"human": "user", "assistant": "assistant"}[event["role"]],
@@ -62,24 +78,36 @@ def projection(pack):
 
 
 def validate_configuration(configuration):
+    if isinstance(configuration, dict) and "response_format" in configuration:
+        if configuration["response_format"] != "json_object":
+            raise e.EvaluationError("evidence control configuration pin mismatch")
+        e.validate_configuration({key: value for key, value in configuration.items() if key != "response_format"})
+        if e.digest(canonical_json(configuration)) != JSON_OBJECT_CONFIGURATION_SHA256:
+            raise e.EvaluationError("evidence control configuration pin mismatch")
+        return dict(configuration)
     configuration = e.validate_configuration(configuration)
     if e.digest(canonical_json(configuration)) not in (CONFIGURATION_SHA256, FORMAT_CONFIGURATION_SHA256):
         raise e.EvaluationError("evidence control configuration pin mismatch")
     return configuration
 
 
-def selected_configuration(*, format_instructions=False):
-    if type(format_instructions) is not bool:
+def selected_configuration(*, format_instructions=False, json_object=False):
+    if (type(format_instructions) is not bool or type(json_object) is not bool
+            or (format_instructions and json_object)):
         raise e.EvaluationError("invalid evidence control amendment option")
     configuration = dict(developer.CONFIGURATION)
     if format_instructions:
         configuration["system"] = FORMAT_INSTRUCTION_SYSTEM
+    if json_object:
+        configuration["response_format"] = "json_object"
     return validate_configuration(configuration)
 
 
 def configuration_pins(configuration):
     configuration = validate_configuration(configuration)
     pin = e.digest(canonical_json(configuration))
+    if pin == JSON_OBJECT_CONFIGURATION_SHA256:
+        return pin, JSON_OBJECT_NATIVE_CONFIGURATION_SHA256, JSON_OBJECT_AMENDMENT
     if pin == FORMAT_CONFIGURATION_SHA256:
         return pin, FORMAT_NATIVE_CONFIGURATION_SHA256, FORMAT_INSTRUCTION_AMENDMENT
     return pin, NATIVE_CONFIGURATION_SHA256, None
@@ -112,8 +140,14 @@ def validate_pack(pack):
 
 
 def runner_input(pack, configuration):
-    validate_pack(pack)
-    return {**projection(pack), "configuration": validate_configuration(configuration)}
+    index = validate_pack(pack)
+    configuration = validate_configuration(configuration)
+    json_object = "response_format" in configuration
+    value = projection(pack, json_object=json_object)
+    pins = JSON_OBJECT_PROJECTION_SHA256 if json_object else PROJECTION_SHA256
+    if e.digest(canonical_json(value)) != pins[index]:
+        raise e.EvaluationError("evidence control projection pin mismatch")
+    return {**value, "configuration": configuration}
 
 
 def prepare(source: Path):
