@@ -76,7 +76,7 @@ enum SemanticChecks {
         index = nil
         checks.merge(try continuationChecks(store: store!, conversationID: first.id)) { _, new in new }
         checks.merge(try failureChecks(store: store!)) { _, new in new }
-        checks.merge(try sourceIntegrityChecks(store: store!)) { _, new in new }
+        checks.merge(try sourceIntegrityChecks()) { _, new in new }
         checks.merge(try asynchronousChecks(store: store!)) { _, new in new }
         checks.merge(try nativeAdapterChecks()) { _, new in new }
         checks.merge(try meteredSearchChecks(store: store!)) { _, new in new }
@@ -194,7 +194,12 @@ enum SemanticChecks {
         return checks
     }
 
-    private static func sourceIntegrityChecks(store: MemoryStore) throws -> [String: Bool] {
+    private static func sourceIntegrityChecks() throws -> [String: Bool] {
+        // External source-corruption schedules cannot leave another fixture's
+        // live owner trusted for later foreground accounting.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-semantic-source-integrity-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory)
         let conversation = try store.createConversation(projectID: "semantic-integrity", title: "Synthetic source integrity")
         let original = String(repeating: "A bicycle follows the river road. ", count: 12)
         let saved = try store.append(conversationID: conversation.id, role: .human, text: original, status: .complete, turnID: "integrity-turn", eventID: "semantic-integrity-source")

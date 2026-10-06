@@ -32,6 +32,15 @@ enum AuthorityBindingChecks {
         var raw:OpaquePointer?; guard sqlite3_open_v2(directory.appendingPathComponent("memory.sqlite3").path,&raw,SQLITE_OPEN_READWRITE,nil)==SQLITE_OK,let handle=raw else { throw CheckError.invalid }
         defer { sqlite3_close(handle) }; sqlite3_busy_timeout(handle,3000); return try body(handle)
     }
+    private static func durableResources(_ directory:URL,episodeID:String)throws->(EpisodeResources,EpisodeResources) {
+        try database(directory) { db in
+            var charged=EpisodeResources.zero,held=EpisodeResources.zero
+            let values=try AuthorityStateKernel.rows(db,"SELECT resource,charged,held FROM episode_resource_totals WHERE episode_id=?",[.text(episodeID)])
+            guard values.count == EpisodeResource.allCases.count else { throw CheckError.invalid }
+            for row in values { guard let key=EpisodeResource(rawValue:row[0].string) else { throw CheckError.invalid }; charged[key]=row[1].integer; held[key]=row[2].integer }
+            return(charged,held)
+        }
+    }
     private static func counts(_ directory:URL)throws->[Int] { try database(directory) { db in try ["events","episodes","authority_tasks","authority_episode_bindings","episode_work","authority_work_bindings"].map { name in try AuthorityStateKernel.rows(db,"SELECT count(*) FROM "+name)[0][0].integer } } }
     private static func bindingBytes(_ directory:URL)throws->[Data] { try database(directory) { db in try AuthorityBindings.tableNames.flatMap { name in try AuthorityStateKernel.rows(db,"SELECT payload FROM "+name+" ORDER BY id COLLATE BINARY").map { guard let value=$0[0].bytes else { throw CheckError.invalid }; return value } } } }
     private static func mutation(_ store:MemoryStore,_ name:String,_ operation:AuthorityOperation,task:String?=nil,project:String?=nil,conversation:String?=nil,expectedTask:Int?=nil,policyID:String?=nil,policy:AuthorityPolicyDefinition?=nil,at:Int64=100)throws {
@@ -177,7 +186,7 @@ enum AuthorityBindingChecks {
         let retained=try bindingBytes(source), inventory=try database(source) { try AuthorityBindingJournal.inventory(database:$0) }
         checks["authority_binding_inventory_explicit_managed_and_legacy_classification"]=inventory.managedEpisodes == 1 && inventory.legacyEpisodes == 1 && inventory.managedWork == 1 && inventory.legacyWork == 0
         let manifest=try BackupArchive.create(from:owner,at:archive)
-        checks["authority_binding_archive_manifest_inventory_exact"]=manifest.inventory.authorityBindingInventory == inventory && manifest.databaseSchema == 7
+        checks["authority_binding_archive_manifest_inventory_exact"]=manifest.inventory.authorityBindingInventory == inventory && manifest.databaseSchema == 8
         checks["authority_binding_archive_verify_exact_manifest"]=try BackupArchive.verify(at:archive) == manifest
         _ = try BackupArchive.restore(from:archive,to:restored,authority:.unmanagedNoDeletion)
         let restoredOwner=try MemoryStore(directory:restored)
@@ -240,7 +249,6 @@ enum AuthorityBindingChecks {
         let byteConversation=try byteOwner.createConversation(projectID:"synthetic-binding-project",title:"Synthetic byte exhaustion")
         var noBytes=limits(); noBytes.resources.rawSourceBytes=0
         let byteAccepted=try byteOwner.acceptManagedHumanRequest(conversationID:byteConversation.id,turnID:"byte-turn",humanEventID:"byte-human",episodeID:"byte-episode",requestID:"byte-request",text:"Synthetic accepted request",limits:noBytes,authority:context(byteOwner),clock:clock())
-        try database(byteDirectory) { try AuthorityStateKernel.execute($0,"UPDATE events SET payload=? WHERE id='byte-human'",[.bytes(Data("Synthetix accepted request".utf8))]) }
         var exhaustion=false
         do { _ = try byteOwner.validateManagedAuthority(episodeID:byteAccepted.episode.id,clock:clock()) } catch EpisodeBudgetError.exhausted { exhaustion=true } catch { }
         checks["authority_binding_zero_byte_allowance_exhausts_before_original_payload_proof"]=exhaustion
@@ -265,8 +273,9 @@ enum AuthorityBindingChecks {
         let originalSource=try accept(corrupt,corruptConversation.id,"changed-source")
         try database(corruptDirectory) { try AuthorityStateKernel.execute($0,"UPDATE events SET payload=? WHERE id='changed-source-human'",[.bytes(Data("Synthetix accepted request".utf8))]) }
         checks["authority_binding_validation_checks_original_source_bytes"]=rejects { _ = try corrupt.validateManagedAuthority(episodeID:originalSource.episode.id,clock:clock()) }
-        let damaged=try corrupt.episodeReceipt(id:originalSource.episode.id,clock:clock())
-        checks["authority_binding_failed_original_source_proof_retains_charges"]=damaged.charged.memoryOperations == 4 && damaged.charged.rawSourceBytes >= originalSource.binding.acceptedSource!.byteCount && damaged.held == .zero
+        let damaged=try durableResources(corruptDirectory,episodeID:originalSource.episode.id)
+        checks["authority_binding_external_source_change_refuses_unvalidated_accounting_before_funding"]=rejects { _ = try corrupt.episodeReceipt(id:originalSource.episode.id,clock:clock()) } && damaged.0 == .zero && damaged.1 == .zero
+        checks["authority_binding_changed_original_source_offline_proof_rejected"]=rejects { try database(corruptDirectory) { try AuthorityBindingJournal.validate(database:$0) } }
     }
     private static func validationRegressions(_ directory:URL,_ checks:inout [String:Bool])throws {
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
@@ -282,8 +291,9 @@ enum AuthorityBindingChecks {
             let accepted=try accept(owner,conversation.id,name)
             try database(fixture) { try alterManaged($0,table:"authority_episode_bindings",key:key,value:value) }
             checks["authority_binding_validation_"+name+"_rehashed_record_refused"]=rejects { _ = try owner.validateManagedAuthority(episodeID:accepted.episode.id,clock:clock()) }
-            let receipt=try owner.episodeReceipt(id:accepted.episode.id,clock:clock())
-            checks["authority_binding_validation_"+name+"_failed_cost_retained"]=receipt.charged.memoryOperations == 4 && receipt.held == .zero
+            let receipt=try durableResources(fixture,episodeID:accepted.episode.id)
+            checks["authority_binding_validation_"+name+"_refuses_unvalidated_accounting_before_funding"]=rejects { _ = try owner.episodeReceipt(id:accepted.episode.id,clock:clock()) } && receipt.0 == .zero && receipt.1 == .zero
+            checks["authority_binding_validation_"+name+"_independent_original_proof_rejected"]=rejects { try database(fixture) { try AuthorityBindingJournal.validate(database:$0) } }
         }
         let swappedDirectory=directory.appendingPathComponent("swapped-accepted-source"), swapped=try MemoryStore(directory:swappedDirectory)
         let conversation=try swapped.createConversation(projectID:"synthetic-binding-project",title:"Synthetic swapped source")
@@ -300,8 +310,9 @@ enum AuthorityBindingChecks {
             }
         }
         checks["authority_binding_validation_swapped_complete_human_source_refused"]=rejects { _ = try swapped.validateManagedAuthority(episodeID:accepted.episode.id,clock:clock()) }
-        let swappedReceipt=try swapped.episodeReceipt(id:accepted.episode.id,clock:clock())
-        checks["authority_binding_validation_swapped_source_failed_cost_retained"]=swappedReceipt.charged.memoryOperations == 4 && swappedReceipt.held == .zero
+        let swappedReceipt=try durableResources(swappedDirectory,episodeID:accepted.episode.id)
+        checks["authority_binding_validation_swapped_source_refuses_unvalidated_accounting_before_funding"]=rejects { _ = try swapped.episodeReceipt(id:accepted.episode.id,clock:clock()) } && swappedReceipt.0 == .zero && swappedReceipt.1 == .zero
+        checks["authority_binding_validation_swapped_source_independent_original_proof_rejected"]=rejects { try database(swappedDirectory) { try AuthorityBindingJournal.validate(database:$0) } }
         let textDirectory=directory.appendingPathComponent("text-affinity")
         var textPhases:[String]=[]
         let textOwner=try MemoryStore(directory:textDirectory,authorityValidationCheckpoint:{ textPhases.append($0) })
@@ -310,9 +321,10 @@ enum AuthorityBindingChecks {
         let textAccepted=try accept(textOwner,textConversation.id,"text-storage")
         try database(textDirectory) { try AuthorityStateKernel.execute($0,"UPDATE authority_operations SET request_payload=CAST(request_payload AS TEXT) WHERE request_id='unicode-policy'") }
         checks["authority_binding_validation_text_blob_affinity_fixture_has_utf8_size_gap"]=try database(textDirectory) { db in let row=try AuthorityStateKernel.rows(db,"SELECT typeof(request_payload),length(request_payload),length(CAST(request_payload AS BLOB)) FROM authority_operations WHERE request_id='unicode-policy'")[0]; return row[0].string == "text" && row[1].integer < row[2].integer }
-        checks["authority_binding_validation_unicode_text_request_payload_refused_before_descriptors"]=rejects { _ = try textOwner.validateManagedAuthority(episodeID:textAccepted.episode.id,clock:clock()) } && textPhases == ["metadata"]
-        let textReceipt=try textOwner.episodeReceipt(id:textAccepted.episode.id,clock:clock())
-        checks["authority_binding_validation_text_affinity_retains_only_metadata_charge"]=textReceipt.charged.memoryOperations == 1 && textReceipt.charged.rawSourceBytes == 0 && textReceipt.held == .zero
+        checks["authority_binding_validation_unicode_text_request_payload_refused_before_funding"]=rejects { _ = try textOwner.validateManagedAuthority(episodeID:textAccepted.episode.id,clock:clock()) } && textPhases.isEmpty
+        let textReceipt=try durableResources(textDirectory,episodeID:textAccepted.episode.id)
+        checks["authority_binding_validation_text_affinity_refuses_unvalidated_accounting_without_new_charge"]=rejects { _ = try textOwner.episodeReceipt(id:textAccepted.episode.id,clock:clock()) } && textReceipt.0 == .zero && textReceipt.1 == .zero
+        checks["authority_binding_validation_text_affinity_independent_original_proof_rejected"]=rejects { try database(textDirectory) { try AuthorityBindingJournal.validate(database:$0) } }
         for growth in [false,true] {
             let name=growth ? "grow":"replace", raceDirectory=directory.appendingPathComponent("external-"+name)
             var phases:[String]=[], injected=false
@@ -334,10 +346,11 @@ enum AuthorityBindingChecks {
             do { _ = try race.validateManagedAuthority(episodeID:bound.episode.id,clock:clock()) } catch AuthorityStateError.staleRevision { stale=true } catch { }
             checks["authority_binding_validation_external_"+name+"_after_sizing_rejected_as_stale"]=injected && stale
             checks["authority_binding_validation_external_"+name+"_fenced_before_source_or_replay_phase"]=phases == ["metadata","journal-descriptors"]
-            let cost=try race.episodeReceipt(id:bound.episode.id,clock:clock())
-            checks["authority_binding_validation_external_"+name+"_preserves_two_armed_phase_charges"]=cost.charged.memoryOperations == 2 && cost.charged.rawSourceBytes > 0 && cost.held == .zero
+            let cost=try durableResources(raceDirectory,episodeID:bound.episode.id)
+            checks["authority_binding_validation_external_"+name+"_preserves_two_armed_phase_charges"]=cost.0.memoryOperations == 2 && cost.0.rawSourceBytes > 0 && cost.1 == .zero
+            checks["authority_binding_validation_external_"+name+"_accounting_requires_owner_revalidation"]=rejects { _ = try race.episodeReceipt(id:bound.episode.id,clock:clock()) }
             let work=try database(raceDirectory) { try AuthorityStateKernel.rows($0,"SELECT adapter_identity,state FROM episode_work ORDER BY created_ticks,id") }
-            checks["authority_binding_validation_external_"+name+"_settles_descriptor_failure_without_new_work"]=work.count == 2 && work.contains { $0[0].string == "authority-validation-v1:metadata" && $0[1].string == "completed" } && work.contains { $0[0].string == "authority-validation-v1:journal-descriptors" && $0[1].string == "failedConfirmed" }
+            checks["authority_binding_validation_external_"+name+"_retains_armed_descriptor_without_unvalidated_settlement"]=work.count == 2 && work.contains { $0[0].string == "authority-validation-v1:metadata" && $0[1].string == "completed" } && work.contains { $0[0].string == "authority-validation-v1:journal-descriptors" && $0[1].string == "dispatchArmed" }
         }
     }
     private static func corruption(_ directory:URL,_ checks:inout [String:Bool])throws {

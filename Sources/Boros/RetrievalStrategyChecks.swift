@@ -8,7 +8,13 @@ enum RetrievalStrategyChecks {
     static func run() throws -> [String: Bool] {
         let directory = try fixtureDirectory(prefix: "boros-retrieval-strategy-")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try MemoryStore(directory: directory)
+        var corruptEventID: String?, corruptByteCount = 0
+        let store = try MemoryStore(directory: directory, episodeAccountingCheckpoint: { phase, database in
+            if phase == "before-accounting-lookup", let eventID = corruptEventID {
+                corruptEventID = nil
+                try corruptPayload(database: database, eventID: eventID, byteCount: corruptByteCount)
+            }
+        })
         let project = "synthetic-strategy-project", prompt = "Where is strategyneedle? 日本語 e\u{301}"
         let chat = try store.createConversation(projectID: project, title: "Synthetic strategy recent")
         let archive = try store.createConversation(projectID: project, title: "Synthetic strategy archive")
@@ -94,9 +100,10 @@ enum RetrievalStrategyChecks {
             checks["strategy_recent_only_still_rejects_changed_accepted_bytes"] = try error is ContextError
                 && sourceWorkEqual(beforeWrong.charged, try lease.checkActive().charged) && encoder.calls == callsAfterBuild + 1
         }
-        // This original is eligible for the question but cannot be read after
-        // corruption. The new strategy must leave it entirely untouched.
-        try corruptPayload(store: store, eventID: old.id, byteCount: old.byteCount)
+        // Deliberate same-connection source corruption leaves accounting rows
+        // untouched. An external commit would instead invalidate all funding
+        // confidence, preventing this source-access isolation measurement.
+        corruptEventID = old.id; corruptByteCount = old.byteCount
         let beforeCorruptSelection = try lease.checkActive(), callsBeforeCorrupt = encoder.calls
         _ = try ChatContextPreparation.prepareEvidence(recent: recent, store: store,
             conversationID: chat.id, projectID: project, prompt: prompt, excludingEventID: currentID,
@@ -352,8 +359,7 @@ enum RetrievalStrategyChecks {
             return Int(sqlite3_column_int64(statement, 0))
         }
     }
-    private static func corruptPayload(store: MemoryStore, eventID: String, byteCount: Int) throws {
-        try database(store, readonly: false) { database in
+    private static func corruptPayload(database: OpaquePointer, eventID: String, byteCount: Int) throws {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(database, "UPDATE events SET payload=zeroblob(?) WHERE id=?", -1, &statement, nil) == SQLITE_OK,
                   let statement else { throw ContextError.invalidBudget }
@@ -361,7 +367,6 @@ enum RetrievalStrategyChecks {
             sqlite3_bind_int64(statement, 1, Int64(byteCount))
             _ = eventID.withCString { sqlite3_bind_text(statement, 2, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
             guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(database) == 1 else { throw ContextError.invalidBudget }
-        }
     }
     private static func database<T>(_ store: MemoryStore, readonly: Bool, operation: (OpaquePointer) throws -> T) throws -> T {
         var raw: OpaquePointer?

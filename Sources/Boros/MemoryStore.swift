@@ -166,6 +166,10 @@ final class MemoryStore: @unchecked Sendable {
     private let authorityValidationCheckpoint: ((String) throws -> Void)?
     private let authorityCacheLimits: AuthorityValidationCacheLimits
     private let authorityCacheCheckpoint: ((String, OpaquePointer) throws -> Void)?
+    private let episodeAccountingCheckpoint: ((String, OpaquePointer) throws -> Void)?
+    private var accountingExternalVersion: Int?
+    private var accountingWriteGeneration: UInt64?
+    private var accountingBootstrapping = true
     private let authorityCacheWrites = AuthorityCacheWriteObserver()
     private var authorityCache: AuthorityValidationCacheEntry?
     private var authoritySessions: [Data: AuthorityValidationSession] = [:]
@@ -184,11 +188,13 @@ final class MemoryStore: @unchecked Sendable {
     init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil,
         authorityValidationCheckpoint: ((String) throws -> Void)? = nil,
         authorityCacheLimits: AuthorityValidationCacheLimits = .defaults,
-        authorityCacheCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil) throws {
+        authorityCacheCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil,
+        episodeAccountingCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil) throws {
         self.directory = directory.standardizedFileURL
         self.authorityValidationCheckpoint = authorityValidationCheckpoint
         self.authorityCacheLimits = try authorityCacheLimits.validated()
         self.authorityCacheCheckpoint = authorityCacheCheckpoint
+        self.episodeAccountingCheckpoint = episodeAccountingCheckpoint
         do {
             try Self.prepareDirectory(self.directory)
             let lockPath = self.directory.appendingPathComponent("owner.lock").path
@@ -207,7 +213,20 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard (0...7).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            guard (0...8).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            if version == 7, let database { try AuthoritySchemaSeven.validate(database: database) }
+            if version == 8, let database {
+                try transaction {
+                    try AuthoritySchemaSeven.validate(database: database, additionalStatements: EpisodeAccountingJournal.schemaStatements)
+                    try Self.validateEpisodeJournal(database: database)
+                }
+            }
+            if version < 8 {
+                let names = EpisodeAccountingJournal.tableNames.map { "'" + $0 + "'" }.joined(separator: ",")
+                guard try query("SELECT name FROM sqlite_schema WHERE name IN (" + names + ") OR tbl_name IN (" + names + ")", map: { string($0, 0) }).isEmpty else {
+                    throw MemoryError.database("historical schema contains an accounting projection")
+                }
+            }
             if version >= 5 {
                 guard let database else { throw MemoryError.database("closed owner") }
                 try BackgroundIndexJournal.validate(database: database)
@@ -218,10 +237,13 @@ final class MemoryStore: @unchecked Sendable {
             if version >= 6 {
                 guard let database else { throw MemoryError.database("closed owner") }
                 try AuthorityStateJournal.validate(database: database)
-                if version == 7 { try AuthorityBindingJournal.validate(database: database) }
+                if version >= 7 { try AuthorityBindingJournal.validate(database: database) }
             } else {
                 let existingAuthority = try query("SELECT name FROM sqlite_master WHERE name LIKE 'authority_%'") { string($0, 0) }
                 guard existingAuthority.isEmpty else { throw MemoryError.database("historical schema contains an authority inventory") }
+            }
+            if (3...7).contains(version), let database {
+                try transaction { try Self.validateEpisodeJournal(database: database) }
             }
             // Foreign keys must be disabled outside the replacement transaction.
             // Children retain REFERENCES episodes while that parent is rebuilt.
@@ -288,9 +310,11 @@ final class MemoryStore: @unchecked Sendable {
                 try AuthorityStateKernel.install(database: database, ownerID: "local-owner:\(geteuid())")
                 try AuthorityBindings.install(database: database)
                 if version < 7 { try AuthorityBindingJournal.classifyLegacy(database: database) }
+                try EpisodeAccountingJournal.install(database: database)
+                if version < 8 { try EpisodeAccountingJournal.backfill(database: database) }
                 let violations = try query("PRAGMA foreign_key_check") { string($0, 0) }
                 guard violations.isEmpty else { throw MemoryError.database("episode migration foreign-key failure") }
-                try execute("PRAGMA user_version=7")
+                try execute("PRAGMA user_version=8")
                 if version == 3 { try episodeMigrationCheckpoint?("beforeCommit") }
             }
             try execute("PRAGMA foreign_keys=ON")
@@ -304,6 +328,16 @@ final class MemoryStore: @unchecked Sendable {
             try recoverInterruptedInvocations()
             try recoverInterruptedBackgroundWork()
             try secureSidecars()
+            // Reconstruct authoritative ledger metadata under one write fence.
+            // Never silently repair a current projection after corruption.
+            try transaction {
+                guard let database else { throw MemoryError.database("closed owner") }
+                try AuthoritySchemaSeven.validate(database: database, additionalStatements: EpisodeAccountingJournal.schemaStatements)
+                try Self.validateEpisodeJournal(database: database)
+                accountingExternalVersion = try scalarInteger("PRAGMA data_version")
+                accountingWriteGeneration = authorityCacheWrites.accountingGeneration
+                accountingBootstrapping = false
+            }
             if let database { try authorityCacheWrites.install(on: database) }
         } catch {
             if let database { sqlite3_close(database); self.database = nil }
@@ -1841,7 +1875,12 @@ extension MemoryStore: EpisodeLedger {
         guard limits.deadlineMilliseconds > 0, limits.deadlineMilliseconds <= 86_400_000 else { throw EpisodeBudgetError.invalid }
     }
     private func findEpisode(_ id: String) throws -> EpisodeReceipt? {
-        try query("SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,deadline_ticks,created_utc,origin_json,origin_digest FROM episodes WHERE id=?", [.text(id)]) { row in
+        guard let database else { throw MemoryError.database("closed owner") }
+        if sqlite3_get_autocommit(database) != 0 {
+            return try transaction { try findEpisode(id) }
+        }
+        try requireAccountingConfidenceLocked()
+        return try query("SELECT id,conversation_id,project_id,turn_id,human_event_id,limits_json,limits_digest,state,revision,clock_domain,deadline_ticks,created_utc,origin_json,origin_digest FROM episodes WHERE id=?", [.text(id)]) { row in
             let data = blob(row, 5)
             guard Self.digest(data) == string(row, 6), let state = EpisodeState(rawValue: string(row, 7)) else { throw MemoryError.database("episode failed integrity verification") }
             let limits = try episodeDecode(EpisodeLimits.self, data)
@@ -1868,9 +1907,25 @@ extension MemoryStore: EpisodeLedger {
                 return resource
             }
             guard totals.count == EpisodeResource.allCases.count, Set(totals).count == totals.count else { throw MemoryError.database("episode resource vector incomplete") }
-            let unknown = try query("SELECT count(*) FROM episode_work WHERE episode_id=? AND state NOT IN ('prepared','cancelledBeforeDispatch') AND json_extract(request_json,'$.inputTokensKnown')=0 AND json_extract(request_json,'$.resources.modelCalls')>0", [.text(id)]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
+            let unknown = try EpisodeAccountingJournal.summary(database: database, episodeID: id).unknownInputOperations
             return EpisodeReceipt(id: string(row, 0), conversationID: conversationID, projectID: string(row, 2), turnID: turnID, humanEventID: humanEventID, origin: origin, limits: limits, state: state, revision: Int(sqlite3_column_int64(row, 8)), clockDomain: string(row, 9), deadlineNanoseconds: UInt64(sqlite3_column_int64(row, 10)), createdAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 11)), charged: charged, held: held, unknownInputOperations: unknown)
         }.first
+    }
+    private func requireAccountingConfidenceLocked() throws {
+        guard let database, sqlite3_get_autocommit(database) == 0 else { throw AuthorityStateError.integrity }
+        if accountingBootstrapping { return }
+        func check() throws {
+            guard authorityCacheWrites.canTrustAccounting,
+                accountingWriteGeneration == authorityCacheWrites.accountingGeneration,
+                accountingExternalVersion == (try scalarInteger("PRAGMA data_version")) else {
+                throw AuthorityStateError.staleRevision
+            }
+        }
+        try check()
+        try withAuthorityCacheWrites(.unknown) {
+            try episodeAccountingCheckpoint?("before-accounting-lookup", database)
+        }
+        try check()
     }
     private func findEpisodeWork(_ id: String) throws -> EpisodeWorkRecord? {
         try query("SELECT id,episode_id,request_json,request_digest,snapshot_digest,revision,state,charged_json,held_json,observed_json,receipt_id,recovered,receipt_json,receipt_digest FROM episode_work WHERE id=?", [.text(id)]) { row in
@@ -1903,20 +1958,27 @@ extension MemoryStore: EpisodeLedger {
         }
     }
     private func terminalizeEpisode(_ episode: EpisodeReceipt, reason: EpisodeState, ticks: UInt64) throws {
-        guard reason != .active else { throw EpisodeBudgetError.invalid }
-        if episode.state != .active { return }
-        guard episode.revision < Int.max else { throw EpisodeBudgetError.invalid }
-        let works = try query("SELECT id FROM episode_work WHERE episode_id=? AND state IN ('prepared','dispatchArmed','submitted')", [.text(episode.id)]) { string($0, 0) }
-        for id in works {
-            guard let work = try findEpisodeWork(id), let current = try findEpisode(episode.id) else { throw MemoryError.database("episode work disappeared") }
-            if work.state == .prepared {
-                try updateEpisodeTotals(current, replacing: work, charged: work.charged, held: .zero)
-                try execute("UPDATE episode_work SET state='cancelledBeforeDispatch',held_json=?,ended_ticks=? WHERE id=?", [.blob(try episodeJSON(EpisodeResources.zero)), .integer(Int(ticks)), .text(id)])
-            } else {
-                try execute("UPDATE episode_work SET state='outcomeUnknown',ended_ticks=? WHERE id=?", [.integer(Int(ticks)), .text(id)])
+        try withAuthorityCacheWrites(.ledger) {
+            guard reason != .active else { throw EpisodeBudgetError.invalid }
+            if episode.state != .active { return }
+            guard episode.revision < Int.max else { throw EpisodeBudgetError.invalid }
+            let works = try query("SELECT id FROM episode_work WHERE episode_id=? AND state IN ('prepared','dispatchArmed','submitted')", [.text(episode.id)]) { string($0, 0) }
+            for id in works {
+                guard let work = try findEpisodeWork(id), let current = try findEpisode(episode.id) else { throw MemoryError.database("episode work disappeared") }
+                guard let database else { throw MemoryError.database("closed owner") }
+                if work.state == .prepared {
+                    try updateEpisodeTotals(current, replacing: work, charged: work.charged, held: .zero)
+                    try execute("UPDATE episode_work SET state='cancelledBeforeDispatch',held_json=?,ended_ticks=? WHERE id=?", [.blob(try episodeJSON(EpisodeResources.zero)), .integer(Int(ticks)), .text(id)])
+                    try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episode.id, request: work.request,
+                        from: work.state, to: .cancelledBeforeDispatch)
+                } else {
+                    try execute("UPDATE episode_work SET state='outcomeUnknown',ended_ticks=? WHERE id=?", [.integer(Int(ticks)), .text(id)])
+                    try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episode.id, request: work.request,
+                        from: work.state, to: .outcomeUnknown)
+                }
             }
+            try execute("UPDATE episodes SET state=?,terminal_reason=?,revision=revision+1 WHERE id=? AND state='active'", [.text(reason.rawValue), .text(reason.rawValue), .text(episode.id)])
         }
-        try execute("UPDATE episodes SET state=?,terminal_reason=?,revision=revision+1 WHERE id=? AND state='active'", [.text(reason.rawValue), .text(reason.rawValue), .text(episode.id)])
     }
     /// Returns an error only after the lifecycle mutation has committed.
     private func advanceEpisodeClock(_ episode: EpisodeReceipt, clock: EpisodeClockSnapshot) throws -> EpisodeBudgetError? {
@@ -1942,7 +2004,7 @@ extension MemoryStore: EpisodeLedger {
     private func acceptRequestAndBeginEpisodeCore(conversationID: String, turnID: String, humanEventID: String, episodeID: String,
         text: String, limits: EpisodeLimits, clock: EpisodeClockSnapshot, managedAuthority: AuthorityContext?,
         buildBinding: (() throws -> AuthorityEpisodeBinding)?) throws -> EpisodeReceipt {
-        try locked {
+        try authorityLedgerLocked {
             try validateEpisodeClock(clock); try validateEpisodeLimits(limits)
             for id in [turnID, humanEventID, episodeID] { try validateIdentifier(id, name: "episode identifier") }
             let scope = try conversation(conversationID), payload = try validatePayload(text)
@@ -1970,6 +2032,7 @@ extension MemoryStore: EpisodeLedger {
                     try execute("INSERT INTO episode_resource_totals VALUES (?,?,0,0,?)", [.text(episodeID), .text(resource.rawValue), .integer(limits.resources[resource])])
                 }
                 guard let database else { throw MemoryError.database("closed owner") }
+                try EpisodeAccountingJournal.createEpisode(database: database, episodeID: episodeID)
                 if let buildBinding, let managedAuthority {
                     try AuthorityBindingJournal.insertManagedEpisode(database: database, binding: buildBinding(), authority: managedAuthority)
                 } else { try AuthorityBindingJournal.insertLegacyEpisode(database: database, id: episodeID) }
@@ -1986,7 +2049,7 @@ extension MemoryStore: EpisodeLedger {
     private func beginLocalReadEpisodeCore(episodeID: String, projectID: String, binding: EpisodeLocalReadBinding,
         limits: EpisodeLimits, clock: EpisodeClockSnapshot, managedAuthority: AuthorityContext?,
         buildBinding: (() throws -> AuthorityEpisodeBinding)?) throws -> EpisodeReceipt {
-        try locked {
+        try authorityLedgerLocked {
             try validateIdentifier(episodeID, name: "episode ID"); try validateIdentifier(projectID, name: "project ID")
             try validateEpisodeClock(clock); try validateEpisodeLimits(limits); _ = try binding.validated()
             let origin = EpisodeOrigin.localRead(binding)
@@ -2015,6 +2078,7 @@ extension MemoryStore: EpisodeLedger {
                     try execute("INSERT INTO episode_resource_totals VALUES (?,?,0,0,?)", [.text(episodeID), .text(resource.rawValue), .integer(limits.resources[resource])])
                 }
                 guard let database else { throw MemoryError.database("closed owner") }
+                try EpisodeAccountingJournal.createEpisode(database: database, episodeID: episodeID)
                 if let buildBinding, let managedAuthority {
                     try AuthorityBindings.insertManagedEpisode(database: database, binding: buildBinding(), authority: managedAuthority)
                 } else { try AuthorityBindings.insertLegacyEpisode(database: database, id: episodeID) }
@@ -2073,12 +2137,12 @@ extension MemoryStore: EpisodeLedger {
                     guard let work = try findEpisodeWork(parent), episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.invalid }
                 }
                 guard try !episodeAdapterQuarantined(request.adapterIdentity) else { failure = .adapterViolation; return }
-                let workCount = try query("SELECT count(*) FROM episode_work WHERE episode_id=?", [.text(episodeID)]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
-                var snapshotBytes = try query("SELECT coalesce(sum(byte_count),0) FROM episode_request_snapshots WHERE digest IN (SELECT DISTINCT snapshot_digest FROM episode_work WHERE episode_id=? AND snapshot_digest IS NOT NULL)", [.text(episodeID)]) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
+                let accounting = try EpisodeAccountingJournal.summary(database: database, episodeID: episodeID)
+                let workCount = accounting.workCount
+                var snapshotBytes = accounting.snapshotBytes
                 if let snapshot = request.snapshot {
                     let digest = Self.digest(snapshot)
-                    let referenced = try query("SELECT id FROM episode_work WHERE episode_id=? AND snapshot_digest=? LIMIT 1", [.text(episodeID), .text(digest)]) { string($0, 0) }
-                    if referenced.isEmpty {
+                    if try !EpisodeAccountingJournal.hasSnapshot(database: database, episodeID: episodeID, digest: digest) {
                         let (next, overflow) = snapshotBytes.addingReportingOverflow(snapshot.count)
                         guard !overflow else { throw EpisodeBudgetError.invalid }
                         snapshotBytes = next
@@ -2110,6 +2174,12 @@ extension MemoryStore: EpisodeLedger {
                 bindings += [.integer(episode.revision), .blob(try episodeJSON(EpisodeResources.zero)), .blob(try episodeJSON(request.resources)), .integer(Int(clock.continuousNanoseconds))]
                 try execute("INSERT INTO episode_work (id,episode_id,parent_id,kind,adapter_identity,request_json,request_digest,snapshot_digest,revision,state,charged_json,held_json,created_ticks) VALUES (?, ?, " + parentSQL + ",?,?,?,?," + snapshotSQL + ",?,'prepared',?,?,?)", bindings)
                 try updateEpisodeTotals(episode, replacing: nil, charged: .zero, held: request.resources)
+                try withAuthorityCacheWrites(.unknown) {
+                    try self.episodeAccountingCheckpoint?("after-work-before-accounting", database)
+                }
+                try requireAccountingConfidenceLocked()
+                try EpisodeAccountingJournal.recordReservedWork(database: database, episodeID: episodeID, request: request,
+                    snapshotDigest: request.snapshot.map(Self.digest), snapshotByteCount: request.snapshot?.count ?? 0)
                 if let authorityBinding { try AuthorityBindingJournal.insertManagedWork(database: database, binding: authorityBinding) }
                 else { try AuthorityBindingJournal.insertLegacyWork(database: database, id: request.id) }
             }
@@ -2123,22 +2193,12 @@ extension MemoryStore: EpisodeLedger {
     /// Matching is binary and validates each candidate's known identity shape.
     /// Unsupported adapter names retain their original exact-key semantics.
     private func episodeAdapterQuarantined(_ adapterIdentity: String) throws -> Bool {
-        guard let family = ProviderAdapterQuarantineFamily.recognize(adapterIdentity) else {
-            return try !query("SELECT id FROM episode_work WHERE adapter_identity=? AND adapter_violation=1 LIMIT 1",
-                [.text(adapterIdentity)], map: { string($0, 0) }).isEmpty
+        guard let database else { throw MemoryError.database("closed owner") }
+        if sqlite3_get_autocommit(database) != 0 {
+            return try transaction { try episodeAdapterQuarantined(adapterIdentity) }
         }
-        let ranges = family.prefixRanges
-        guard ranges.count == 2 else { throw EpisodeBudgetError.invalid }
-        return try query("""
-            SELECT adapter_identity FROM episode_work WHERE adapter_violation=1
-              AND ((adapter_identity>=? COLLATE BINARY AND adapter_identity<? COLLATE BINARY)
-                OR (adapter_identity>=? COLLATE BINARY AND adapter_identity<? COLLATE BINARY))
-              AND substr(adapter_identity,-?)=? COLLATE BINARY
-            """, [.text(ranges[0].lowerInclusive), .text(ranges[0].upperExclusive),
-                .text(ranges[1].lowerInclusive), .text(ranges[1].upperExclusive),
-                .integer(family.thinkingSuffix.utf8.count), .text(family.thinkingSuffix)]) {
-            family.contains(string($0, 0))
-        }.contains(true)
+        try requireAccountingConfidenceLocked()
+        return try EpisodeAccountingJournal.isQuarantined(database: database, adapterIdentity: adapterIdentity)
     }
     private func armEpisodeWorkLocked(episodeID: String, operationID: String, expectedRevision: Int, clock: EpisodeClockSnapshot, managedValidation: Bool = false) throws -> EpisodeWorkRecord {
         let clock = try episodeRuntimeClock(clock)
@@ -2164,6 +2224,8 @@ extension MemoryStore: EpisodeLedger {
             held.outputTokens = charged.outputTokens; charged.outputTokens = 0
             try updateEpisodeTotals(episode, replacing: work, charged: charged, held: held)
             try execute("UPDATE episode_work SET state='dispatchArmed',charged_json=?,held_json=?,armed_ticks=? WHERE id=?", [.blob(try episodeJSON(charged)), .blob(try episodeJSON(held)), .integer(Int(clock.continuousNanoseconds)), .text(operationID)])
+            try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episodeID, request: work.request,
+                from: work.state, to: .dispatchArmed)
         }
         if let failure { throw failure }
         guard let result = try findEpisodeWork(operationID) else { throw MemoryError.database("episode arming failed") }
@@ -2185,7 +2247,13 @@ extension MemoryStore: EpisodeLedger {
                 }
             } else { throw MemoryError.missing("episode") }
             start()
-            try execute("UPDATE episode_work SET state='submitted' WHERE id=? AND state='dispatchArmed'", [.text(operationID)])
+            try authorityLedgerTransaction {
+                try requireAccountingConfidenceLocked()
+                try execute("UPDATE episode_work SET state='submitted' WHERE id=? AND state='dispatchArmed'", [.text(operationID)])
+                guard let database else { throw MemoryError.database("closed owner") }
+                try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episodeID,
+                    request: work.request, from: .dispatchArmed, to: .submitted)
+            }
             guard let result = try findEpisodeWork(work.id) else { throw MemoryError.database("episode handoff failed") }
             return result
         }
@@ -2216,9 +2284,9 @@ extension MemoryStore: EpisodeLedger {
                     guard previous == settlement else { failure = .conflict; return }
                     return
                 }
-                let otherReceipts = try query("SELECT receipt_json FROM episode_work WHERE episode_id=? AND id!=? AND length(receipt_json)>0", [.text(episodeID), .text(operationID)]) { blob($0, 0) }
-                for data in otherReceipts {
-                    guard !((try episodeDecode([EpisodeWorkSettlement].self, data)).contains { episodeIdentifierEqual($0.receiptID, settlement.receiptID) }) else { failure = .conflict; return }
+                guard let database else { throw MemoryError.database("closed owner") }
+                if try EpisodeAccountingJournal.settlementOwner(database: database, episodeID: episodeID, receiptID: settlement.receiptID) != nil {
+                    failure = .conflict; return
                 }
                 guard receipts.count < 3 else { failure = .conflict; return }
                 let wasPrepared = work.state == .prepared || work.state == .cancelledBeforeDispatch
@@ -2267,6 +2335,15 @@ extension MemoryStore: EpisodeLedger {
                 let receiptData = try episodeJSON(receipts)
                 try updateEpisodeTotals(episode, replacing: work, charged: charged, held: held)
                 try execute("UPDATE episode_work SET state=?,charged_json=?,held_json=?,observed_json=?,receipt_id=?,receipt_json=?,receipt_digest=?,ended_ticks=?,adapter_violation=max(adapter_violation,?) WHERE id=?", [.text(nextState.rawValue), .blob(try episodeJSON(charged)), .blob(try episodeJSON(held)), .blob(try settlement.observed.map(episodeJSON) ?? Data()), .text(settlement.receiptID), .blob(receiptData), .text(Self.digest(receiptData)), .integer(Int(clock.continuousNanoseconds)), .integer(violation ? 1 : 0), .text(operationID)])
+                try withAuthorityCacheWrites(.unknown) {
+                    try self.episodeAccountingCheckpoint?("after-settlement-before-accounting", database)
+                }
+                try requireAccountingConfidenceLocked()
+                try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episodeID, request: work.request,
+                    from: work.state, to: nextState)
+                try EpisodeAccountingJournal.recordSettlement(database: database, episodeID: episodeID,
+                    workID: operationID, ordinal: receipts.count - 1, settlement: settlement)
+                if violation { try EpisodeAccountingJournal.recordQuarantine(database: database, workID: operationID, adapterIdentity: work.request.adapterIdentity) }
                 if violation {
                     guard let changed = try findEpisode(episodeID) else { throw MemoryError.database("episode disappeared") }
                     try terminalizeEpisode(changed, reason: .failed, ticks: clock.continuousNanoseconds)
@@ -2385,9 +2462,10 @@ extension MemoryStore: EpisodeLedger {
         }
         guard Set(snapshots).count == snapshots.count else { throw MemoryError.database("duplicate episode archive snapshots") }
         let schemaVersion = try rows("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
-        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 || schemaVersion == 7 else { throw MemoryError.database("unsupported episode archive schema") }
+        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 || schemaVersion == 7 || schemaVersion == 8 else { throw MemoryError.database("unsupported episode archive schema") }
         if schemaVersion >= 6 { try AuthorityStateJournal.validate(database: database) }
-        if schemaVersion == 7 { try AuthorityBindingJournal.validate(database: database) }
+        if schemaVersion >= 7 { try AuthorityBindingJournal.validate(database: database) }
+        if schemaVersion == 8 { try EpisodeAccountingJournal.validate(database: database) }
         struct CheckEpisode { let id: String; let origin: EpisodeOrigin; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
         let originColumns = schemaVersion >= 4 ? ",origin_json,origin_digest" : ""
         var localReadRequestIDs = Set<Data>()

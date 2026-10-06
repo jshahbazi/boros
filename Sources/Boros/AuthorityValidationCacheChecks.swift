@@ -31,8 +31,8 @@ enum AuthorityValidationCacheChecks {
         for (name,body) in groups { do { try body(scratch.appendingPathComponent(name),&checks) } catch { checks["authority_cache_"+name+"_fixture"]=false } }
         return checks
     }
-    private static func fixture(_ directory:URL,clock:Clock=Clock(),limits:AuthorityValidationCacheLimits = .defaults,checkpoint:((String,OpaquePointer)throws->Void)?=nil)throws->Fixture {
-        let owner=try MemoryStore(directory:directory,authorityCacheLimits:limits,authorityCacheCheckpoint:checkpoint)
+    private static func fixture(_ directory:URL,clock:Clock=Clock(),limits:AuthorityValidationCacheLimits = .defaults,checkpoint:((String,OpaquePointer)throws->Void)?=nil,validationCheckpoint:((String)throws->Void)?=nil)throws->Fixture {
+        let owner=try MemoryStore(directory:directory,authorityValidationCheckpoint:validationCheckpoint,authorityCacheLimits:limits,authorityCacheCheckpoint:checkpoint)
         let conversation=try owner.createConversation(projectID:"synthetic-cache-project",title:"Synthetic cache")
         let state=try owner.authorityStateSnapshot()
         let accepted=try owner.acceptManagedHumanRequest(conversationID:conversation.id,turnID:"cache-turn",humanEventID:"cache-human",episodeID:"cache-episode",requestID:"cache-request",text:"Synthetic complete cache input",limits:EpisodeLimits(),authority:AuthorityContext(ownerID:state.ownerID,origin:.humanHost),clock:clock.now())
@@ -45,6 +45,19 @@ enum AuthorityValidationCacheChecks {
         defer { sqlite3_close(db) }; sqlite3_busy_timeout(db,2000); return try body(db)
     }
     private static func charged(_ fixture:Fixture)throws->EpisodeResources { try fixture.owner.episodeReceipt(id:fixture.acceptance.episode.id,clock:fixture.clock.now()).charged }
+    // Observational evidence after an external commit cannot authorize more work.
+    private static func durableCharged(_ directory:URL,episodeID:String)throws->EpisodeResources {
+        try database(directory) { db in
+            var result=EpisodeResources.zero
+            let rows=try AuthorityStateKernel.rows(db,"SELECT resource,charged FROM episode_resource_totals WHERE episode_id=?",[.text(episodeID)])
+            guard rows.count == EpisodeResource.allCases.count else { throw CheckError.invalid }
+            for row in rows {
+                guard let key=EpisodeResource(rawValue:row[0].string) else { throw CheckError.invalid }
+                result[key]=row[1].integer
+            }
+            return result
+        }
+    }
     private static func mutation(_ fixture:Fixture,_ id:String,_ operation:AuthorityOperation,task:String?=nil,policyID:String?=nil,policy:AuthorityPolicyDefinition?=nil)throws {
         let state=try fixture.owner.authorityStateSnapshot()
         _ = try fixture.owner.applyAuthorityOperation(request:AuthorityOperationRequest(requestID:id,expectedRevision:state.revision,operation:operation,taskID:task,policyID:policyID,expectedTaskRevision:task.flatMap { id in state.tasks.first { $0.id == id }?.revision },policy:policy),authority:AuthorityContext(ownerID:state.ownerID,origin:.humanHost),now:Int64((try fixture.clock.now().utc.timeIntervalSince1970*1000).rounded(.down)))
@@ -153,6 +166,7 @@ enum AuthorityValidationCacheChecks {
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
         for reverted in [false,true] {
             let name=reverted ? "edit_revert":"corrupt_source", location=directory.appendingPathComponent(name)
+            let retained: (Clock,String) = try {
             let f=try fixture(location), session=try f.owner.beginAuthorityValidationSession(lease:f.lease,sessionID:name,maximumAttempts:8)
             _ = try f.owner.withAuthorityValidationSession(sessionID:session.sessionID,lease:f.lease) { }
             let before=f.owner.authorityValidationCacheDiagnostics(), cost=try charged(f)
@@ -167,17 +181,26 @@ enum AuthorityValidationCacheChecks {
             do { _ = try f.owner.withAuthorityValidationSession(sessionID:session.sessionID,lease:f.lease) { callbacks += 1 } } catch AuthorityStateError.staleRevision { stale=true } catch { }
             let after=f.owner.authorityValidationCacheDiagnostics(), used=try f.owner.authorityValidationSessionReceipt(sessionID:session.sessionID)
             checks["authority_cache_external_"+name+"_invalidates_even_rebound_hashes"]=stale && callbacks == 0 && after.invalidations > before.invalidations
-            checks["authority_cache_external_"+name+"_denial_consumes_prepaid_attempt"]=try used.attemptsUsed == 2 && (try charged(f)) == cost
+            checks["authority_cache_external_"+name+"_denial_consumes_prepaid_attempt"]=try used.attemptsUsed == 2 && (try durableCharged(location,episodeID:f.acceptance.episode.id)) == cost
             checks["authority_cache_external_"+name+"_stale_hit_does_not_read_source_or_replay"]=after.fullReplays == before.fullReplays && after.sourcePayloadStatements == before.sourcePayloadStatements
             let retry=try f.owner.beginAuthorityValidationSession(lease:f.lease,sessionID:session.sessionID,maximumAttempts:8)
             checks["authority_cache_external_"+name+"_exact_creation_retry_does_not_restore_eligibility"]=retry.attemptsUsed == 2 && reject { _ = try f.owner.withAuthorityValidationSession(sessionID:session.sessionID,lease:f.lease) { callbacks += 1 } } && callbacks == 0
+            checks["authority_cache_external_"+name+"_accounting_lookup_refuses_unvalidated_owner"]=reject { _ = try charged(f) }
+            checks["authority_cache_external_"+name+"_fresh_funding_refuses_unvalidated_accounting"]=reject { _ = try f.owner.beginAuthorityValidationSession(lease:f.lease,sessionID:"fresh-unvalidated",maximumAttempts:4) }
+            checks["authority_cache_external_"+name+"_refusal_preserves_incurred_charges"]=try durableCharged(location,episodeID:f.acceptance.episode.id) == cost
+            return (f.clock,f.conversation.id)
+            }()
             if reverted {
-                let fresh=try f.owner.beginAuthorityValidationSession(lease:f.lease,sessionID:"fresh-after-revert",maximumAttempts:4)
-                _ = try f.owner.withAuthorityValidationSession(sessionID:fresh.sessionID,lease:f.lease) { callbacks += 1 }
-                checks["authority_cache_external_reverted_bytes_require_new_funded_replay"]=try callbacks == 1 && f.owner.authorityValidationCacheDiagnostics().fullReplays > before.fullReplays && (try charged(f)).memoryOperations > cost.memoryOperations
+                var callbacks=0
+                let reopened=try MemoryStore(directory:location)
+                let state=try reopened.authorityStateSnapshot()
+                let accepted=try reopened.acceptManagedHumanRequest(conversationID:retained.1,turnID:"revalidated-turn",humanEventID:"revalidated-human",episodeID:"revalidated-episode",requestID:"revalidated-request",text:"Synthetic revalidated input",limits:EpisodeLimits(),authority:AuthorityContext(ownerID:state.ownerID,origin:.humanHost),clock:retained.0.now())
+                let lease=EpisodeLease(ledger:reopened,episodeID:accepted.episode.id,clock:retained.0)
+                let fresh=try reopened.beginAuthorityValidationSession(lease:lease,sessionID:"fresh-after-revalidation",maximumAttempts:4)
+                _ = try reopened.withAuthorityValidationSession(sessionID:fresh.sessionID,lease:lease) { callbacks += 1 }
+                checks["authority_cache_external_reverted_bytes_require_revalidated_owner_and_funded_replay"]=callbacks == 1 && reopened.authorityValidationCacheDiagnostics().fullReplays > 0
             } else {
-                checks["authority_cache_external_corrupt_source_refresh_refused"]=reject { _ = try f.owner.beginAuthorityValidationSession(lease:f.lease,sessionID:"fresh-corrupt",maximumAttempts:4) }
-                checks["authority_cache_external_failed_refresh_preserves_incurred_charges"]=try charged(f).memoryOperations > cost.memoryOperations && f.owner.episodeReceipt(id:f.acceptance.episode.id,clock:f.clock.now()).held == .zero
+                checks["authority_cache_external_corrupt_source_owner_revalidation_refused"]=reject { _ = try MemoryStore(directory:location) }
             }
         }
         let raceDirectory=directory.appendingPathComponent("between-fences")
@@ -296,8 +319,8 @@ enum AuthorityValidationCacheChecks {
         }
         let failedLocation=directory.appendingPathComponent("failed-maintenance")
         var invalidateMaintenance=false
-        let failedOriginal=try fixture(failedLocation,checkpoint:{ checkpoint,_ in
-            if invalidateMaintenance && checkpoint == "before-session-fence" {
+        let failedOriginal=try fixture(failedLocation,validationCheckpoint:{ checkpoint in
+            if invalidateMaintenance && checkpoint == "cached-temporal-maintenance" {
                 try database(failedLocation) { try AuthorityStateKernel.execute($0,"UPDATE conversations SET title='Synthetic failed maintenance witness'") }
                 invalidateMaintenance=false
             }
@@ -308,11 +331,14 @@ enum AuthorityValidationCacheChecks {
         failed.clock.set(200); invalidateMaintenance=true; var failedAccepted=0
         checks["authority_cache_stale_due_maintenance_refuses_callback"]=reject { _ = try failed.owner.withAuthorityValidationSession(sessionID:failedSession.sessionID,lease:failed.lease) { failedAccepted += 1 } } && failedAccepted == 0
         let maintenanceRows=try database(failedLocation) { try AuthorityStateKernel.rows($0,"SELECT state,receipt_json,held_json,charged_json FROM episode_work WHERE episode_id=? AND adapter_identity=?",[.text(failed.acceptance.episode.id),.text("authority-validation-v1:cached-temporal-maintenance")]) }
+        checks["authority_cache_failed_maintenance_actual_funded_row_present"]=maintenanceRows.count == 1
         guard maintenanceRows.count == 1,let receiptBytes=maintenanceRows[0][1].bytes,let heldBytes=maintenanceRows[0][2].bytes,let chargeBytes=maintenanceRows[0][3].bytes else { throw CheckError.invalid }
-        let maintenanceReceipts=try JSONDecoder().decode([EpisodeWorkSettlement].self,from:receiptBytes), maintenanceHeld=try JSONDecoder().decode(EpisodeResources.self,from:heldBytes), maintenanceCharge=try JSONDecoder().decode(EpisodeResources.self,from:chargeBytes)
-        checks["authority_cache_failed_maintenance_receipt_records_actual_failure"]=maintenanceRows[0][0].string == EpisodeWorkState.failedConfirmed.rawValue && maintenanceReceipts.count == 1 && maintenanceReceipts.first?.outcome == .failedConfirmed && maintenanceHeld == .zero && maintenanceCharge.memoryOperations == 1
-        checks["authority_cache_failed_maintenance_retains_charge_and_attempt"]=try charged(failed).memoryOperations == failedCost.memoryOperations+1 && failed.owner.authorityValidationSessionReceipt(sessionID:failedSession.sessionID).attemptsUsed == 1 && failed.owner.episodeReceipt(id:failed.acceptance.episode.id,clock:failed.clock.now()).held == .zero
+        let maintenanceReceipts=try receiptBytes.isEmpty ? [] : JSONDecoder().decode([EpisodeWorkSettlement].self,from:receiptBytes), maintenanceHeld=try JSONDecoder().decode(EpisodeResources.self,from:heldBytes), maintenanceCharge=try JSONDecoder().decode(EpisodeResources.self,from:chargeBytes)
+        checks["authority_cache_external_commit_during_maintenance_refuses_unvalidated_settlement"]=maintenanceRows[0][0].string == EpisodeWorkState.dispatchArmed.rawValue && maintenanceReceipts.isEmpty && maintenanceHeld == .zero && maintenanceCharge.memoryOperations == 1
+        checks["authority_cache_failed_maintenance_retains_charge_and_attempt"]=try durableCharged(failedLocation,episodeID:failed.acceptance.episode.id).memoryOperations == failedCost.memoryOperations+1 && failed.owner.authorityValidationSessionReceipt(sessionID:failedSession.sessionID).attemptsUsed == 1
         checks["authority_cache_failed_maintenance_does_not_apply_transition_or_change_binding"]=try canonical(failed.owner.authorityStateSnapshot()) == failedBefore && canonical(failed.owner.managedEpisodeBinding(id:failed.acceptance.episode.id)!) == canonical(failed.acceptance.binding)
+        checks["authority_cache_failed_maintenance_accounting_requires_owner_revalidation"]=reject { _ = try charged(failed) }
+
         let stable=try fixture(directory.appendingPathComponent("backward-pure")), stableSession=try stable.owner.beginAuthorityValidationSession(lease:stable.lease,sessionID:"backward-pure",maximumAttempts:4)
         stable.clock.set(1000); _ = try stable.owner.withAuthorityValidationSession(sessionID:stableSession.sessionID,lease:stable.lease) { }
         let prior=try canonical(stable.owner.authorityStateSnapshot())

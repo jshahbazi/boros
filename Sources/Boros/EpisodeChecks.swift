@@ -231,7 +231,7 @@ enum EpisodeChecks {
               try scalar(handle, "SELECT count(*) FROM background_index_windows") == "0" else {
             sqlite3_close(handle); throw MemoryError.database("historical fixture contains background work")
         }
-        let authorityDrops = (AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE " + $0 + ";" }.joined()
+        let authorityDrops = (EpisodeAccountingJournal.tableNames + AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE " + $0 + ";" }.joined()
         let sql = authorityDrops + "DROP TABLE background_index_work; DROP TABLE background_index_windows; ALTER TABLE invocations DROP COLUMN episode_work_id; ALTER TABLE invocations DROP COLUMN episode_id; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=2;"
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else { sqlite3_close(handle); throw MemoryError.database("could not construct schema two fixture") }
         sqlite3_close(handle)
@@ -508,8 +508,7 @@ enum EpisodeChecks {
             guard sqlite3_step(statement) == SQLITE_DONE else { throw MemoryError.database("could not corrupt synthetic Unicode origin") }
         }
         checks["episode_unicode_chat_origin_column_alias_archive_rejected"] = rejected { _ = try validate(directory) }
-        owner = try MemoryStore(directory: directory)
-        checks["episode_unicode_chat_origin_column_alias_runtime_rejected"] = rejected { _ = try owner!.episodeReceipt(id: "chat-unicode", clock: clock.now()) }
+        checks["episode_unicode_chat_origin_column_alias_runtime_rejected"] = rejected { _ = try MemoryStore(directory: directory) }
         return checks
     }
     private static func unicodeLegacyMigrationChecks() throws -> [String: Bool] {
@@ -594,7 +593,7 @@ enum EpisodeChecks {
             let sql = """
                 PRAGMA foreign_keys=OFF;
                 BEGIN IMMEDIATE;
-                \((AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE IF EXISTS " + $0 + ";" }.joined())
+                \((EpisodeAccountingJournal.tableNames + AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE IF EXISTS " + $0 + ";" }.joined())
                 DROP TABLE IF EXISTS background_index_work;
                 DROP TABLE IF EXISTS background_index_windows;
                 CREATE TABLE episodes_three (

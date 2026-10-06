@@ -632,11 +632,18 @@ enum ComponentPreparationChecks {
                     checks[prefix + mutation.rawValue + "_rejected"] = try withCopy(archive: archive, directory: directory) { database in
                         try MemoryStore.validateEpisodeJournal(database: database.handle)
                         try apply(mutation, database: database)
-                        do { try MemoryStore.validateEpisodeJournal(database: database.handle); return false }
-                        catch MemoryError.database(let reason) {
-                            if mutation == .policyExtraKey || mutation == .policyChangedCap { return reason == "invalid episode archive metadata" }
-                            return reason.hasPrefix("component journal ")
+                        if mutation == .policyExtraKey || mutation == .policyChangedCap {
+                            do { try MemoryStore.validateEpisodeJournal(database: database.handle); return false }
+                            catch MemoryError.database(let reason) { return reason == "invalid episode archive metadata" }
                         }
+                        // Changed snapshots may first fail schema-8 accounting
+                        // reconstruction. Independently prove the intended
+                        // component contract also refuses the rehashed fixture.
+                        var componentRejected = false
+                        do { try ContextComponentJournal.validate(database: database.handle) }
+                        catch MemoryError.database(let reason) { componentRejected = reason.hasPrefix("component journal ") }
+                        do { try MemoryStore.validateEpisodeJournal(database: database.handle); return false }
+                        catch { return componentRejected }
                     }
                 } catch { checks[prefix + mutation.rawValue + "_rejected"] = false }
             }

@@ -5,7 +5,13 @@ enum ContextAdmissionChecks {
     static func run() throws -> [String: Bool] {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-context-admission-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try MemoryStore(directory: directory)
+        var corruptEventID: String?
+        let store = try MemoryStore(directory: directory, episodeAccountingCheckpoint: { phase, database in
+            if phase == "before-accounting-lookup", let eventID = corruptEventID {
+                corruptEventID = nil
+                try alterSource(database, id: eventID)
+            }
+        })
         let chat = try store.createConversation(projectID: "synthetic", title: "Synthetic admission history")
         let archive = try store.createConversation(projectID: "synthetic", title: "Synthetic archived evidence")
         _ = try store.append(conversationID: archive.id, role: .human, text: "syntheticrarekey archive evidence",
@@ -94,7 +100,7 @@ enum ContextAdmissionChecks {
         checks.merge(try recentCandidateChecks(store: store, semantic: semantic)) { _, new in new }
         checks.merge(try meteredContextChecks(store: store)) { _, new in new }
         checks.merge(try meteredLiteralChecks(store: store)) { _, new in new }
-        checks.merge(try meteredLargeCandidateChecks(store: store)) { _, new in new }
+        checks.merge(try meteredLargeCandidateChecks(store: store, corrupt: { corruptEventID = $0 })) { _, new in new }
         checks.merge(try sqliteFenceChecks(store: store)) { _, new in new }
         checks.merge(try standaloneScopeChecks(store: store, semantic: semantic)) { _, new in new }
         checks.merge(try ReadCoverageChecks.run(store: store, semantic: semantic)) { _, new in new }
@@ -272,7 +278,7 @@ enum ContextAdmissionChecks {
         return checks
     }
 
-    private static func meteredLargeCandidateChecks(store: MemoryStore) throws -> [String: Bool] {
+    private static func meteredLargeCandidateChecks(store: MemoryStore, corrupt: (String) -> Void) throws -> [String: Bool] {
         let project = "synthetic-metered-large-candidates"
         let archive = try store.createConversation(projectID: project, title: "One hundred bounded maximum sources")
         // NUL padding keeps this 400 MiB authoritative fixture's FTS index
@@ -288,7 +294,9 @@ enum ContextAdmissionChecks {
         let fixture = try episode(store: store, conversationID: archive.id, limits: limits)
         // The next ranked candidate has a genuinely bad digest. A bounded
         // search must stop before loading it, even though FTS can find it.
-        try alterSource(store.directory.appendingPathComponent("memory.sqlite3"), id: references[1].eventID)
+        // Same-connection source-only corruption preserves the accounting
+        // confidence needed to test actual admission before payload access.
+        corrupt(references[1].eventID)
         let report = try MeteredRetrieval.lexicalSearch(store: store, query: "budgetneedle", projectID: project,
             limit: 100, lease: fixture.lease)
         let again = try MeteredRetrieval.lexicalSearch(store: store, query: "budgetneedle", projectID: project,
@@ -396,10 +404,9 @@ enum ContextAdmissionChecks {
             humanEventID: currentID, episodeID: id, text: "Synthetic accepted top-level request", limits: limits, clock: clock.now())
         return EpisodeFixture(lease: EpisodeLease(ledger: store, episodeID: id, clock: clock), currentID: currentID, clock: clock)
     }
-    private static func alterSource(_ url: URL, id: String) throws {
-        var database: OpaquePointer?, statement: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else { throw MemoryError.database("fixture open failed") }
-        defer { sqlite3_finalize(statement); sqlite3_close(database) }
+    private static func alterSource(_ database: OpaquePointer, id: String) throws {
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
         guard sqlite3_prepare_v2(database, "UPDATE events SET payload=zeroblob(byte_count) WHERE id=?", -1, &statement, nil) == SQLITE_OK else { throw MemoryError.database("fixture prepare failed") }
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
         guard sqlite3_bind_text(statement, 1, id, -1, transient) == SQLITE_OK, sqlite3_step(statement) == SQLITE_DONE else { throw MemoryError.database("fixture mutation failed") }

@@ -102,6 +102,7 @@ final class AuthorityCacheWriteObserver {
     enum Manifest { case unknown, ledger, chunks, validatedClock }
     var manifest: Manifest = .unknown
     private(set) var generation: UInt64 = 0
+    private(set) var accountingGeneration: UInt64 = 0
     private(set) var invalidations = 0
     private(set) var sourcePayloadStatements = 0
 
@@ -110,6 +111,10 @@ final class AuthorityCacheWriteObserver {
         if invalidations < Int.max { invalidations += 1 }
     }
     var canCache: Bool { generation < UInt64.max }
+    var canTrustAccounting: Bool { accountingGeneration < UInt64.max }
+    private func invalidateAccounting() {
+        if accountingGeneration < UInt64.max { accountingGeneration += 1 }
+    }
 
     func install(on database: OpaquePointer) throws {
         let result = sqlite3_set_authorizer(database, { context, action, first, second, _, _ in
@@ -127,17 +132,25 @@ final class AuthorityCacheWriteObserver {
             SQLITE_DROP_TEMP_TRIGGER, SQLITE_DROP_TEMP_VIEW, SQLITE_DROP_TRIGGER, SQLITE_DROP_VIEW,
             SQLITE_ALTER_TABLE, SQLITE_REINDEX, SQLITE_ANALYZE, SQLITE_CREATE_VTABLE, SQLITE_DROP_VTABLE,
             SQLITE_ATTACH, SQLITE_DETACH]
+    private static let accountingTables: Set<String> = ["episodes", "episode_resource_totals", "episode_work",
+        "episode_request_snapshots", "episode_accounting", "episode_snapshot_references",
+        "episode_settlement_receipts", "episode_adapter_quarantine"]
 
     private func observe(action: Int32, table: String?, column: String?) -> Int32 {
         if action == SQLITE_READ, table == "events", column == "payload", sourcePayloadStatements < Int.max {
             sourcePayloadStatements += 1
         }
         if Self.writes.contains(action) {
-            if !permits(action: action, table: table, column: column) { invalidate() }
+            if !permits(action: action, table: table, column: column) {
+                invalidate()
+                if ![SQLITE_INSERT, SQLITE_UPDATE, SQLITE_DELETE].contains(action) ||
+                    Self.accountingTables.contains(table ?? "") { invalidateAccounting() }
+            }
         } else if action == SQLITE_PRAGMA, column != nil, !["table_info", "table_xinfo", "index_info", "index_xinfo", "index_list", "foreign_key_list", "foreign_key_check", "integrity_check", "quick_check"].contains(table ?? "") {
             // Read probes have no value argument. Unknown writable pragmas are
             // conservative invalidations, including schema/user_version changes.
             invalidate()
+            invalidateAccounting()
         }
         return SQLITE_OK
     }
@@ -148,7 +161,8 @@ final class AuthorityCacheWriteObserver {
         case .unknown: return false
         case .ledger:
             if action == SQLITE_INSERT {
-                return ["episode_work", "episode_request_snapshots", "authority_work_bindings"].contains(table)
+                return ["episodes", "episode_resource_totals", "episode_work", "episode_request_snapshots", "authority_work_bindings",
+                    "episode_accounting", "episode_snapshot_references", "episode_settlement_receipts", "episode_adapter_quarantine"].contains(table)
             }
             guard action == SQLITE_UPDATE, let column else { return false }
             switch table {
@@ -156,6 +170,8 @@ final class AuthorityCacheWriteObserver {
             case "episode_resource_totals": return ["charged", "held"].contains(column)
             case "episode_work": return ["state", "charged_json", "held_json", "observed_json", "armed_ticks",
                 "ended_ticks", "receipt_id", "receipt_json", "receipt_digest", "adapter_violation", "recovered"].contains(column)
+            case "episode_accounting": return ["work_count", "snapshot_bytes", "unknown_input_operations"].contains(column)
+            case "episode_adapter_quarantine": return column == "witness_work_id"
             default: return false
             }
         case .chunks:

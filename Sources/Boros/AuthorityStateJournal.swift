@@ -185,7 +185,7 @@ enum AuthorityStateJournal {
         let kernel=AuthorityStateKernel.self
         var objects=try kernel.rows(database,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE lower(substr(name,1,10))='authority_' OR tbl_name IN ('authority_control','authority_tasks','authority_bindings','authority_policies','authority_operations')")
         let schema=try kernel.rows(database,"PRAGMA user_version")[0][0].integer
-        if schema == 7 {
+            if schema >= 7 {
             try AuthorityBindingJournal.validateSchema(database:database)
             let bindingNames=Set(AuthorityBindings.tableNames.map { Data($0.utf8) })
             objects.removeAll { bindingNames.contains(Data($0[1].string.utf8)) }
