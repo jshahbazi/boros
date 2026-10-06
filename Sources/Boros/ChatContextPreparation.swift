@@ -114,7 +114,8 @@ enum ChatContextPreparation {
             if retrievalStrategy == .recentOnly {
                 return try recentOnlySnapshot(recent)
             }
-            let lexical = historicalQuery(prompt)
+            let formulation = formulateHistoricalQuery(prompt)
+            let lexical = formulation.query
             let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
             func lexicalSnapshot(fallback: Bool) throws -> ContextSnapshot {
                 let hits: [MemoryHit]
@@ -143,6 +144,7 @@ enum ChatContextPreparation {
                     fields["continuation_available"] = raw.continuation != nil
                 }
                 try appendAudit(to: &result, fields: fields)
+                try appendQueryTrace(to: &result, formulation: formulation)
                 result.retrievalNotice = fallback ? "Semantic recall failed; archive recall used lexical search."
                     : "Archive recall used lexical search; semantic recall is unavailable."
                 if let raw, !raw.candidateWindowComplete || raw.candidateWindowFull {
@@ -191,7 +193,8 @@ enum ChatContextPreparation {
                 audit["inspected_candidates"] = raw.inspectedCandidates; audit["candidate_window_full"] = raw.candidateWindowFull
                 audit["candidate_window_complete"] = raw.candidateWindowComplete; audit["raw_continuation_available"] = raw.continuation != nil
             }
-            result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
+            try appendAudit(to: &result, fields: audit)
+            try appendQueryTrace(to: &result, formulation: formulation)
             if report.manifest.queryDisposition != "supported" {
                 result.retrievalNotice = "This request used lexical archive recall; semantic recall does not support its text."
             } else if !coverage.complete || report.manifest.vectorContinuation != nil || report.manifest.meteredLexicalCoverage?.candidateWindowComplete == false || report.manifest.meteredLexicalCoverage?.candidateWindowFull == true {
@@ -217,24 +220,47 @@ enum ChatContextPreparation {
         snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
     }
 
+    private struct QueryFormulation {
+        let query: String?
+        let selectedTokenIndices: [Int]
+    }
+
+    private static func appendQueryTrace(to snapshot: inout ContextSnapshot, formulation: QueryFormulation) throws {
+        var audit = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        var trace = audit["selection_trace"] as? [String: Any] ?? [:]
+        trace["version"] = "historical-selection-trace-v1"
+        trace["lexical_query_version"] = "prefix-eight-nonfiller-v1"
+        trace["lexical_query_sha256"] = ContextSnapshot.digest(Data((formulation.query ?? "").utf8))
+        trace["lexical_term_count"] = formulation.selectedTokenIndices.count
+        trace["lexical_selected_token_indices"] = formulation.selectedTokenIndices
+        audit["selection_trace"] = trace
+        snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
+    }
+
     /// Keep at most eight unique non-filler terms, within the store's query
     /// limits. Operators and punctuation remain data; no raw FTS is accepted.
     /// Oversized terms are skipped so a valid long draft remains sendable.
-    private static func historicalQuery(_ prompt: String) -> String? {
+    private static func historicalQuery(_ prompt: String) -> String? { formulateHistoricalQuery(prompt).query }
+
+    private static func formulateHistoricalQuery(_ prompt: String) -> QueryFormulation {
         var selected: [String] = []
+        var indices: [Int] = []
+        var ordinal = 0
         var seen: Set<String> = []
         var bytes = 0
         for raw in prompt.components(separatedBy: CharacterSet.alphanumerics.inverted) where !raw.isEmpty {
+            let position = ordinal; ordinal += 1
             let term = raw.lowercased()
             guard !stopwords.contains(term), !seen.contains(term), term.utf8.count <= 128 else { continue }
             let nextBytes = bytes + term.utf8.count + (selected.isEmpty ? 0 : 1)
             guard nextBytes <= 1024 else { continue }
             selected.append(term)
+            indices.append(position)
             seen.insert(term)
             bytes = nextBytes
             if selected.count == 8 { break }
         }
-        return selected.isEmpty ? nil : selected.joined(separator: " ")
+        return QueryFormulation(query: selected.isEmpty ? nil : selected.joined(separator: " "), selectedTokenIndices: indices)
     }
 
     private static let stopwords: Set<String> = [

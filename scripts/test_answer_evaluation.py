@@ -26,6 +26,21 @@ e = importlib.util.module_from_spec(spec); spec.loader.exec_module(e)
 
 
 class Contracts(unittest.TestCase):
+    def test_selection_trace_remains_structured_and_content_free(self):
+        trace = {"version": "historical-selection-trace-v1", "lexical_query_version": "prefix-eight-nonfiller-v1",
+                 "lexical_query_sha256": e.digest(b"synthetic query"), "lexical_term_count": 2,
+                 "lexical_selected_token_indices": [1, 3], "candidate_count": 1, "trace_truncated": False,
+                 "candidates": [{"event_id": "synthetic-public-source", "rank": 0, "offset": 0, "byte_length": 12}],
+                 "assembly": [{"event_id": "synthetic-public-source", "rank": 0, "disposition": "included"}]}
+        data = {"retrieval": {"selection_trace": trace, "query_disposition": "codeLike"},
+                "unexpected source text": "synthetic private conversation sentinel"}
+        sanitized = e.content_free_metadata(data, frozenset({"synthetic-public-source"}))
+        self.assertEqual(sanitized["retrieval"]["selection_trace"], trace)
+        self.assertEqual(sanitized["retrieval"]["query_disposition"], "codeLike")
+        encoded = json.dumps(sanitized)
+        self.assertNotIn("synthetic private conversation sentinel", encoded)
+        self.assertNotIn("unexpected source text", encoded)
+
     @classmethod
     def setUpClass(cls):
         cls.fixtures = e.generate("development", history_count=1)

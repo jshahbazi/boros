@@ -72,6 +72,13 @@ enum RetrievalStrategyChecks {
             conversationID: chat.id, projectID: project, prompt: prompt, excludingEventID: currentID, episodeLease: lease)
         checks["strategy_nil_index_still_means_hybrid_lexical_selection"] = try mode(nilIndex) == "lexical"
             && nilIndex.evidence.contains { episodeIdentifierEqual($0.eventID, old.id) }
+        let originals = recentEvents + [old]
+        checks["strategy_hybrid_trace_has_exact_query_hash_ordinals_and_original_candidates"] = try validTrace(hybrid,
+            query: "strategyneedle 日本語 e\u{301}", indices: [2, 3, 4], originals: originals)
+        checks["strategy_nil_index_trace_has_exact_query_hash_ordinals_and_original_candidates"] = try validTrace(nilIndex,
+            query: "strategyneedle 日本語 e\u{301}", indices: [2, 3, 4], originals: originals)
+        checks["strategy_recent_only_has_no_historical_selection_trace"] = try object(selected.retrievalAuditJSON!)["selection_trace"] == nil
+            && object(selected.retrievalAuditJSON!).count == 1
         let reduced = try recent.reducedRecentForComponentCap()!, beforeReductionSelection = try lease.checkActive()
         let reducedSelection = try ChatContextPreparation.prepareEvidence(recent: reduced, store: store,
             conversationID: chat.id, projectID: project, prompt: prompt, excludingEventID: currentID,
@@ -137,6 +144,7 @@ enum RetrievalStrategyChecks {
             checks["strategy_recent_only_terminal_lease_cannot_renew_preparation"] = error is EpisodeBudgetError
                 && untouched.charged == terminal.charged && untouched.held == terminal.held
         }
+        checks.merge(try directTraceChecks()) { _, latest in latest }
         return checks
     }
 
@@ -170,7 +178,7 @@ enum RetrievalStrategyChecks {
     private final class IntegrationAttempt {
         let kind: FixtureCase, directory: URL, store: MemoryStore, chat: StoredConversation
         let clock = Clock(), encoder = Encoder(), lease: EpisodeLease
-        let index: SemanticIndex, recentSources: [MemoryEvent], callsAfterBuild: Int
+        let index: SemanticIndex, recentSources: [MemoryEvent], archivedSource: MemoryEvent, callsAfterBuild: Int
         let prompt = "fixturePipeline Where is strategyneedle? 日本語 e\u{301}"
         let currentID = "strategy-component-current", completion: ([String: Bool]) -> Void
         var settings = GenerationSettings(), operation: ComponentContextPreparationOperation?
@@ -180,7 +188,7 @@ enum RetrievalStrategyChecks {
             store = try MemoryStore(directory: directory)
             chat = try store.createConversation(projectID: "synthetic-strategy-components", title: "Synthetic strategy preparation")
             let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic strategy evidence")
-            _ = try append(store, archive.id, "strategy-component-archive", "strategyneedle archived original source")
+            archivedSource = try append(store, archive.id, "strategy-component-archive", "strategyneedle archived original source")
             var recent: [MemoryEvent] = []
             for sourceID in ["strategy-component-old-0", "strategy-component-old-1", "strategy-component-é", "strategy-component-e\u{301}"] {
                 recent.append(try append(store, chat.id, sourceID, "Synthetic recent source " + String(repeating: "r", count: 2500),
@@ -247,6 +255,8 @@ enum RetrievalStrategyChecks {
                     checks[prefix + "_zero_evidence_receipt_has_no_tokenizer_work"] = try prepared.snapshot.evidence.isEmpty
                         && proof.evidence.tokens == 0 && proof.evidence.tokenizerWorkID == nil
                         && (try mode(prepared.snapshot)) == "recent_only" && prepared.snapshot.retrievalManifestID == nil
+                    checks[prefix + "_no_historical_trace_after_actual_reduction"] = try object(prepared.snapshot.retrievalAuditJSON!)["selection_trace"] == nil
+                        && object(prepared.snapshot.retrievalAuditJSON!).count == 1
                     if kind == .recentOnlyEnvelope {
                         checks[prefix + "_whole_request_reduction_uses_same_lease"] = prepared.snapshot.selectionAudit!.recentEnvelopeExcludedCount > 0
                             && state.limits.componentPolicy!.recentTokens == 8000 && state.limits.componentPolicy!.evidenceTokens == 12000
@@ -257,6 +267,11 @@ enum RetrievalStrategyChecks {
                         && encoder.calls == callsAfterBuild + 1 && !prepared.snapshot.evidence.isEmpty
                         && (try count(store, "SELECT count(*) FROM episode_work WHERE kind='queryEmbedding'")) == 1
                         && (try mode(prepared.snapshot)) == "hybrid"
+                    checks[prefix + "_trace_retains_original_query_and_candidates_after_actual_reduction"] = try validTrace(prepared.snapshot,
+                        query: "fixturepipeline strategyneedle 日本語 e\u{301}", indices: [0, 3, 4, 5], originals: recentSources + [archivedSource])
+                    let delivered = try object(prepared.snapshot.deliveryAudit())["retrieval"] as? [String: Any]
+                    checks[prefix + "_delivered_trace_matches_final_snapshot_audit"] = try canonical(delivered?["selection_trace"] ?? NSNull())
+                        == canonical(trace(prepared.snapshot))
                 }
                 stage = "invocation"
                 let work = try lease.prepare(kind: .answer,
@@ -305,6 +320,126 @@ enum RetrievalStrategyChecks {
         left.rawSourceBytes == right.rawSourceBytes && left.metadataRows == right.metadataRows
             && left.vectorBytes == right.vectorBytes && left.encoderInputBytes == right.encoderInputBytes
             && left.modelCalls == right.modelCalls && left.inputTokens == right.inputTokens
+    }
+    private static func directTraceChecks() throws -> [String: Bool] {
+        let directory = try fixtureDirectory(prefix: "boros-selection-trace-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory), project = "synthetic-selection-trace"
+        let chat = try store.createConversation(projectID: project, title: "Synthetic trace recent")
+        let archive = try store.createConversation(projectID: project, title: "Synthetic trace history")
+        let recentSource = try append(store, chat.id, "trace-recent", "Synthetic retained recent source")
+        let prompt = "Synthetic accepted trace request"
+        let current = try append(store, chat.id, "trace-current", prompt)
+        let oversized = try append(store, archive.id, "trace-oversized", String(repeating: "x", count: 4097))
+        let small = try append(store, archive.id, "trace-small", "Synthetic tiny historical source é e\u{301}")
+        let other = try append(store, archive.id, "trace-other", "Synthetic second historical source")
+        let recent = try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
+            prompt: prompt, system: "Synthetic trace host", excludingEventID: current.id)
+        let candidates = [recentSource, current, oversized, small, other].map(hit)
+        func attach(_ base: ContextSnapshot, _ hits: [MemoryHit], bytes: Int = ContextAssembler.componentMaximumEvidenceBytes,
+            spans: Int = 1) throws -> ContextSnapshot {
+            try ContextAssembler.addEvidence(to: base, store: store, conversationID: chat.id, projectID: project,
+                excludingEventID: current.id, historicalHits: hits, maximumEvidenceBytes: bytes, maximumEvidenceSpans: spans)
+        }
+        let selected = try attach(recent, candidates), selectedTrace = try trace(selected)
+        let expectedReasons = ["excluded_recent_or_request", "excluded_recent_or_request", "invalid_span_size", "included", "span_limit"]
+        var checks: [String: Bool] = [
+            "strategy_trace_distinguishes_recent_request_oversize_inclusion_and_span_cap": try dispositions(selected) == expectedReasons
+                && selected.evidence.map(\.eventID) == [small.id] && selected.selectionAudit?.evidenceByteExcludedCount == 1
+                && selected.selectionAudit?.evidenceRowExcludedCount == 1,
+            "strategy_trace_records_exact_original_utf8_spans_and_zero_based_ranks": try canonical(selectedTrace["candidates"] ?? NSNull())
+                == canonical(candidates.enumerated().map { rank, candidate in
+                    ["event_id": candidate.eventID, "source_sha256": candidate.digest, "offset": 0,
+                     "byte_length": candidate.excerpt.utf8.count, "rank": rank] as [String: Any]
+                }) && (selectedTrace["candidate_count"] as? Int) == 5 && (selectedTrace["trace_truncated"] as? Bool) == false
+        ]
+        let byteLimited = try attach(recent, [hit(small)], bytes: 0)
+        checks["strategy_trace_distinguishes_evidence_byte_cap_without_changing_recent_body"] = try dispositions(byteLimited) == ["evidence_byte_limit"]
+            && byteLimited.evidence.isEmpty && byteLimited.serializedMessages() == recent.serializedMessages()
+        var tightEnvelope = recent
+        tightEnvelope.selectionAudit?.maximumSerializedBytes = recent.serializedBytes
+        let envelopeLimited = try attach(tightEnvelope, [hit(small)])
+        checks["strategy_trace_distinguishes_whole_envelope_cap_without_changing_body"] = try dispositions(envelopeLimited) == ["envelope_byte_limit"]
+            && envelopeLimited.evidence.isEmpty && envelopeLimited.serializedMessages() == recent.serializedMessages()
+        let bounded = try attach(recent, Array(repeating: hit(small), count: 17)), boundedTrace = try trace(bounded)
+        let boundedCandidates = boundedTrace["candidates"] as? [[String: Any]] ?? []
+        checks["strategy_trace_caps_metadata_at_sixteen_and_reports_returned_candidate_count"] = try (boundedTrace["candidate_count"] as? Int) == 17
+            && (boundedTrace["trace_truncated"] as? Bool) == true && boundedCandidates.count == 16
+            && boundedCandidates.compactMap { $0["rank"] as? Int } == Array(0..<16)
+            && (try dispositions(bounded)) == ["included"] + Array(repeating: "span_limit", count: 15)
+            && bounded.evidence.count == 1
+        let evidenceReduced = try selected.reducedEvidenceForComponentCap()!
+        let envelopeReduced = try selected.reducedForTokenAdmission()!
+        let recentReduced = try selected.reducedRecentForComponentCap()!
+        let recentEnvelopeReduced = try envelopeReduced.reducedForTokenAdmission()!
+        checks["strategy_trace_survives_evidence_component_and_envelope_reductions"] = try canonical(trace(evidenceReduced)) == canonical(selectedTrace)
+            && canonical(trace(envelopeReduced)) == canonical(selectedTrace) && evidenceReduced.evidence.isEmpty && envelopeReduced.evidence.isEmpty
+            && evidenceReduced.selectionAudit?.evidenceTokenExcludedCount == 1 && envelopeReduced.selectionAudit?.evidenceEnvelopeExcludedCount == 1
+        checks["strategy_trace_survives_recent_component_and_envelope_reductions"] = try canonical(trace(recentReduced)) == canonical(selectedTrace)
+            && canonical(trace(recentEnvelopeReduced)) == canonical(selectedTrace) && recentReduced.includedRecentCount == 0
+            && recentEnvelopeReduced.includedRecentCount == 0 && recentReduced.evidence.map(\.eventID) == [small.id]
+            && recentReduced.selectionAudit?.recentTokenExcludedCount == 1 && recentEnvelopeReduced.selectionAudit?.recentEnvelopeExcludedCount == 1
+        let baseline = try object(selected.deliveryAudit())
+        var expanded = selected, expandedRetrieval = try object(selected.retrievalAuditJSON!), expandedTrace = selectedTrace
+        expandedTrace["synthetic_padding"] = String(repeating: "x", count: 33000)
+        expandedRetrieval["selection_trace"] = expandedTrace
+        expanded.retrievalAuditJSON = try canonical(expandedRetrieval)
+        let trimmedBytes = try expanded.deliveryAudit(), trimmed = try object(trimmedBytes)
+        let trimmedRetrieval = trimmed["retrieval"] as? [String: Any] ?? [:]
+        checks["strategy_trace_overflow_omits_only_auxiliary_metadata_with_explicit_reason"] = trimmedBytes.count <= 32768
+            && trimmedRetrieval["selection_trace"] == nil && (trimmedRetrieval["selection_trace_omitted"] as? String) == "metadata_limit"
+            && (baseline["retrieval"] as? [String: Any])?["selection_trace"] != nil
+        var baselineCore = baseline, trimmedCore = trimmed
+        baselineCore.removeValue(forKey: "retrieval"); trimmedCore.removeValue(forKey: "retrieval")
+        checks["strategy_trace_overflow_preserves_original_selection_body_and_core_admission_audit"] = try canonical(baselineCore) == canonical(trimmedCore)
+            && expanded.selectionDigest() == selected.selectionDigest() && expanded.serializedMessages() == selected.serializedMessages()
+        let traceBytes = try canonical(selectedTrace)
+        checks["strategy_trace_contains_metadata_without_query_or_source_text"] = traceBytes.range(of: Data(prompt.utf8)) == nil
+            && traceBytes.range(of: Data(small.text.utf8)) == nil && traceBytes.range(of: Data(recentSource.text.utf8)) == nil
+        return checks
+    }
+    private static func hit(_ source: MemoryEvent) -> MemoryHit {
+        MemoryHit(eventID: source.id, conversationID: source.conversationID, projectID: source.projectID,
+            role: source.role, status: source.status, createdAt: source.createdAt, digest: source.digest,
+            totalBytes: source.byteCount, excerptOffset: 0, excerpt: source.text)
+    }
+    private static func trace(_ snapshot: ContextSnapshot) throws -> [String: Any] {
+        guard let audit = snapshot.retrievalAuditJSON, let trace = try object(audit)["selection_trace"] as? [String: Any] else {
+            throw ContextError.sourceMismatch
+        }
+        return trace
+    }
+    private static func dispositions(_ snapshot: ContextSnapshot) throws -> [String] {
+        guard let decisions = try trace(snapshot)["assembly"] as? [[String: Any]] else { throw ContextError.sourceMismatch }
+        return decisions.compactMap { $0["disposition"] as? String }
+    }
+    private static func canonical(_ value: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed])
+    }
+    private static func validTrace(_ snapshot: ContextSnapshot, query: String, indices: [Int], originals: [MemoryEvent]) throws -> Bool {
+        let value = try trace(snapshot)
+        guard value["version"] as? String == "historical-selection-trace-v1",
+              value["lexical_query_version"] as? String == "prefix-eight-nonfiller-v1",
+              value["lexical_query_sha256"] as? String == ContextSnapshot.digest(Data(query.utf8)),
+              value["lexical_term_count"] as? Int == indices.count, value["lexical_selected_token_indices"] as? [Int] == indices,
+              let count = value["candidate_count"] as? Int, let candidates = value["candidates"] as? [[String: Any]],
+              let decisions = value["assembly"] as? [[String: Any]], candidates.count == min(count, 16), decisions.count == candidates.count,
+              value["trace_truncated"] as? Bool == (count > 16) else { return false }
+        let allowed = Set(["excluded_recent_or_request", "span_limit", "invalid_span_size", "evidence_byte_limit", "envelope_byte_limit", "included"])
+        for (rank, candidate) in candidates.enumerated() {
+            guard Set(candidate.keys) == Set(["event_id", "source_sha256", "offset", "byte_length", "rank"]),
+                  let id = candidate["event_id"] as? String, let original = originals.first(where: { episodeIdentifierEqual($0.id, id) }),
+                  candidate["source_sha256"] as? String == original.digest, candidate["rank"] as? Int == rank,
+                  let offset = candidate["offset"] as? Int, let length = candidate["byte_length"] as? Int,
+                  offset >= 0, length > 0, offset <= original.byteCount, length <= original.byteCount - offset,
+                  Set(decisions[rank].keys) == Set(["event_id", "rank", "disposition"]),
+                  decisions[rank]["event_id"] as? String == id, decisions[rank]["rank"] as? Int == rank,
+                  let disposition = decisions[rank]["disposition"] as? String, allowed.contains(disposition) else { return false }
+        }
+        return snapshot.evidence.allSatisfy { hit in
+            decisions.contains { ($0["event_id"] as? String).map { episodeIdentifierEqual($0, hit.eventID) } == true
+                && $0["disposition"] as? String == "included" }
+        }
     }
     private static func fixtureDirectory(prefix: String) throws -> URL {
         guard let path = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw ContextError.invalidBudget }

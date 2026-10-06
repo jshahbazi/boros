@@ -355,6 +355,18 @@ mandatoryCount recentCount evidenceCount wholePrompt recent evidence tokens byte
 renderedDigest workID sessionID countKind freshnessDomain freshnessTicks reductionSteps retainedMessages
 modelContextLimit maxModelLength metadataDigest observedMetadata serverIdentity modelInstanceIdentity
 budgetWindow window durationHours raw_source_bytes model_calls http_attempts vector_bytes metadata_rows
+retrieval selection selection_trace selection_trace_omitted lexical_query_version lexical_query_sha256
+lexical_term_count lexical_selected_token_indices candidate_count trace_truncated candidates assembly
+source_sha256 byte_length offset rank disposition mode semantic_available failure source_frontier raw_work_version
+raw_work_charged inspected_candidates candidate_window_full candidate_window_complete continuation_available
+query_disposition query_sha256 lexical_query_sha256 published_chunk_frontier coverage_complete inspected_sources
+complete_sources pending_sources unsupported_sources failed_sources holes_truncated vector_candidates_inspected
+vector_continuation_available metadata_continuation_sequence raw_continuation_available literal_search raw_snapshot_id
+query_configuration_fingerprint encoder_fingerprint ordered_recent_source_ids_sha256 omitted_recent_count
+maximumRecentBytes maximumRecentRows maximumEvidenceBytes maximumEvidenceSpans maximumEvidenceSpanBytes
+maximumSerializedBytes recentByteExcludedCount recentRowExcludedCount evidenceByteExcludedCount evidenceRowExcludedCount
+recentTokenExcludedCount evidenceTokenExcludedCount recentEnvelopeExcludedCount evidenceEnvelopeExcludedCount
+recentReductionRounds evidenceReductionRounds source_bytes source_created_utc capture_status conversation_id project_id
 """.split())
 SAFE_ENUMS = set("""
 development recent_only hybrid complete partial failed cancelled deadlineExceeded budgetExceeded completed
@@ -366,6 +378,10 @@ settled released chat localRead human assistant user running stopped queued avai
 mandatory recent evidence historicalEvidence wholePrompt answer calibration tokenization queryEncoding sourceRead
 foreground background known opaque unobservable metadata_observation
 production-answer-development-v1 runner_process_failed runner_process_timeout runner_report_missing runner_report_invalid
+historical-selection-trace-v1 prefix-eight-nonfiller-v1 excluded_recent_or_request span_limit invalid_span_size
+evidence_byte_limit envelope_byte_limit included metadata_limit supported adapterUnavailable inputTooLarge emptyInput
+codeLike nonEnglish ambiguousLanguage inputAccountingUnavailable lexical lexical_fallback raw_work_v1
+context-geometric-v1 semantic_search_failed
 """.split())
 UUID = re.compile(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\Z")
 

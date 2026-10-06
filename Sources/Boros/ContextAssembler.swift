@@ -147,7 +147,17 @@ struct ContextSnapshot {
         }
         if let componentAuditJSON { value["components"] = try JSONSerialization.jsonObject(with: componentAuditJSON) }
         if let selectionWorkID { value["selection_work_id"] = selectionWorkID }
-        let bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        var bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        if bytes.count > 32768, var retrieval = value["retrieval"] as? [String: Any], retrieval.removeValue(forKey: "selection_trace") != nil {
+            retrieval["selection_trace_omitted"] = "metadata_limit"
+            value["retrieval"] = retrieval
+            bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+            if bytes.count > 32768 {
+                retrieval.removeValue(forKey: "selection_trace_omitted")
+                value["retrieval"] = retrieval
+                bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+            }
+        }
         guard bytes.count <= 32768 else { throw ContextError.invalidBudget }
         return bytes
     }
@@ -346,10 +356,18 @@ enum ContextAssembler {
                   let selectionAudit = recent.selectionAudit else { throw ContextError.sourceMismatch }
             let exclusions = Set((recent.recentSourceIDs + [excludingEventID]).map { Data($0.utf8) })
             var evidence: [MemoryHit] = [], byteExcluded = 0, rowExcluded = 0
-            for hit in historicalHits {
-                if exclusions.contains(Data(hit.eventID.utf8)) { continue }
-                guard evidence.count < maximumEvidenceSpans else { rowExcluded += 1; continue }
-                guard !hit.excerpt.isEmpty, hit.excerpt.utf8.count <= maximumEvidenceSpanBytes else { byteExcluded += 1; continue }
+            var candidates: [[String: Any]] = [], decisions: [[String: Any]] = []
+            for (rank, hit) in historicalHits.enumerated() {
+                if rank < 16 {
+                    candidates.append(["event_id": hit.eventID, "source_sha256": hit.digest,
+                        "offset": hit.excerptOffset, "byte_length": hit.excerpt.utf8.count, "rank": rank])
+                }
+                func record(_ reason: String) {
+                    if rank < 16 { decisions.append(["event_id": hit.eventID, "rank": rank, "disposition": reason]) }
+                }
+                if exclusions.contains(Data(hit.eventID.utf8)) { record("excluded_recent_or_request"); continue }
+                guard evidence.count < maximumEvidenceSpans else { rowExcluded += 1; record("span_limit"); continue }
+                guard !hit.excerpt.isEmpty, hit.excerpt.utf8.count <= maximumEvidenceSpanBytes else { byteExcluded += 1; record("invalid_span_size"); continue }
                 guard let reference = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, {
                     try store.sourceReference(eventID: hit.eventID, projectID: projectID)
                 }), episodeIdentifierEqual(hit.projectID, projectID), episodeIdentifierEqual(hit.conversationID, reference.conversationID),
@@ -361,9 +379,14 @@ enum ContextAssembler {
                 let candidateEvidence = evidence + [hit]
                 let candidateMessage = evidenceMessage(candidateEvidence)
                 let candidateMessages = Array(recent.messages.dropLast()) + [candidateMessage, recent.messages.last!]
-                guard try serializedMessages([candidateMessage]).count <= maximumEvidenceBytes,
-                      try serializedMessages(candidateMessages).count <= selectionAudit.maximumSerializedBytes else { byteExcluded += 1; continue }
+                guard try serializedMessages([candidateMessage]).count <= maximumEvidenceBytes else {
+                    byteExcluded += 1; record("evidence_byte_limit"); continue
+                }
+                guard try serializedMessages(candidateMessages).count <= selectionAudit.maximumSerializedBytes else {
+                    byteExcluded += 1; record("envelope_byte_limit"); continue
+                }
                 evidence = candidateEvidence
+                record("included")
             }
             let messages = Array(recent.messages.dropLast()) + (evidence.isEmpty ? [] : [evidenceMessage(evidence)]) + [recent.messages.last!]
             var result = ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try serializedMessages(messages).count,
@@ -372,6 +395,10 @@ enum ContextAssembler {
                 retrievalManifestJSON: recent.retrievalManifestJSON, retrievalAuditJSON: recent.retrievalAuditJSON,
                 retrievalNotice: recent.retrievalNotice, recentSources: recent.recentSources,
                 selectionBinding: recent.selectionBinding, selectionAudit: recent.selectionAudit)
+            var retrieval = try result.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            retrieval["selection_trace"] = ["version": "historical-selection-trace-v1", "candidate_count": historicalHits.count,
+                "trace_truncated": historicalHits.count > 16, "candidates": candidates, "assembly": decisions]
+            result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: retrieval, options: [.sortedKeys])
             result.selectionAudit?.maximumEvidenceBytes = maximumEvidenceBytes
             result.selectionAudit?.maximumEvidenceSpans = maximumEvidenceSpans
             result.selectionAudit?.maximumEvidenceSpanBytes = maximumEvidenceSpanBytes
