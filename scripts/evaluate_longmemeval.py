@@ -16,6 +16,7 @@ import longmemeval_cases as cases
 from evaluation_fixtures import canonical_json
 
 CONFIGURATION = {**e.DEFAULTS, "maximum_output": 512}
+RUNNER_DOCUMENT_VERSION = 5
 PROTOCOL_COMMIT = "9e0b455f4ef0e2ab8f2e582289761153549043fc"
 PROTOCOL_HASHES = {
     "src/evaluation/evaluate_qa.py": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
@@ -249,7 +250,7 @@ def score_native(native, directory, history, document):
     """Return content-free attempts and a separate private prediction inventory."""
     probe = validate_history(history)
     requested = document["attempts"]
-    if (canonical_json(document) != canonical_json(cases.runner_input(history, CONFIGURATION))
+    if (canonical_json(document) != canonical_json(cases.runner_input(history, CONFIGURATION, version=RUNNER_DOCUMENT_VERSION))
             or len(requested) != 2 or [r["strategy"] for r in requested] != list(e.STRATEGIES)
             or any(type(r.get("replicate")) is not int or r["replicate"] != 0 for r in requested)):
         raise e.EvaluationError("benchmark runner document mismatch")
@@ -432,7 +433,7 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
     if (sum(probe["abstention"] for probe in probes) != 1
             or {probe["question_type"] for probe in probes if not probe["abstention"]} != TYPES):
         raise e.EvaluationError("invalid declared benchmark category inventory")
-    documents = [cases.runner_input(history, CONFIGURATION) for history in histories]
+    documents = [cases.runner_input(history, CONFIGURATION, version=RUNNER_DOCUMENT_VERSION) for history in histories]
     annotations = []
     for history, document in zip(histories, documents):
         probe = validate_history(history)
@@ -444,6 +445,7 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
             "scorer_annotations_sha256": oracle_sha256(history)})
     inventory = code_inventory()
     declaration = {"version": 1, "split": "development", "declared_attempts": 14,
+        "runner_document_version": RUNNER_DOCUMENT_VERSION,
         "case_ids": [row["question_id"] for row in annotations], "cases": annotations,
         "source_revision": cases.SOURCE_REVISION, "source_sha256": cases.SOURCE_SHA256,
         "configuration_sha256": e.digest(canonical_json(CONFIGURATION)),
@@ -485,7 +487,7 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
         predictions.clear()
         attempts = [attempt for result in results for attempt in result["attempts"]]
         report = {"longmemeval_evaluation_version": 1, "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
-            "registration_status": "unregistered_development_subset", "split": "development", "runner_document_version": 4,
+            "registration_status": "unregistered_development_subset", "split": "development", "runner_document_version": RUNNER_DOCUMENT_VERSION,
             "source": {"repository": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned",
                 "revision": cases.SOURCE_REVISION, "path": cases.SOURCE_NAME, "sha256": cases.SOURCE_SHA256, "bytes": cases.SOURCE_BYTES},
             "configuration": {key: value for key, value in CONFIGURATION.items() if key != "system"},

@@ -147,6 +147,7 @@ enum RetrievalStrategyChecks {
         checks.merge(HistoricalQueryChecks.run()) { _, latest in latest }
         checks.merge(try anchorSelectionChecks()) { _, latest in latest }
         checks.merge(try directTraceChecks()) { _, latest in latest }
+        checks.merge(try semanticRangeChecks()) { _, latest in latest }
         return checks
     }
 
@@ -316,8 +317,88 @@ enum RetrievalStrategyChecks {
     private final class Encoder: SemanticEmbeddingAdapter {
         let dimension = 3, metadata = ["provider": "synthetic-retrieval-strategy", "version": "1"]
         private(set) var calls = 0
-        func encode(_ text: String) throws -> SemanticEncoding { calls += 1; return .vector([1, 0, 0]) }
+        private(set) var lastInput: Data?
+        var willEncode: (() throws -> Void)?
+        func encode(_ text: String) throws -> SemanticEncoding {
+            calls += 1; lastInput = Data(text.utf8); try willEncode?(); return .vector([1, 0, 0])
+        }
     }
+    private static func semanticRangeChecks() throws -> [String: Bool] {
+        let directory = try fixtureDirectory(prefix: "boros-semantic-range-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory), project = "synthetic-semantic-range"
+        let archive = try store.createConversation(projectID: project, title: "Synthetic semantic sources")
+        let chat = try store.createConversation(projectID: project, title: "Synthetic semantic query")
+        _ = try append(store, archive.id, "semantic-range-source", "semanticneedle original source")
+        let encoder = Encoder(), index = try SemanticIndex(store: store, encoder: encoder)
+        _ = try index.process(projectID: project, maximumChunks: 8)
+        let semanticText = "Return synthetic café κ\u{0}", lexicalText = "semanticneedle"
+        let prompt = "Question Date: 2023/05/23 (Tue) 11:23\nLexical: " + lexicalText + "\nQuestion: " + semanticText
+        let lexicalStart = "Question Date: 2023/05/23 (Tue) 11:23\nLexical: ".utf8.count
+        let lexicalRange = lexicalStart..<(lexicalStart + lexicalText.utf8.count)
+        let semanticRange = (prompt.utf8.count - semanticText.utf8.count)..<prompt.utf8.count
+        let clock = Clock(), id = UUID().uuidString, currentID = "semantic-range-request"
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "semantic-range-turn", humanEventID: currentID,
+            episodeID: id, text: prompt, limits: EpisodeLimits(), clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: id, clock: clock)
+        let recent = try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
+            prompt: prompt, system: "Synthetic host", excludingEventID: currentID, episodeLease: lease)
+        func prepare(_ range: Range<Int>?, lexical: Range<Int>? = nil, strategy: ContextRetrievalStrategy = .hybrid,
+            hasIndex: Bool = true) throws -> ContextSnapshot {
+            try ChatContextPreparation.prepareEvidence(recent: recent, store: store, conversationID: chat.id,
+                projectID: project, prompt: prompt, excludingEventID: currentID, semanticIndex: hasIndex ? index : nil,
+                retrievalStrategy: strategy, episodeLease: lease, lexicalQueryUTF8Range: lexical, semanticQueryUTF8Range: range)
+        }
+        let before = try lease.checkActive(), initialCalls = encoder.calls
+        var prepaid = false
+        encoder.willEncode = {
+            let atEncoding = try lease.checkActive()
+            prepaid = atEncoding.id == before.id && atEncoding.limits == before.limits
+                && atEncoding.charged.modelCalls == before.charged.modelCalls + 1
+                && atEncoding.charged.encoderInputBytes == before.charged.encoderInputBytes + semanticText.utf8.count
+        }
+        let selected = try prepare(semanticRange, lexical: lexicalRange)
+        encoder.willEncode = nil
+        let after = try lease.checkActive(), audit = try object(selected.retrievalAuditJSON!)
+        let trace = audit["selection_trace"] as! [String: Any], manifest = try object(selected.retrievalManifestJSON!)
+        let semanticSHA = ContextSnapshot.digest(Data(semanticText.utf8))
+        var checks: [String: Bool] = [
+            "semantic_range_exact_unicode_nul_slice_reaches_encoder_after_funding": prepaid && encoder.calls == initialCalls + 1
+                && encoder.lastInput == Data(semanticText.utf8) && after.charged.encoderInputBytes == before.charged.encoderInputBytes + semanticText.utf8.count,
+            "semantic_range_preserves_full_accepted_mandatory_prompt": Data(selected.messages.last!.content.utf8) == Data(prompt.utf8)
+                && selected.selectionBinding?.acceptedHumanEventID == currentID,
+            "semantic_range_trace_binds_selected_hash_offsets_to_manifest_and_full_prompt": trace["semantic_input_sha256"] as? String == semanticSHA
+                && audit["query_sha256"] as? String == semanticSHA && manifest["queryDigest"] as? String == semanticSHA
+                && trace["semantic_input_version"] as? String == "accepted-prompt-utf8-range-v1"
+                && trace["semantic_input_offset"] as? Int == semanticRange.lowerBound && trace["semantic_input_bytes"] as? Int == semanticRange.count
+                && trace["accepted_prompt_sha256"] as? String == ContextSnapshot.digest(Data(prompt.utf8)),
+            "semantic_range_is_independent_of_lexical_range": trace["lexical_input_sha256"] as? String == ContextSnapshot.digest(Data(lexicalText.utf8))
+                && trace["lexical_query_sha256"] as? String == ContextSnapshot.digest(Data(lexicalText.utf8))
+        ]
+        let semanticOnly = try prepare(semanticRange), onlyTrace = try object(semanticOnly.retrievalAuditJSON!)["selection_trace"] as! [String: Any]
+        checks["semantic_range_only_leaves_full_prompt_lexical_default"] = onlyTrace["lexical_input_sha256"] == nil
+            && onlyTrace["lexical_query_sha256"] as? String == ContextSnapshot.digest(Data((HistoricalQueryFormulation.formulate(prompt).query ?? "").utf8))
+        _ = try prepare(nil)
+        checks["semantic_range_nil_preserves_full_prompt_embedding_default"] = encoder.lastInput == Data(prompt.utf8)
+        let skipBefore = try lease.checkActive(), skipCalls = encoder.calls
+        let skipped = try prepare(semanticRange, lexical: lexicalRange, strategy: .recentOnly)
+        checks["semantic_range_recent_only_skips_historical_and_encoder_work"] = try encoder.calls == skipCalls
+            && sourceWorkEqual(skipBefore.charged, lease.checkActive().charged) && object(skipped.retrievalAuditJSON!).count == 1
+        let nilIndex = try prepare(semanticRange, lexical: lexicalRange, hasIndex: false)
+        checks["semantic_range_missing_index_keeps_input_trace_without_encoding"] = try encoder.calls == skipCalls
+            && (object(nilIndex.retrievalAuditJSON!)["selection_trace"] as! [String: Any])["semantic_input_sha256"] as? String == semanticSHA
+        let split = Data(prompt.utf8).range(of: Data("é".utf8))!.lowerBound + 1
+        for (name, invalid) in [("negative", -1..<1), ("empty", 0..<0), ("overflow", 0..<(prompt.utf8.count + 1)), ("split_scalar", split..<(split + 1))] {
+            let prior = try lease.checkActive(), calls = encoder.calls
+            do { _ = try prepare(invalid); checks["semantic_range_refuses_" + name + "_before_encoding"] = false }
+            catch {
+                checks["semantic_range_refuses_" + name + "_before_encoding"] = try (error as? HistoricalQueryFormulation.InputError) == .invalidRange
+                    && encoder.calls == calls && sourceWorkEqual(prior.charged, lease.checkActive().charged)
+            }
+        }
+        return checks
+    }
+
     private static func sourceWorkEqual(_ left: EpisodeResources, _ right: EpisodeResources) -> Bool {
         left.rawSourceBytes == right.rawSourceBytes && left.metadataRows == right.metadataRows
             && left.vectorBytes == right.vectorBytes && left.encoderInputBytes == right.encoderInputBytes

@@ -62,6 +62,15 @@ class Contracts(unittest.TestCase):
         self.assertNotIn("synthetic private conversation sentinel", encoded)
         self.assertNotIn("unexpected source text", encoded)
 
+    def test_query_ranges_remain_structured_without_query_content(self):
+        trace = {"lexical_input_version": "accepted-prompt-utf8-range-v1",
+                 "semantic_input_version": "accepted-prompt-utf8-range-v1",
+                 "lexical_input_sha256": "a" * 64, "semantic_input_sha256": "b" * 64,
+                 "accepted_prompt_sha256": "c" * 64,
+                 "lexical_input_offset": 11, "lexical_input_bytes": 8,
+                 "semantic_input_offset": 19, "semantic_input_bytes": 23}
+        self.assertEqual(e.content_free_metadata(trace, frozenset()), trace)
+
     @classmethod
     def setUpClass(cls):
         cls.fixtures = e.generate("development", history_count=1)

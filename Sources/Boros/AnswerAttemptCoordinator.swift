@@ -88,6 +88,7 @@ final class AnswerAttemptCoordinator {
     private let projectID: String
     private let prompt: String
     private let lexicalQueryUTF8Range: Range<Int>?
+    private let semanticQueryUTF8Range: Range<Int>?
     private let settings: GenerationSettings
     private let conversation: Conversation
     private let semanticIndex: SemanticIndex?
@@ -124,12 +125,14 @@ final class AnswerAttemptCoordinator {
          settings: GenerationSettings, conversation: Conversation = Conversation(), semanticIndex: SemanticIndex? = nil,
          retrievalStrategy: ContextRetrievalStrategy = .hybrid, limits: EpisodeLimits = EpisodeLimits(),
          lexicalQueryUTF8Range: Range<Int>? = nil,
+         semanticQueryUTF8Range: Range<Int>? = nil,
          clock: EpisodeClockSource = SystemEpisodeClock(), runner: AnswerAttemptRunning = ModelRunner(),
          onStage: ((AnswerAttemptStage, AnswerAttemptPreparation?) -> Void)? = nil,
          onText: @escaping (String) -> Void, onComplete: @escaping (AnswerAttemptCompletion, String) -> Void) {
         self.store = store; self.conversationID = conversationID; self.projectID = projectID
         self.prompt = prompt; self.conversation = conversation; self.semanticIndex = semanticIndex
         self.lexicalQueryUTF8Range = lexicalQueryUTF8Range
+        self.semanticQueryUTF8Range = semanticQueryUTF8Range
         self.retrievalStrategy = retrievalStrategy; self.clock = clock; self.runner = runner
         self.onStage = onStage; self.onText = onText; self.onComplete = onComplete
         var frozenLimits = limits
@@ -186,6 +189,7 @@ final class AnswerAttemptCoordinator {
                 projectID: projectID, humanEventID: identifiers.humanEventID, prompt: prompt,
                 settings: settings, conversation: conversation, semanticIndex: semanticIndex,
                 retrievalStrategy: retrievalStrategy, lexicalQueryUTF8Range: lexicalQueryUTF8Range,
+                semanticQueryUTF8Range: semanticQueryUTF8Range,
                 episodeLease: lease) { [self] outcome in
                     prepared(outcome)
                 }

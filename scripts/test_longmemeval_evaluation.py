@@ -42,9 +42,9 @@ def synthetic_histories():
     return histories
 
 
-def synthetic_input(history, configuration):
+def synthetic_input(history, configuration, version=5):
     probe = history["episodes"][0]
-    return {"version": 4, "split": "development", "history_id": history["id"], "events": history["events"],
+    return {"version": version, "split": "development", "history_id": history["id"], "events": history["events"],
         "configuration": configuration, "attempts": [{**{k: probe[k] for k in ("project_id", "conversation_key", "prompt", "question_time")},
              "probe_id": probe["id"], "strategy": strategy, "replicate": 0} for strategy in e.STRATEGIES]}
 
@@ -100,6 +100,16 @@ class Contracts(unittest.TestCase):
         self.document = synthetic_input(self.history, diagnostic.CONFIGURATION)
         self.input_patch = patch.object(diagnostic.cases, "runner_input", side_effect=synthetic_input)
         self.input_patch.start(); self.addCleanup(self.input_patch.stop)
+
+    def test_scoring_requires_version_five_document(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            document = synthetic_input(self.history, diagnostic.CONFIGURATION, version=4)
+            with self.assertRaises(e.EvaluationError):
+                diagnostic.score_native({"version": 1, "attempts": []}, Path(temporary), self.history, document)
+            for version in (True, 5.0, "5", 6):
+                document["version"] = version
+                with self.assertRaises(e.EvaluationError):
+                    diagnostic.score_native({"version": 1, "attempts": []}, Path(temporary), self.history, document)
 
     def test_union_full_turns_and_both_roles(self):
         ranges = []
@@ -336,14 +346,19 @@ class Contracts(unittest.TestCase):
                 declaration = e.strict_json((private / "declaration.json").read_bytes())
                 self.assertTrue(declaration["declared_attempts"] == 14 and len(declaration["case_ids"]) == 7)
                 self.assertTrue(declaration["source_hashes"] == inventory)
+                self.assertEqual(declaration["runner_document_version"], 5)
                 self.assertTrue((scratch / "frozen-code/scripts/evaluate_longmemeval.py").is_file())
                 self.assertTrue((scratch / "frozen-code/scripts/longmemeval_cases.py").is_file())
                 self.assertTrue((scratch / "frozen-code/scripts/import_chat.py").is_file())
                 binary = scratch / "binary"; e.private_write(binary, b"synthetic binary")
                 return binary, {"binary_sha256": e.digest(binary.read_bytes()), "source_sha256": inventory}
+            def execute_missing(_binary, input_path, _directory, _timeout):
+                self.assertEqual(e.strict_json(e.read_file(input_path))["version"], 5)
+                return {"version": 1, "fatal_failure": "runner_process_timeout", "attempts": []}
             with patch.object(diagnostic.cases, "prepare", return_value=self.histories), patch.object(diagnostic, "verified_driver", side_effect=driver), \
-                 patch.object(e, "execute", return_value={"version": 1, "fatal_failure": "runner_process_timeout", "attempts": []}) as execute:
+                 patch.object(e, "execute", side_effect=execute_missing) as execute:
                 report = diagnostic.run(root / "unused", output, private, timeout=60)
+            self.assertEqual(report["runner_document_version"], 5)
             self.assertTrue(execute.call_count == 7 and sum(r["declared_attempts"] for r in report["summary"].values()) == 14)
             self.assertTrue(all(r["operational_failures"] == 7 and r["official_qa_unscored_attempts"] == 7 for r in report["summary"].values()))
             self.assertTrue(all(r["session_hit_diagnostic_denominator"] == 0

@@ -76,6 +76,27 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(c.projection_sha256(history, changed), c.projection_sha256(history, document["configuration"]))
         self.assertNotEqual(c.native_configuration_sha256(changed), c.native_configuration_sha256(document["configuration"]))
 
+    def test_v5_preserves_v4_document_except_version(self):
+        for history in c.prepare_rows(fixture()):
+            v4 = c.runner_input(history, e.DEFAULTS, version=4)
+            v5 = c.runner_input(history, e.DEFAULTS)
+            self.assertEqual(v4["version"], 4)
+            self.assertEqual(v5["version"], 5)
+            self.assertEqual({**v4, "version": 5}, v5)
+            self.assertNotEqual(c.projection_sha256(history, e.DEFAULTS, version=4),
+                                c.projection_sha256(history, e.DEFAULTS, version=5))
+            encoded = c.canonical_json(v5)
+            for key in ("source_labels", "answer", "has_answer", "answer_session_ids", "question_type", "abstention"):
+                self.assertNotIn(("\"" + key + "\":").encode(), encoded)
+
+    def test_runner_versions_are_strict_and_explicit(self):
+        history = c.prepare_rows(fixture())[0]
+        for version in (None, True, False, 1, 3, 6, 4.0, 5.0, "5"):
+            with self.assertRaises(c.EvaluationError):
+                c.runner_input(history, e.DEFAULTS, version=version)
+            with self.assertRaises(c.EvaluationError):
+                c.projection_sha256(history, e.DEFAULTS, version=version)
+
     def test_malformed_selected_inventory_rejected(self):
         for mutate in (lambda row: row["haystack_session_ids"].pop(),
                        lambda row: row["haystack_sessions"].__setitem__(0, []),

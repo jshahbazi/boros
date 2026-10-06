@@ -34,6 +34,7 @@ final class ComponentContextPreparationOperation {
     private let humanEventID: String
     private let prompt: String
     private let lexicalQueryUTF8Range: Range<Int>?
+    private let semanticQueryUTF8Range: Range<Int>?
     private let settings: GenerationSettings
     private let conversation: Conversation
     private let semanticIndex: SemanticIndex?
@@ -52,10 +53,12 @@ final class ComponentContextPreparationOperation {
          prompt: String, settings: GenerationSettings, conversation: Conversation, semanticIndex: SemanticIndex?,
          retrievalStrategy: ContextRetrievalStrategy = .hybrid,
          lexicalQueryUTF8Range: Range<Int>? = nil,
+         semanticQueryUTF8Range: Range<Int>? = nil,
          episodeLease: EpisodeLease, completion: @escaping (Result<PreparedComponentContext, Error>) -> Void) {
         self.store = store; self.conversationID = conversationID; self.projectID = projectID
         self.humanEventID = humanEventID; self.prompt = prompt; self.settings = settings
         self.lexicalQueryUTF8Range = lexicalQueryUTF8Range
+        self.semanticQueryUTF8Range = semanticQueryUTF8Range
         self.conversation = conversation; self.semanticIndex = semanticIndex; self.lease = episodeLease
         self.retrievalStrategy = retrievalStrategy
         self.completion = completion
@@ -160,7 +163,8 @@ final class ComponentContextPreparationOperation {
                                     store: self.store, conversationID: self.conversationID, projectID: self.projectID,
                                     prompt: self.prompt, excludingEventID: self.humanEventID,
                                     semanticIndex: self.semanticIndex, retrievalStrategy: self.retrievalStrategy,
-                                    episodeLease: self.lease, lexicalQueryUTF8Range: self.lexicalQueryUTF8Range)
+                                    episodeLease: self.lease, lexicalQueryUTF8Range: self.lexicalQueryUTF8Range,
+                                    semanticQueryUTF8Range: self.semanticQueryUTF8Range)
                                 self.countEvidence(candidate, recentReceipt: receipt)
                             } else { self.countEvidence(snapshot, recentReceipt: receipt) }
                         }

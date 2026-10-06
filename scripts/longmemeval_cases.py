@@ -117,7 +117,9 @@ def prepare(source):
     return prepare_rows(rows)
 
 
-def runner_input(history, configuration):
+def runner_input(history, configuration, version=5):
+    if type(version) is not int or version not in (4, 5):
+        raise EvaluationError("unsupported benchmark runner version")
     events = [{key: event[key] for key in ("id", "project_id", "conversation_key", "role", "status", "text", "source_time")}
               for event in history["events"]]
     probe = history["episodes"][0]
@@ -125,12 +127,12 @@ def runner_input(history, configuration):
                  "conversation_key": probe["conversation_key"], "prompt": probe["prompt"],
                  "question_time": probe["question_time"], "strategy": strategy, "replicate": 0}
                 for strategy in e.STRATEGIES]
-    return {"version": 4, "split": "development", "history_id": history["id"],
+    return {"version": version, "split": "development", "history_id": history["id"],
             "events": events, "attempts": attempts, "configuration": dict(configuration)}
 
 
-def projection_sha256(history, configuration):
-    document = runner_input(history, configuration)
+def projection_sha256(history, configuration, version=5):
+    document = runner_input(history, configuration, version=version)
     document.pop("configuration")
     return digest(canonical_json(document))
 
