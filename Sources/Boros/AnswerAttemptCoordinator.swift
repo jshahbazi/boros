@@ -89,6 +89,7 @@ final class AnswerAttemptCoordinator {
     private let prompt: String
     private let lexicalQueryUTF8Range: Range<Int>?
     private let semanticQueryUTF8Range: Range<Int>?
+    private let evidenceSourceIDs: [String]?
     private let settings: GenerationSettings
     private let conversation: Conversation
     private let semanticIndex: SemanticIndex?
@@ -126,6 +127,7 @@ final class AnswerAttemptCoordinator {
          retrievalStrategy: ContextRetrievalStrategy = .hybrid, limits: EpisodeLimits = EpisodeLimits(),
          lexicalQueryUTF8Range: Range<Int>? = nil,
          semanticQueryUTF8Range: Range<Int>? = nil,
+         evidenceSourceIDs: [String]? = nil,
          clock: EpisodeClockSource = SystemEpisodeClock(), runner: AnswerAttemptRunning = ModelRunner(),
          onStage: ((AnswerAttemptStage, AnswerAttemptPreparation?) -> Void)? = nil,
          onText: @escaping (String) -> Void, onComplete: @escaping (AnswerAttemptCompletion, String) -> Void) {
@@ -133,6 +135,7 @@ final class AnswerAttemptCoordinator {
         self.prompt = prompt; self.conversation = conversation; self.semanticIndex = semanticIndex
         self.lexicalQueryUTF8Range = lexicalQueryUTF8Range
         self.semanticQueryUTF8Range = semanticQueryUTF8Range
+        self.evidenceSourceIDs = evidenceSourceIDs
         self.retrievalStrategy = retrievalStrategy; self.clock = clock; self.runner = runner
         self.onStage = onStage; self.onText = onText; self.onComplete = onComplete
         var frozenLimits = limits
@@ -190,6 +193,7 @@ final class AnswerAttemptCoordinator {
                 settings: settings, conversation: conversation, semanticIndex: semanticIndex,
                 retrievalStrategy: retrievalStrategy, lexicalQueryUTF8Range: lexicalQueryUTF8Range,
                 semanticQueryUTF8Range: semanticQueryUTF8Range,
+                evidenceSourceIDs: evidenceSourceIDs,
                 episodeLease: lease) { [self] outcome in
                     prepared(outcome)
                 }

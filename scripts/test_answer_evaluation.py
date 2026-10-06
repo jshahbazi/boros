@@ -385,7 +385,14 @@ class NativeContracts(unittest.TestCase):
                     "witness_complete_version_two_cannot_claim_complete_proof",
                     "witness_complete_missing_invocation_cannot_claim_proof",
                     "witness_stopped_actual_v3_source_body_count_revalidated",
-                    "witness_stopped_verification_does_not_change_original_debits")
+                    "witness_stopped_verification_does_not_change_original_debits",
+                    "source_control_v6_one_hybrid_attempt_and_exact_ids_decode",
+                    "source_control_v6_production_pins_separate_from_all_prior_versions",
+                    "source_control_complete_ordinary_v3_counted_source_body_proof_revalidated",
+                    "source_control_complete_exact_declared_union_spans_recent_and_cross_conversation_history",
+                    "source_control_reduced_explicit_reduction_or_complete_outcome",
+                    "source_control_stopped_complete_delivery_is_independent_of_answer_status",
+                    "source_control_stopped_terminal_capture_and_original_accounting_preserved")
         self.assertTrue(all(checks.get(name) is True for name in required))
 
     def test_native_refuses_existing_output_unknown_fields_nondev_and_store(self):

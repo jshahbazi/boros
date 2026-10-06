@@ -69,6 +69,16 @@ enum AnswerEvaluationCommand {
         "249fbf4665249094d99cfda40f34bb12308bb5e5e42ca809e0bc61901a70ec0c",
         "689e8a129f3aff322d11fc6ea455b88d75cd95c1d23e1012d0ccb3279593901b"
     ]
+    /// Separately pinned complete-original-source delivery controls. These
+    /// declarations do not assert that the selected sources answer a question.
+    static let completeSourceLongMemoryCorpusProjectionSHA256: Set<String> = [
+        "fe6e8f3f0f46ab3cd1396552d14a6fad3e3ff6ba8dc79237318f07cedc9ff88f",
+        "4cfe6f614ee53b8884d7976fb07d33c1c84291c13fdcd3b51e9c74f736188909",
+        "147b22015fb585e5dfe5f16aa83bd00d6a78d1025ac284a689c4d87afbe066bf",
+        "617cc682749008ee32ce7f2ecddc06bd900cb2de933312295de11bc7d170af40",
+        "d7a5dbeb84cb541483728498fa80912120be549ac67d7dba3d635a40e747de29",
+        "3bec8104d1c60064cd378b304754e876ad0891470e20c4679df0e21bda36e0a3"
+    ]
     static let longMemoryConfigurationSHA256 = "c23bf5d0bb63e7a348adfc4f673c9c01a1217d89e4c9e51c61f9bf80a300cf21"
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
@@ -89,6 +99,7 @@ enum AnswerEvaluationCommand {
         let strategy: ContextRetrievalStrategy
         let replicate: Int
         let question_time: EventSourceTime?
+        let evidence_source_ids: [String]?
         var effectivePrompt: String {
             guard let time = question_time else { return prompt }
             return "Question Date: " + time.originalValue + "\nQuestion: " + prompt
@@ -165,13 +176,15 @@ enum AnswerEvaluationCommand {
         var longMemory: Set<String> = []
         var longMemoryConfiguration: String? = nil
         var semanticLongMemory: Set<String> = []
+        var completeSourceLongMemory: Set<String> = []
         static var production: InputPins {
             InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
                 witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256,
                 formatConfiguration: formatInstructionConfigurationSHA256,
                 jsonWitness: jsonObjectCorpusProjectionSHA256, jsonConfiguration: jsonObjectConfigurationSHA256,
                 longMemory: longMemoryCorpusProjectionSHA256, longMemoryConfiguration: longMemoryConfigurationSHA256,
-                semanticLongMemory: semanticLongMemoryCorpusProjectionSHA256)
+                semanticLongMemory: semanticLongMemoryCorpusProjectionSHA256,
+                completeSourceLongMemory: completeSourceLongMemoryCorpusProjectionSHA256)
         }
     }
     private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
@@ -186,11 +199,12 @@ enum AnswerEvaluationCommand {
         let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
             options: [.sortedKeys, .withoutEscapingSlashes]))
         guard let mode = root["version"] as? NSNumber, CFGetTypeID(mode) != CFBooleanGetTypeID(),
-              mode.doubleValue == Double(mode.intValue), (1...5).contains(mode.intValue) else { throw Failure.invalid }
+              mode.doubleValue == Double(mode.intValue), (1...6).contains(mode.intValue) else { throw Failure.invalid }
         let eventKeys: Set<String> = ["id", "project_id", "conversation_key", "role", "status", "text"]
         let attemptKeys: Set<String> = ["probe_id", "project_id", "conversation_key", "prompt", "strategy", "replicate"]
         guard events.allSatisfy({ Set($0.keys) == (mode.intValue >= 4 ? eventKeys.union(["source_time"]) : eventKeys) }),
-              attempts.allSatisfy({ Set($0.keys) == (mode.intValue >= 4 ? attemptKeys.union(["question_time"]) : attemptKeys) }) else { throw Failure.invalid }
+              attempts.allSatisfy({ Set($0.keys) == (mode.intValue == 6 ? attemptKeys.union(["question_time", "evidence_source_ids"])
+                  : mode.intValue >= 4 ? attemptKeys.union(["question_time"]) : attemptKeys) }) else { throw Failure.invalid }
         let baseKeys: Set<String> = ["endpoint", "model", "system", "temperature", "seed", "thinking", "maximum_output", "context_limit", "safety_tokens"]
         guard Set(configuration.keys) == (mode.intValue == 3 ? baseKeys.union(["response_format"]) : baseKeys),
               mode.intValue != 3 || configuration["response_format"] as? String == "json_object" else { throw Failure.invalid }
@@ -207,7 +221,9 @@ enum AnswerEvaluationCommand {
                   digest(try JSONSerialization.data(withJSONObject: configuration,
                     options: [.sortedKeys, .withoutEscapingSlashes])) == pins.jsonConfiguration else { throw Failure.invalid }
         } else {
-            guard (mode.intValue == 4 ? pins.longMemory : pins.semanticLongMemory).contains(projectionDigest),
+            let projections = mode.intValue == 4 ? pins.longMemory
+                : mode.intValue == 5 ? pins.semanticLongMemory : pins.completeSourceLongMemory
+            guard projections.contains(projectionDigest),
                   digest(try JSONSerialization.data(withJSONObject: configuration,
                     options: [.sortedKeys, .withoutEscapingSlashes])) == pins.longMemoryConfiguration else { throw Failure.invalid }
         }
@@ -234,11 +250,23 @@ enum AnswerEvaluationCommand {
                   attemptsSeen.insert("\(attempt.probe_id)|\(attempt.strategy.rawValue)|\(attempt.replicate)").inserted else { throw Failure.invalid }
         }
         if value.version >= 4 {
-            guard value.attempts.count == 2, value.attempts.map(\.strategy) == [.recentOnly, .hybrid],
+            guard value.attempts.count == (value.version == 6 ? 1 : 2),
+                  value.attempts.map(\.strategy) == (value.version == 6 ? [.hybrid] : [.recentOnly, .hybrid]),
                   value.attempts.allSatisfy({ $0.replicate == 0 && $0.question_time != nil }),
                   value.events.allSatisfy({ $0.status == .complete }),
                   Set(value.events.map(\.project_id)).count == 1 else { throw Failure.invalid }
             for attempt in value.attempts { _ = try attempt.question_time!.validated() }
+        }
+        if value.version == 6 {
+            guard let attempt = value.attempts.first, let ids = attempt.evidence_source_ids,
+                  !ids.isEmpty, ids.count <= 16, ExactSourceIDs(ids).count == ids.count,
+                  ids.allSatisfy({ id in
+                      identifier(id) && value.events.contains { event in
+                          episodeIdentifierEqual(event.id, id) && episodeIdentifierEqual(event.project_id, attempt.project_id)
+                              && event.status == .complete && !event.text.isEmpty
+                              && event.text.utf8.count <= MemoryStore.maximumPageBytes
+                      }
+                  }) else { throw Failure.invalid }
         }
         if (2...3).contains(value.version) {
             guard value.attempts.count == 1, let attempt = value.attempts.first,
@@ -330,7 +358,7 @@ enum AnswerEvaluationCommand {
                 var construction: [String: Any] = ["schedule": "per_hybrid_attempt_before_acceptance", "performed": false]
                 let before = try owner.backgroundBudgetSnapshot()
                 let constructionStart = continuousSample()
-                if attempt.strategy == .hybrid {
+                if attempt.strategy == .hybrid && document.version != 6 {
                     do {
                         let index = try SemanticIndex(store: owner)
                         semantic = index
@@ -360,6 +388,7 @@ enum AnswerEvaluationCommand {
                 construction["budget_before"] = try object(before)
                 construction["budget_after"] = try object(owner.backgroundBudgetSnapshot())
                 construction["quiescent_during_answer"] = true
+                if document.version == 6 { construction["schedule"] = "skipped_declared_original_sources_control" }
                 let frozenConstruction = construction, frozenSemantic = semantic
                 DispatchQueue.main.async {
                     self.answer(attempt, ordinal: index, owner: owner, semantic: frozenSemantic,
@@ -386,7 +415,8 @@ enum AnswerEvaluationCommand {
                 projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
                 settings: document.configuration.settings, semanticIndex: semantic, retrievalStrategy: attempt.strategy,
                 lexicalQueryUTF8Range: attempt.lexicalQueryUTF8Range,
-                semanticQueryUTF8Range: document.version == 5 ? attempt.lexicalQueryUTF8Range : nil,
+                semanticQueryUTF8Range: document.version >= 5 ? attempt.lexicalQueryUTF8Range : nil,
+                evidenceSourceIDs: attempt.evidence_source_ids,
                 onText: { _ in }, onComplete: { completion, text in
                     do {
                         var item = attemptMetadata(attempt, ordinal: ordinal)
@@ -440,6 +470,10 @@ enum AnswerEvaluationCommand {
                             item["witness_validation"] = validateWitness(document: self.document, completion: completion,
                                 directory: restored, conversationID: self.conversations[key(attempt.project_id, attempt.conversation_key)]!)
                         }
+                        if self.document.version == 6 {
+                            item["source_control_validation"] = validateSourceControl(document: self.document, completion: completion,
+                                directory: restored, conversations: self.conversations)
+                        }
                         item["background_budget_at_completion"] = try object(owner.backgroundBudgetSnapshot())
                         item["full_host_milliseconds"] = milliseconds(started)
                         try self.publish(item, text: text, ordinal: ordinal)
@@ -486,6 +520,13 @@ enum AnswerEvaluationCommand {
             report.append(witnessMetadata(item))
         }
         private func witnessMetadata(_ item: [String: Any]) -> [String: Any] {
+            if document.version == 6 {
+                var result = item
+                if result["source_control_validation"] == nil {
+                    result["source_control_validation"] = sourceControlOutcome(document: document, failure: "source_control_outcome_unavailable")
+                }
+                return result
+            }
             guard (2...3).contains(document.version) else { return item }
             var result = item
             result["witness_mode"] = witnessMode
@@ -551,6 +592,126 @@ enum AnswerEvaluationCommand {
          "delivered_source_count": delivered as Any? ?? NSNull(), "complete_pack_delivered": complete as Any? ?? NSNull(),
          "source_body_count_revalidated": revalidated as Any? ?? NSNull(), "input_proof_version": proofVersion as Any? ?? NSNull(),
          "failure_code": failure as Any? ?? NSNull(), "validation_milliseconds": validationMilliseconds]
+    }
+
+    private static func sourceControlOutcome(document: Document, delivered: Int? = nil, complete: Bool? = nil,
+        revalidated: Bool? = nil, proofVersion: Int? = nil, failure: String?, validationMilliseconds: Any = NSNull()) -> [String: Any] {
+        let ids = ExactSourceIDs(document.attempts.first?.evidence_source_ids ?? [])
+        let sources = document.events.filter { ids.contains($0.id) }
+        return ["version": "declared-original-sources-v1", "declared_source_count": sources.count,
+            "declared_source_bytes": sources.reduce(0) { $0 + $1.text.utf8.count },
+            "delivered_source_count": delivered as Any? ?? NSNull(),
+            "complete_declared_sources_delivered": complete as Any? ?? NSNull(),
+            "source_body_count_revalidated": revalidated as Any? ?? NSNull(),
+            "input_proof_version": proofVersion as Any? ?? NSNull(), "failure_code": failure as Any? ?? NSNull(),
+            "validation_milliseconds": validationMilliseconds]
+    }
+
+    /// Verify counted source delivery independently of answer success. This
+    /// offline integrity check never creates answering work or oracle content.
+    private static func validateSourceControl(document: Document, completion: AnswerAttemptCompletion,
+        directory: URL, conversations: [String: String]) -> [String: Any] {
+        guard completion.invocationStarted else {
+            return sourceControlOutcome(document: document, failure: "source_control_outcome_unavailable")
+        }
+        let started = continuousSample()
+        do {
+            guard document.version == 6, let attempt = document.attempts.first,
+                  let ids = attempt.evidence_source_ids, let preparation = completion.preparation,
+                  let selectionID = preparation.sourceSelectionWorkID,
+                  let conversationID = conversations[key(attempt.project_id, attempt.conversation_key)] else { throw Failure.invalid }
+            let declared = ExactSourceIDs(ids)
+            let delivered = try withReadOnlySnapshot(directory: directory) { database in
+                let rows = try AuthorityStateKernel.rows(database,
+                    "SELECT request_body,request_digest,admission_json,episode_id,project_id,conversation_id,human_event_id,episode_work_id FROM invocations WHERE id=?",
+                    [.text(completion.identifiers.invocationID)])
+                guard rows.count == 1, let body = rows[0][0].bytes, let admission = rows[0][2].bytes,
+                      digest(body) == preparation.requestDigest, episodeIdentifierEqual(rows[0][1].string, preparation.requestDigest),
+                      admission == preparation.admissionAuditJSON,
+                      episodeIdentifierEqual(rows[0][3].string, completion.identifiers.episodeID),
+                      episodeIdentifierEqual(rows[0][4].string, project(attempt.project_id)),
+                      episodeIdentifierEqual(rows[0][5].string, conversationID),
+                      episodeIdentifierEqual(rows[0][6].string, completion.identifiers.humanEventID),
+                      episodeIdentifierEqual(rows[0][7].string, preparation.answerWorkID),
+                      let audit = try JSONSerialization.jsonObject(with: admission) as? [String: Any], audit["version"] as? Int == 3,
+                      let contextText = audit["context"] as? String, let context = Data(base64Encoded: contextText),
+                      context == preparation.contextAudit,
+                      let storedReceipt = audit["receipt"],
+                      let contextObject = try JSONSerialization.jsonObject(with: context) as? [String: Any],
+                      episodeIdentifierEqual(contextObject["selection_work_id"] as? String, selectionID),
+                      episodeIdentifierEqual(contextObject["source_snapshot_sha256"] as? String, preparation.sourceSelectionDigest),
+                      let bodyObject = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      let messages = bodyObject["messages"] as? [[String: String]], messages.count >= 2 else { throw Failure.invalid }
+                let mandatory = ContextAssembler.mandatoryMessages(prompt: attempt.effectivePrompt, system: document.configuration.system)
+                let declaredBytes = document.events.filter { declared.contains($0.id) }.reduce(0) { $0 + $1.text.utf8.count }
+                guard let retrieval = contextObject["retrieval"] as? [String: Any],
+                      retrieval["mode"] as? String == "declared_original_sources",
+                      retrieval["version"] as? String == "declared-original-sources-v1",
+                      retrieval["declared_source_count"] as? Int == ids.count,
+                      retrieval["declared_source_bytes"] as? Int == declaredBytes,
+                      retrieval["declared_source_ids_sha256"] as? String == digest(try JSONEncoder().encode(ids)),
+                      retrieval["semantic_available"] as? Bool == false else { throw Failure.invalid }
+                guard messages.first?["role"] == mandatory[0].role, messages.last?["role"] == mandatory[1].role,
+                      Data((messages.first?["content"] ?? "").utf8) == Data(mandatory[0].content.utf8),
+                      Data((messages.last?["content"] ?? "").utf8) == Data(mandatory[1].content.utf8) else { throw Failure.invalid }
+                var expectedSettings = document.configuration.settings
+                expectedSettings.messagesOverride = messages
+                guard try EndpointRequest.build(prompt: attempt.effectivePrompt, settings: expectedSettings, conversation: Conversation()) == body,
+                      try JSONSerialization.data(withJSONObject: storedReceipt, options: [.sortedKeys, .withoutEscapingSlashes])
+                        == JSONSerialization.data(withJSONObject: object(preparation.admission), options: [.sortedKeys, .withoutEscapingSlashes]) else { throw Failure.invalid }
+                try ContextComponentJournal.validate(database: database, invocationID: completion.identifiers.invocationID, verifySourceRanges: true)
+                let selectionRows = try AuthorityStateKernel.rows(database,
+                    "SELECT w.state,w.kind,s.payload FROM episode_work w JOIN episode_request_snapshots s ON s.digest=w.snapshot_digest WHERE w.id=? AND w.episode_id=?",
+                    [.text(selectionID), .text(completion.identifiers.episodeID)])
+                guard selectionRows.count == 1, selectionRows[0][0].string == "completed", selectionRows[0][1].string == "sourceRead",
+                      let selection = selectionRows[0][2].bytes, digest(selection) == preparation.sourceSelectionDigest,
+                      let selected = try JSONSerialization.jsonObject(with: selection) as? [String: Any],
+                      let recent = selected["recent_sources"] as? [[String: Any]],
+                      let historical = selected["historical_sources"] as? [[String: Any]],
+                      let recentIDs = selected["recent_source_ids"] as? [String], recentIDs.count == recent.count,
+                      ExactSourceIDs(recentIDs).count == recentIDs.count else { throw Failure.invalid }
+                // All original history remains intact and ordered across its
+                // original conversations; no exchange alternation is assumed.
+                var previousSequence = 0
+                for event in document.events {
+                    let original = try AuthorityStateKernel.rows(database,
+                        "SELECT sequence,project_id,conversation_id,role,status,digest,byte_count,payload,source_time_json FROM events WHERE id=?",
+                        [.text(event.id)])
+                    let bytes = Data(event.text.utf8)
+                    guard original.count == 1, original[0][0].integer > previousSequence,
+                          episodeIdentifierEqual(original[0][1].string, project(event.project_id)),
+                          episodeIdentifierEqual(original[0][2].string, conversations[key(event.project_id, event.conversation_key)]),
+                          original[0][3].string == (event.role == "user" ? "human" : "assistant"),
+                          original[0][4].string == event.status.rawValue, original[0][5].string == digest(bytes),
+                          original[0][6].integer == bytes.count, original[0][7].bytes == bytes,
+                          original[0][8].bytes == (try event.source_time?.canonicalData()) else { throw Failure.invalid }
+                    previousSequence = original[0][0].integer
+                }
+                var deliveredIDs = Set<Data>()
+                for (index, source) in recent.enumerated() {
+                    guard let id = source["eventID"] as? String, episodeIdentifierEqual(id, recentIDs[index]),
+                          let event = document.events.first(where: { episodeIdentifierEqual($0.id, id) }),
+                          source["digest"] as? String == digest(Data(event.text.utf8)),
+                          source["byteCount"] as? Int == event.text.utf8.count else { throw Failure.invalid }
+                    if declared.contains(id) { deliveredIDs.insert(Data(id.utf8)) }
+                }
+                for source in historical {
+                    guard let id = source["event_id"] as? String, declared.contains(id), !deliveredIDs.contains(Data(id.utf8)),
+                          let event = document.events.first(where: { episodeIdentifierEqual($0.id, id) }),
+                          source["excerpt_offset"] as? Int == 0, source["excerpt_bytes"] as? Int == event.text.utf8.count,
+                          source["excerpt_sha256"] as? String == digest(Data(event.text.utf8)) else { throw Failure.invalid }
+                    deliveredIDs.insert(Data(id.utf8))
+                }
+                return deliveredIDs.count
+            }
+            let complete = delivered == ids.count
+            return sourceControlOutcome(document: document, delivered: delivered, complete: complete,
+                revalidated: true, proofVersion: 3, failure: complete ? nil : "declared_sources_not_delivered",
+                validationMilliseconds: milliseconds(started))
+        } catch {
+            return sourceControlOutcome(document: document, revalidated: false, failure: "source_control_source_body_count_invalid",
+                validationMilliseconds: milliseconds(started))
+        }
     }
 
     /// A separate offline integrity result. Failed validation never overwrites
@@ -929,6 +1090,7 @@ extension AnswerEvaluationCommand {
     private static func longMemoryDecodeChecks(baseURL: String) throws -> [String: Bool] {
         try longMemoryDecodeChecks(baseURL: baseURL, version: 4).merging(
             longMemoryDecodeChecks(baseURL: baseURL, version: 5)) { _, newer in newer }
+            .merging(sourceControlDecodeChecks(baseURL: baseURL)) { _, newer in newer }
     }
 
     private static func longMemoryDecodeChecks(baseURL: String, version: Int) throws -> [String: Bool] {
@@ -984,7 +1146,7 @@ extension AnswerEvaluationCommand {
             case "changed_question": var rows = [attempt, hybrid]; rows[0]["prompt"] = "Changed synthetic question"; changed["attempts"] = rows
             case "legacy": changed["version"] = 1
             case "other_longmem_version": changed["version"] = version == 4 ? 5 : 4
-            case "unsupported_version": changed["version"] = 6
+            case "unsupported_version": changed["version"] = 7
             default: var c = root["configuration"] as! [String: Any]; c["maximum_output"] = 129; changed["configuration"] = c
             }
             checks["longmem_v\(version)_" + kind + "_refused"] = refused(changed, using: pins)
@@ -1019,6 +1181,114 @@ extension AnswerEvaluationCommand {
         return checks
     }
 
+    private static func sourceControlFixture(baseURL: String, reduced: Bool = false) -> [String: Any] {
+        var root = witnessFixture(baseURL: baseURL)
+        root["version"] = 6; root["history_id"] = "synthetic-complete-source-control"
+        let time = EventSourceTime(value: "2023-07-27T18:00", precision: "minute", timezone: "unspecified",
+            sourceSHA256: String(repeating: "d", count: 64), locator: "/synthetic/source/date", originalValue: "2023/07/27 (Thu) 18:00")
+        let count = reduced ? 16 : 3
+        let events: [[String: Any]] = (0..<count).map { index in
+            ["id": "synthetic-declared-\(index)", "project_id": "synthetic-witness-project",
+             "conversation_key": index == 0 ? "synthetic-witness-chat" : "synthetic-archive-\(index % 2)",
+             "role": index == 2 ? "assistant" : "user", "status": "complete",
+             "text": reduced ? "Public synthetic source \(index) " + String(repeating: "界", count: 1300)
+                : "Public synthetic source \(index) café\u{0} e\u{301} retained.", "source_time": time.object]
+        }
+        root["events"] = events
+        var attempt = (root["attempts"] as! [[String: Any]])[0]
+        attempt["strategy"] = "hybrid"; attempt["question_time"] = time.object
+        attempt["evidence_source_ids"] = [events[1]["id"] as! String, events[0]["id"] as! String]
+            + events.dropFirst(2).map { $0["id"] as! String }
+        root["attempts"] = [attempt]
+        if reduced {
+            var configuration = root["configuration"] as! [String: Any]
+            configuration["context_limit"] = 3200; root["configuration"] = configuration
+        }
+        return root
+    }
+
+    private static func sourceControlFixturePins(_ root: [String: Any]) throws -> InputPins {
+        var pins = InputPins(ordinary: [], witness: [], witnessConfiguration: witnessConfigurationSHA256)
+        pins.completeSourceLongMemory = [try projectionSHA256(witnessFixtureBytes(root))]
+        pins.longMemoryConfiguration = digest(try witnessFixtureBytes(root["configuration"] as! [String: Any]))
+        return pins
+    }
+
+    private static func sourceControlDecodeChecks(baseURL: String) throws -> [String: Bool] {
+        let root = sourceControlFixture(baseURL: baseURL), pins = try sourceControlFixturePins(root)
+        let document = try decode(witnessFixtureBytes(root), pins: pins), attempt = document.attempts[0]
+        var checks: [String: Bool] = [
+            "source_control_v6_one_hybrid_attempt_and_exact_ids_decode": document.version == 6 && document.attempts.count == 1
+                && attempt.strategy == .hybrid && attempt.replicate == 0
+                && attempt.evidence_source_ids == ["synthetic-declared-1", "synthetic-declared-0", "synthetic-declared-2"],
+            "source_control_v6_full_prompt_date_and_question_ranges_preserved": try HistoricalQueryFormulation.input(attempt.effectivePrompt,
+                utf8Range: attempt.lexicalQueryUTF8Range) == attempt.prompt
+                && attempt.effectivePrompt == "Question Date: " + attempt.question_time!.originalValue + "\nQuestion: " + attempt.prompt,
+            "source_control_v6_cross_conversation_non_alternating_originals_accepted": Set(document.events.map(\.conversation_key)).count == 3
+                && document.events[0].role == "user" && document.events[1].role == "user",
+            "source_control_v6_production_pins_separate_from_all_prior_versions": completeSourceLongMemoryCorpusProjectionSHA256.count == 6
+                && completeSourceLongMemoryCorpusProjectionSHA256.isDisjoint(with: longMemoryCorpusProjectionSHA256)
+                && completeSourceLongMemoryCorpusProjectionSHA256.isDisjoint(with: semanticLongMemoryCorpusProjectionSHA256)
+                && completeSourceLongMemoryCorpusProjectionSHA256.isDisjoint(with: witnessCorpusProjectionSHA256)
+                && completeSourceLongMemoryCorpusProjectionSHA256.isDisjoint(with: InputPins.production.ordinary)
+                && completeSourceLongMemoryCorpusProjectionSHA256.isDisjoint(with: jsonObjectCorpusProjectionSHA256)
+        ]
+        func refused(_ changed: [String: Any], using selected: InputPins) -> Bool {
+            do { _ = try decode(witnessFixtureBytes(changed), pins: selected); return false } catch { return true }
+        }
+        checks["source_control_v6_synthetic_not_production_authority"] = refused(root, using: .production)
+        for kind in ["missing_ids", "empty_ids", "duplicate_ids", "too_many_ids", "unknown_id", "boolean_id", "recent_only", "replicate", "extra_attempt",
+                     "empty_source", "oversized_source", "partial_source", "foreign_project", "missing_source_date", "missing_question_date",
+                     "invalid_calendar", "root_oracle", "attempt_oracle", "event_oracle"] {
+            var changed = root, events = root["events"] as! [[String: Any]], attempts = root["attempts"] as! [[String: Any]]
+            switch kind {
+            case "missing_ids": attempts[0].removeValue(forKey: "evidence_source_ids")
+            case "empty_ids": attempts[0]["evidence_source_ids"] = [] as [String]
+            case "duplicate_ids": attempts[0]["evidence_source_ids"] = ["synthetic-declared-0", "synthetic-declared-0"]
+            case "too_many_ids": attempts[0]["evidence_source_ids"] = (0..<17).map { "synthetic-declared-\($0)" }
+            case "unknown_id": attempts[0]["evidence_source_ids"] = ["synthetic-unknown"]
+            case "boolean_id": attempts[0]["evidence_source_ids"] = [true]
+            case "recent_only": attempts[0]["strategy"] = "recent_only"
+            case "replicate": attempts[0]["replicate"] = 1
+            case "extra_attempt": var extra = attempts[0]; extra["probe_id"] = "synthetic-extra"; attempts.append(extra)
+            case "empty_source": events[0]["text"] = ""
+            case "oversized_source": events[0]["text"] = String(repeating: "x", count: 4097)
+            case "partial_source": events[0]["status"] = "partial"
+            case "foreign_project": events[0]["project_id"] = "synthetic-foreign"
+            case "missing_source_date": events[0]["source_time"] = NSNull()
+            case "missing_question_date": attempts[0]["question_time"] = NSNull()
+            case "invalid_calendar": var time = events[0]["source_time"] as! [String: Any]; time["value"] = "2023-02-30"; events[0]["source_time"] = time
+            case "root_oracle": changed["answer"] = "Public synthetic scorer-only reference"
+            case "attempt_oracle": attempts[0]["has_answer"] = true
+            default: events[0]["oracle"] = true
+            }
+            changed["events"] = events; changed["attempts"] = attempts
+            checks["source_control_v6_\(kind)_grammar_refused"] = refused(changed, using: try sourceControlFixturePins(changed))
+        }
+        for kind in ["text", "source_date", "question", "question_date", "event_order", "declared_order", "configuration", "old_version"] {
+            var changed = root, events = root["events"] as! [[String: Any]], attempts = root["attempts"] as! [[String: Any]]
+            switch kind {
+            case "text": events[0]["text"] = "Changed public synthetic source"
+            case "source_date": var time = events[0]["source_time"] as! [String: Any]; time["locator"] = "/synthetic/changed"; events[0]["source_time"] = time
+            case "question": attempts[0]["prompt"] = "Changed public synthetic question"
+            case "question_date": var time = attempts[0]["question_time"] as! [String: Any]; time["locator"] = "/synthetic/changed"; attempts[0]["question_time"] = time
+            case "event_order": events.swapAt(0, 1)
+            case "declared_order": attempts[0]["evidence_source_ids"] = ["synthetic-declared-0", "synthetic-declared-1", "synthetic-declared-2"]
+            case "configuration": var configuration = root["configuration"] as! [String: Any]; configuration["maximum_output"] = 65; changed["configuration"] = configuration
+            default: changed["version"] = 5
+            }
+            changed["events"] = events; changed["attempts"] = attempts
+            checks["source_control_v6_frozen_\(kind)_change_refused"] = refused(changed, using: pins)
+        }
+        let unknown = sourceControlOutcome(document: document, failure: "source_control_outcome_unavailable")
+        checks["source_control_v6_unavailable_retains_counts_without_sufficiency_or_answer_claim"] = unknown["declared_source_count"] as? Int == 3
+            && unknown["declared_source_bytes"] as? Int == document.events.reduce(0, { $0 + $1.text.utf8.count })
+            && unknown["complete_declared_sources_delivered"] is NSNull && unknown["source_body_count_revalidated"] is NSNull
+            && unknown["delivered_source_count"] is NSNull && unknown["input_proof_version"] is NSNull
+            && unknown["semantic_sufficiency"] == nil && unknown["answer_correct"] == nil
+        return checks
+    }
+
     private final class WitnessCheckSuite {
         let baseURL: String, completion: ([String: Bool]) -> Void
         var checks: [String: Bool], cases = ["complete", "reduced", "stopped", "json_complete"]
@@ -1027,7 +1297,7 @@ extension AnswerEvaluationCommand {
             self.baseURL = baseURL; self.checks = checks; self.completion = completion
         }
         func next() {
-            guard !cases.isEmpty else { completion(checks); return }
+            guard !cases.isEmpty else { SourceControlCheckSuite(baseURL: baseURL, checks: checks, completion: completion).next(); return }
             let kind = cases.removeFirst()
             do {
                 let attempt = try WitnessCheckAttempt(baseURL: baseURL, kind: kind) { [self] result in
@@ -1040,6 +1310,140 @@ extension AnswerEvaluationCommand {
             } catch { checks["witness_\(kind)_fixture_started"] = false; next() }
         }
     }
+    private final class SourceControlCheckSuite {
+        let baseURL: String, completion: ([String: Bool]) -> Void
+        var checks: [String: Bool], cases = ["complete", "reduced", "stopped"]
+        var current: SourceControlCheckAttempt?
+        init(baseURL: String, checks: [String: Bool], completion: @escaping ([String: Bool]) -> Void) {
+            self.baseURL = baseURL; self.checks = checks; self.completion = completion
+        }
+        func next() {
+            guard !cases.isEmpty else { completion(checks); return }
+            let kind = cases.removeFirst()
+            do {
+                let attempt = try SourceControlCheckAttempt(baseURL: baseURL, kind: kind) { [self] result in
+                    checks.merge(result) { _, latest in latest }; current = nil
+                    DispatchQueue.main.async { [self] in next() }
+                }
+                current = attempt; attempt.start()
+            } catch { checks["source_control_\(kind)_fixture_started"] = false; next() }
+        }
+    }
+
+    private final class SourceControlCheckAttempt {
+        let document: Document, kind: String, directory: URL, store: MemoryStore, conversations: [String: String]
+        let completion: ([String: Bool]) -> Void
+        var coordinator: AnswerAttemptCoordinator?
+        init(baseURL: String, kind: String, completion: @escaping ([String: Bool]) -> Void) throws {
+            self.kind = kind; self.completion = completion
+            let root = sourceControlFixture(baseURL: baseURL, reduced: kind == "reduced")
+            document = try decode(witnessFixtureBytes(root), pins: sourceControlFixturePins(root))
+            guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.io }
+            let path = String(cString: resolved); free(resolved)
+            directory = URL(fileURLWithPath: path, isDirectory: true).appendingPathComponent("boros-source-control-check-" + UUID().uuidString)
+            let baseline = try MemoryStore(directory: directory.appendingPathComponent("baseline"))
+            conversations = try ingestEvents(document, into: baseline)
+            let archive = directory.appendingPathComponent("archive"), restored = directory.appendingPathComponent("restored")
+            _ = try BackupArchive.create(from: baseline, at: archive)
+            _ = try BackupArchive.restore(from: archive, to: restored, authority: .unmanagedNoDeletion)
+            store = try MemoryStore(directory: restored)
+        }
+        deinit { try? FileManager.default.removeItem(at: directory) }
+        func start() {
+            let attempt = document.attempts[0]
+            let operation = AnswerAttemptCoordinator(store: store,
+                conversationID: conversations[key(attempt.project_id, attempt.conversation_key)]!,
+                projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
+                settings: document.configuration.settings, retrievalStrategy: .hybrid,
+                lexicalQueryUTF8Range: attempt.lexicalQueryUTF8Range, semanticQueryUTF8Range: attempt.lexicalQueryUTF8Range,
+                evidenceSourceIDs: attempt.evidence_source_ids,
+                onStage: { [self] stage, _ in if kind == "stopped" && stage == .answering { coordinator?.cancel() } },
+                onText: { _ in }, onComplete: { [self] result, _ in finish(result) })
+            coordinator = operation
+            do { _ = try operation.accept(); try operation.start() }
+            catch { completion(["source_control_\(kind)_coordinator_started": false]) }
+        }
+        private func finish(_ result: AnswerAttemptCompletion) {
+            let prefix = "source_control_" + kind + "_", restored = directory.appendingPathComponent("restored")
+            func validate() -> [String: Any] {
+                validateSourceControl(document: document, completion: result, directory: restored, conversations: conversations)
+            }
+            func invalid(_ outcome: [String: Any]) -> Bool {
+                outcome["source_body_count_revalidated"] as? Bool == false
+                    && outcome["complete_declared_sources_delivered"] is NSNull
+                    && outcome["failure_code"] as? String == "source_control_source_body_count_invalid"
+            }
+            let outcome = validate(), ids = document.attempts[0].evidence_source_ids!
+            var checks: [String: Bool] = [
+                prefix + "ordinary_v3_counted_source_body_proof_revalidated": outcome["source_body_count_revalidated"] as? Bool == true
+                    && outcome["input_proof_version"] as? Int == 3 && result.invocationStarted,
+                prefix + "complete_delivery_is_independent_of_answer_status": outcome["complete_declared_sources_delivered"] as? Bool == (kind != "reduced")
+                    && outcome["declared_source_count"] as? Int == ids.count
+                    && outcome["declared_source_bytes"] as? Int == document.events.reduce(0, { $0 + $1.text.utf8.count }),
+                prefix + "explicit_reduction_or_complete_outcome": kind == "reduced"
+                    ? outcome["failure_code"] as? String == "declared_sources_not_delivered"
+                        && (outcome["delivered_source_count"] as? Int).map { $0 < ids.count } == true
+                    : outcome["failure_code"] is NSNull && outcome["delivered_source_count"] as? Int == ids.count,
+                prefix + "terminal_capture_and_original_accounting_preserved": result.captureHealthy && result.accountingHealthy
+                    && result.captureStatus == (kind == "stopped" ? .cancelled : .complete)
+            ]
+            do {
+                guard let preparation = result.preparation,
+                      let audit = try JSONSerialization.jsonObject(with: preparation.contextAudit) as? [String: Any],
+                      let historical = audit["historical_sources"] as? [[String: Any]],
+                      let workID = preparation.sourceSelectionWorkID,
+                      let selectionBytes = try store.episodeWork(episodeID: result.identifiers.episodeID, operationID: workID)?.request.snapshot,
+                      let selection = try JSONSerialization.jsonObject(with: selectionBytes) as? [String: Any],
+                      let recentIDs = selection["recent_source_ids"] as? [String] else { throw Failure.invalid }
+                let historicalIDs = historical.compactMap { $0["event_id"] as? String }
+                if kind != "reduced" {
+                    checks[prefix + "exact_declared_union_spans_recent_and_cross_conversation_history"] = recentIDs == ["synthetic-declared-0"]
+                        && historicalIDs == ["synthetic-declared-1", "synthetic-declared-2"]
+                        && ExactSourceIDs(recentIDs + historicalIDs) == ExactSourceIDs(ids)
+                }
+                let originalCharge = try store.episodeReceipt(id: result.identifiers.episodeID, clock: SystemEpisodeClock().now()).charged
+                _ = validate()
+                checks[prefix + "offline_integrity_does_not_change_original_charges"] = try store.episodeReceipt(id: result.identifiers.episodeID,
+                    clock: SystemEpisodeClock().now()).charged == originalCharge
+                var changedRoot = sourceControlFixture(baseURL: document.configuration.endpoint, reduced: kind == "reduced")
+                var attempts = changedRoot["attempts"] as! [[String: Any]]
+                attempts[0]["prompt"] = "Changed public synthetic current question"; changedRoot["attempts"] = attempts
+                let changed = try decode(witnessFixtureBytes(changedRoot), pins: sourceControlFixturePins(changedRoot))
+                checks[prefix + "full_original_question_mismatch_rejected"] = invalid(validateSourceControl(document: changed,
+                    completion: result, directory: restored, conversations: conversations))
+                var raw: OpaquePointer?
+                guard sqlite3_open_v2(restored.appendingPathComponent("memory.sqlite3").path, &raw, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+                      let database = raw else { if let raw { sqlite3_close(raw) }; throw Failure.io }
+                defer { sqlite3_close(database) }
+                let invocation = try AuthorityStateKernel.rows(database,
+                    "SELECT request_body,admission_json FROM invocations WHERE id=?", [.text(result.identifiers.invocationID)])
+                guard invocation.count == 1, let body = invocation[0][0].bytes, let admission = invocation[0][1].bytes,
+                      var admissionObject = try JSONSerialization.jsonObject(with: admission) as? [String: Any],
+                      var receipt = admissionObject["receipt"] as? [String: Any] else { throw Failure.invalid }
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET request_body=? WHERE id=?",
+                    [.bytes(Data("{}".utf8)), .text(result.identifiers.invocationID)])
+                checks[prefix + "actual_counted_body_tamper_rejected"] = invalid(validate())
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET request_body=? WHERE id=?",
+                    [.bytes(body), .text(result.identifiers.invocationID)])
+                receipt["promptTokens"] = (receipt["promptTokens"] as? Int ?? 0) + 1; admissionObject["receipt"] = receipt
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET admission_json=? WHERE id=?",
+                    [.bytes(try witnessFixtureBytes(admissionObject)), .text(result.identifiers.invocationID)])
+                checks[prefix + "count_receipt_tamper_rejected"] = invalid(validate())
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET admission_json=? WHERE id=?",
+                    [.bytes(admission), .text(result.identifiers.invocationID)])
+                var alteredDate = document.events[0].source_time!.object
+                alteredDate["locator"] = "/synthetic/changed-date-provenance"
+                try AuthorityStateKernel.execute(database, "UPDATE events SET source_time_json=? WHERE id=?",
+                    [.bytes(try witnessFixtureBytes(alteredDate)), .text(document.events[0].id)])
+                checks[prefix + "original_date_provenance_tamper_rejected_even_if_omitted"] = invalid(validate())
+                try AuthorityStateKernel.execute(database, "UPDATE events SET source_time_json=? WHERE id=?",
+                    [.bytes(try document.events[0].source_time!.canonicalData()), .text(document.events[0].id)])
+                checks[prefix + "restored_original_bytes_revalidate_again"] = validate()["source_body_count_revalidated"] as? Bool == true
+            } catch { checks[prefix + "integrity_fixture_completed"] = false }
+            completion(checks)
+        }
+    }
+
     private final class WitnessCheckAttempt {
         let document: Document, kind: String, directory: URL, store: MemoryStore, conversationID: String
         let completion: ([String: Bool]) -> Void

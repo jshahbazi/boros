@@ -72,6 +72,7 @@ def main():
                              ("evidence-controls", "test_evidence_controls.py"),
                              ("longmemeval-cases", "test_longmemeval_cases.py"),
                              ("longmemeval-evaluation", "test_longmemeval_evaluation.py"),
+                             ("longmemeval-source-controls", "test_longmemeval_source_controls.py"),
                              ("local-longmemeval-qa", "test_local_longmemeval_qa.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)

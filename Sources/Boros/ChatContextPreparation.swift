@@ -109,7 +109,7 @@ enum ChatContextPreparation {
         projectID: String, prompt: String, excludingEventID: String,
         semanticIndex: SemanticIndex? = nil, retrievalStrategy: ContextRetrievalStrategy = .hybrid,
         episodeLease: EpisodeLease? = nil, lexicalQueryUTF8Range: Range<Int>? = nil,
-        semanticQueryUTF8Range: Range<Int>? = nil) throws -> ContextSnapshot {
+        semanticQueryUTF8Range: Range<Int>? = nil, evidenceSourceIDs: [String]? = nil) throws -> ContextSnapshot {
         _ = try episodeLease?.checkActive(projectID: projectID)
         return try MeteredRetrieval.operation(lease: episodeLease) {
             _ = try recent.componentAssignments()
@@ -119,6 +119,14 @@ enum ChatContextPreparation {
                   episodeIdentifierEqual(recent.messages.last?.content, prompt), recent.evidence.isEmpty else { throw ContextError.sourceMismatch }
             let lexicalInput = try HistoricalQueryFormulation.input(prompt, utf8Range: lexicalQueryUTF8Range)
             let semanticInput = try HistoricalQueryFormulation.input(prompt, utf8Range: semanticQueryUTF8Range)
+            // A separately declared source-delivery control supplies original
+            // IDs, never source text or an answer. Ordinary Send uses nil.
+            if let evidenceSourceIDs {
+                guard retrievalStrategy == .hybrid, let episodeLease else { throw MeteredRetrievalError.invalid }
+                return try declaredSourceSnapshot(recent: recent, store: store, conversationID: conversationID,
+                    projectID: projectID, excludingEventID: excludingEventID, sourceIDs: evidenceSourceIDs,
+                    lease: episodeLease)
+            }
             if retrievalStrategy == .recentOnly {
                 return try recentOnlySnapshot(recent)
             }
@@ -230,6 +238,58 @@ enum ChatContextPreparation {
             }
             return result
         }
+    }
+
+    /// Internal control for separating source availability from answer quality.
+    /// Every selected ID resolves to its original scoped record before any
+    /// payload is read. Component reduction and full-body admission still run.
+    private static func declaredSourceSnapshot(recent: ContextSnapshot, store: MemoryStore,
+        conversationID: String, projectID: String, excludingEventID: String,
+        sourceIDs: [String], lease: EpisodeLease) throws -> ContextSnapshot {
+        guard !sourceIDs.isEmpty, sourceIDs.count <= ContextAssembler.componentMaximumEvidenceSpans,
+              ExactSourceIDs(sourceIDs).count == sourceIDs.count,
+              sourceIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 && !$0.contains("\0")
+                  && !episodeIdentifierEqual($0, excludingEventID) }) else { throw MeteredRetrievalError.invalid }
+        let frontier = try MeteredRetrieval.sourceMetadata(store: store, lease: lease, maximumRows: 1) {
+            try store.sourceFrontier(projectID: projectID)
+        }
+        var references: [MemorySourceReference] = []
+        for id in sourceIDs {
+            guard let source = try MeteredRetrieval.sourceMetadata(store: store, lease: lease, maximumRows: 1, {
+                try store.sourceReference(eventID: id, projectID: projectID)
+            }), episodeIdentifierEqual(source.eventID, id), episodeIdentifierEqual(source.projectID, projectID),
+                  source.sequence > 0, source.sequence <= frontier,
+                  source.byteCount > 0, source.byteCount <= MemoryStore.maximumPageBytes else {
+                throw MeteredRetrievalError.sourceMismatch
+            }
+            references.append(source)
+        }
+        let recentIDs = ExactSourceIDs(recent.recentSourceIDs)
+        var hits: [MemoryHit] = []
+        for source in references where !recentIDs.contains(source.eventID) {
+            let page = try MeteredRetrieval.read(store: store, source: source, offset: 0,
+                length: source.byteCount, lease: lease, nested: true, examinedPasses: 2)
+            guard page.offset == 0, page.byteCount == source.byteCount,
+                  page.text.utf8.count == source.byteCount,
+                  ContextSnapshot.digest(Data(page.text.utf8)) == source.digest else {
+                throw MeteredRetrievalError.sourceMismatch
+            }
+            hits.append(MemoryHit(eventID: source.eventID, conversationID: source.conversationID,
+                projectID: source.projectID, role: source.role, status: source.status,
+                createdAt: source.createdAt, digest: source.digest, totalBytes: source.byteCount,
+                excerptOffset: 0, excerpt: page.text, sourceTime: source.sourceTime))
+        }
+        var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
+            projectID: projectID, excludingEventID: excludingEventID, historicalHits: hits,
+            episodeLease: lease, operationIsNested: true)
+        result.retrievalManifestID = nil; result.retrievalManifestJSON = nil; result.retrievalNotice = nil
+        try appendAudit(to: &result, fields: ["mode": "declared_original_sources",
+            "version": "declared-original-sources-v1", "source_frontier": frontier,
+            "declared_source_count": sourceIDs.count,
+            "declared_source_bytes": references.reduce(0) { $0 + $1.byteCount },
+            "declared_source_ids_sha256": ContextSnapshot.digest(try JSONEncoder().encode(sourceIDs)),
+            "selected_historical_source_count": hits.count, "semantic_available": false])
+        return result
     }
 
     private static func recentOnlySnapshot(_ recent: ContextSnapshot) throws -> ContextSnapshot {

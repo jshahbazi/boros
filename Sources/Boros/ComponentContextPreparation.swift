@@ -35,6 +35,7 @@ final class ComponentContextPreparationOperation {
     private let prompt: String
     private let lexicalQueryUTF8Range: Range<Int>?
     private let semanticQueryUTF8Range: Range<Int>?
+    private let evidenceSourceIDs: [String]?
     private let settings: GenerationSettings
     private let conversation: Conversation
     private let semanticIndex: SemanticIndex?
@@ -54,11 +55,13 @@ final class ComponentContextPreparationOperation {
          retrievalStrategy: ContextRetrievalStrategy = .hybrid,
          lexicalQueryUTF8Range: Range<Int>? = nil,
          semanticQueryUTF8Range: Range<Int>? = nil,
+         evidenceSourceIDs: [String]? = nil,
          episodeLease: EpisodeLease, completion: @escaping (Result<PreparedComponentContext, Error>) -> Void) {
         self.store = store; self.conversationID = conversationID; self.projectID = projectID
         self.humanEventID = humanEventID; self.prompt = prompt; self.settings = settings
         self.lexicalQueryUTF8Range = lexicalQueryUTF8Range
         self.semanticQueryUTF8Range = semanticQueryUTF8Range
+        self.evidenceSourceIDs = evidenceSourceIDs
         self.conversation = conversation; self.semanticIndex = semanticIndex; self.lease = episodeLease
         self.retrievalStrategy = retrievalStrategy
         self.completion = completion
@@ -164,7 +167,8 @@ final class ComponentContextPreparationOperation {
                                     prompt: self.prompt, excludingEventID: self.humanEventID,
                                     semanticIndex: self.semanticIndex, retrievalStrategy: self.retrievalStrategy,
                                     episodeLease: self.lease, lexicalQueryUTF8Range: self.lexicalQueryUTF8Range,
-                                    semanticQueryUTF8Range: self.semanticQueryUTF8Range)
+                                    semanticQueryUTF8Range: self.semanticQueryUTF8Range,
+                                    evidenceSourceIDs: self.evidenceSourceIDs)
                                 self.countEvidence(candidate, recentReceipt: receipt)
                             } else { self.countEvidence(snapshot, recentReceipt: receipt) }
                         }

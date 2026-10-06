@@ -9,7 +9,7 @@ enum AnswerAttemptCoordinatorChecks {
     }
 
     private enum Case: String, CaseIterable {
-        case success, lexicalRange, semanticRange, wrongAnswer, unknownUsage, partialFailure, emptyAnswer, duplicateCallbacks
+        case success, lexicalRange, semanticRange, declaredSources, wrongAnswer, unknownUsage, partialFailure, emptyAnswer, duplicateCallbacks
         case cancelBeforeStart, cancelPreparing, cancelBeforeDispatch, cancelAfterDispatch, cancelAfterChunk
         case delayedCancel, concurrentAcceptanceStop, hostSaveFailure
         case deadlineBeforeStart, deadlineAfterDispatch, captureFailure, adapterViolation, sanitizedFailure
@@ -86,7 +86,7 @@ enum AnswerAttemptCoordinatorChecks {
                 status: .complete, turnID: "synthetic-prior-turn", eventID: "synthetic-prior-event")
             prompt = (kind == .lexicalRange || kind == .semanticRange) ? "Question Date: 2023/05/23 (Tue) 11:23\nQuestion: Recall cobaltfixture café κ."
                 : "Give the public synthetic fixture answer."
-            if kind == .lexicalRange || kind == .semanticRange {
+            if kind == .lexicalRange || kind == .semanticRange || kind == .declaredSources {
                 let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic archived query evidence")
                 _ = try store.append(conversationID: archive.id, role: .human, text: "cobaltfixture exact archived source",
                     status: .complete, turnID: "range-archive-turn", eventID: "range-archive-event")
@@ -106,11 +106,12 @@ enum AnswerAttemptCoordinatorChecks {
         func start() {
             let operation = AnswerAttemptCoordinator(store: store, conversationID: chat.id,
                 projectID: kind == .wrongScope ? "synthetic-other-scope" : chat.projectID, prompt: prompt,
-                settings: settings, retrievalStrategy: (kind == .lexicalRange || kind == .semanticRange) ? .hybrid : .recentOnly,
+                settings: settings, retrievalStrategy: (kind == .lexicalRange || kind == .semanticRange || kind == .declaredSources) ? .hybrid : .recentOnly,
                 lexicalQueryUTF8Range: (kind == .lexicalRange || kind == .semanticRange)
                     ? (prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count)..<prompt.utf8.count : nil,
                 semanticQueryUTF8Range: kind == .semanticRange
                     ? (prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count)..<prompt.utf8.count : nil,
+                evidenceSourceIDs: kind == .declaredSources ? ["range-archive-event", "synthetic-prior-event"] : nil,
                 clock: clock, runner: runner,
                 onStage: { [self] stage, preparation in
                     if stage == .preparing && kind == .cancelPreparing { coordinator?.cancel() }
@@ -214,6 +215,32 @@ enum AnswerAttemptCoordinatorChecks {
                     if runner.starts > 0 {
                         checks[prefix + "_stale_settings_discarded_and_exact_body"] = runner.bodyMatches && runner.containsAcceptedPrompt
                     }
+                    if kind == .declaredSources {
+                        let audit = try JSONSerialization.jsonObject(with: preparation.contextAudit) as! [String: Any]
+                        let retrieval = audit["retrieval"] as! [String: Any]
+                        let sources = audit["historical_sources"] as? [[String: Any]] ?? []
+                        checks[prefix + "_explicit_selection_reaches_counted_component_and_persisted_audit"] =
+                            retrieval["mode"] as? String == "declared_original_sources"
+                                && retrieval["declared_source_count"] as? Int == 2 && sources.count == 1
+                                && sources[0]["event_id"] as? String == "range-archive-event"
+                                && sources[0]["excerpt_offset"] as? Int == 0
+                                && sources[0]["excerpt_bytes"] as? Int == "cobaltfixture exact archived source".utf8.count
+                        checks[prefix + "_full_prompt_body_and_original_source_union_retained"] =
+                            runner.containsAcceptedPrompt && runner.bodyMatches
+                                && (preparation.admission.componentProof?.evidence.tokens ?? 0) > 0
+                                && (preparation.admission.componentProof?.recent.tokens ?? 0) > 0
+                        let archive = directory.appendingPathComponent("declared-source-archive")
+                        let restoredDirectory = directory.appendingPathComponent("declared-source-restored")
+                        _ = try BackupArchive.create(from: store, at: archive)
+                        _ = try BackupArchive.verify(at: archive)
+                        _ = try BackupArchive.restore(from: archive, to: restoredDirectory, authority: .unmanagedNoDeletion)
+                        let restored = try MemoryStore(directory: restoredDirectory)
+                        let original = try restored.invocation(id: report.identifiers.invocationID)
+                        let restoredCharge = try restored.episodeReceipt(id: report.identifiers.episodeID, clock: clock.now()).charged
+                        checks[prefix + "_archive_restore_preserves_actual_body_admission_and_charges"] =
+                            original?.requestBody == invocation?.requestBody && original?.admissionJSON == invocation?.admissionJSON
+                                && restoredCharge == report.episode?.charged
+                    }
                     if kind == .lexicalRange || kind == .semanticRange {
                         let audit = try JSONSerialization.jsonObject(with: preparation.contextAudit) as! [String: Any]
                         let retrieval = audit["retrieval"] as! [String: Any]
@@ -235,7 +262,7 @@ enum AnswerAttemptCoordinatorChecks {
                     }
                 }
                 switch kind {
-                case .success, .lexicalRange, .semanticRange, .wrongAnswer, .duplicateCallbacks, .doubleStart:
+                case .success, .lexicalRange, .semanticRange, .declaredSources, .wrongAnswer, .duplicateCallbacks, .doubleStart:
                     checks[prefix + "_operational_success_independent_of_score"] = report.episode?.state == .completed
                         && report.captureStatus == .complete && report.generation.failure == nil && report.captureHealthy
                     checks[prefix + "_observed_answer_usage_settled"] = report.episode?.held.outputTokens == 0

@@ -149,6 +149,7 @@ enum RetrievalStrategyChecks {
         checks.merge(try directTraceChecks()) { _, latest in latest }
         checks.merge(try semanticRangeChecks()) { _, latest in latest }
         checks.merge(try precedingHumanChecks()) { _, latest in latest }
+        checks.merge(try declaredSourceChecks()) { _, latest in latest }
         return checks
     }
 
@@ -334,6 +335,108 @@ enum RetrievalStrategyChecks {
             calls += 1; lastInput = Data(text.utf8); try willEncode?(); return .vector([1, 0, 0])
         }
     }
+    private static func declaredSourceChecks() throws -> [String: Bool] {
+        let directory = try fixtureDirectory(prefix: "boros-declared-sources-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory), project = "synthetic-declared-project"
+        let archive = try store.createConversation(projectID: project, title: "Synthetic original sources")
+        let chat = try store.createConversation(projectID: project, title: "Synthetic control request")
+        let foreignChat = try store.createConversation(projectID: "synthetic-foreign-project", title: "Synthetic foreign")
+        let date = EventSourceTime(value: "2023-05-30", precision: "day", timezone: "unspecified",
+            sourceSHA256: String(repeating: "c", count: 64), locator: "/synthetic/date", originalValue: "2023-05-30")
+        let human = try store.append(conversationID: archive.id, role: .human, text: "Original café e\u{301}\0 source",
+            status: .partial, turnID: "declared-human-turn", eventID: "declared-human", sourceTime: date)
+        let assistant = try append(store, archive.id, "declared-assistant", "Original synthetic assistant reply", role: .assistant)
+        let recentEvent = try append(store, chat.id, "declared-recent", "Original retained recent text")
+        let empty = try append(store, archive.id, "declared-empty", "")
+        let large = try append(store, archive.id, "declared-large", String(repeating: "x", count: 4097))
+        let foreign = try append(store, foreignChat.id, "declared-foreign", "Foreign source must not be read")
+        let distinctIDs = try ["declared-é", "declared-e\u{301}"].enumerated().map {
+            try append(store, archive.id, $0.element, "Distinct original source \($0.offset)")
+        }
+        let prompt = "Synthetic source-control question", current = "declared-current", episode = UUID().uuidString, clock = Clock()
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "declared-current-turn",
+            humanEventID: current, episodeID: episode, text: prompt, limits: EpisodeLimits(), clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: episode, clock: clock)
+        let recent = try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
+            prompt: prompt, system: "Synthetic host", excludingEventID: current, episodeLease: lease)
+        func select(_ ids: [String], strategy: ContextRetrievalStrategy = .hybrid, funded: Bool = true) throws -> ContextSnapshot {
+            try ChatContextPreparation.prepareEvidence(recent: recent, store: store, conversationID: chat.id,
+                projectID: project, prompt: prompt, excludingEventID: current, retrievalStrategy: strategy,
+                episodeLease: funded ? lease : nil, evidenceSourceIDs: ids)
+        }
+        let before = try lease.checkActive(), selected = try select([assistant.id, recentEvent.id, human.id])
+        let after = try lease.checkActive(), audit = try object(selected.retrievalAuditJSON!)
+        var checks: [String: Bool] = [
+            "declared_sources_preserve_declared_historical_order_without_neighbor_expansion": selected.evidence.map(\.eventID) == [assistant.id, human.id],
+            "declared_sources_preserve_complete_original_utf8_role_status_and_date": selected.evidence.last?.excerpt.utf8.elementsEqual(human.text.utf8) == true
+                && selected.evidence.last?.role == .human && selected.evidence.last?.status == .partial && selected.evidence.last?.sourceTime == date,
+            "declared_sources_retain_recent_union_without_duplicate_evidence": selected.recentSourceIDs == [recentEvent.id]
+                && selected.evidence.allSatisfy { $0.eventID != recentEvent.id },
+            "declared_sources_keep_complete_mandatory_prompt_and_binding": selected.messages.last?.content == prompt
+                && selected.selectionBinding?.mandatoryMessagesSHA256 == recent.selectionBinding?.mandatoryMessagesSHA256,
+            "declared_sources_are_paid_under_original_lease_and_caps": after.id == before.id && after.limits == before.limits
+                && after.charged.memoryOperations == before.charged.memoryOperations + 1
+                && after.charged.rawSourceBytes >= before.charged.rawSourceBytes + 4 * (human.byteCount + assistant.byteCount)
+                && after.charged.metadataRows > before.charged.metadataRows,
+            "declared_sources_perform_no_encoder_vector_or_inference_work": after.charged.encoderInputBytes == before.charged.encoderInputBytes
+                && after.charged.vectorBytes == before.charged.vectorBytes && after.charged.modelCalls == before.charged.modelCalls,
+            "declared_sources_report_control_identity_and_original_inventory": audit["mode"] as? String == "declared_original_sources"
+                && audit["version"] as? String == "declared-original-sources-v1" && audit["declared_source_count"] as? Int == 3
+                && audit["declared_source_bytes"] as? Int == human.byteCount + assistant.byteCount + recentEvent.byteCount
+                && selected.retrievalManifestJSON == nil && selected.retrievalManifestID == nil
+        ]
+        let invalid: [(String, [String])] = [("empty", []), ("duplicate", [human.id, human.id]),
+            ("request", [current]), ("nul_id", ["bad\0id"]), ("long_id", [String(repeating: "x", count: 257)]),
+            ("candidate_cap", (0..<17).map { "synthetic-id-\($0)" }), ("missing", [human.id, "declared-missing"]),
+            ("foreign", [human.id, foreign.id]), ("empty_source", [human.id, empty.id]), ("page_cap", [human.id, large.id])]
+        for (name, ids) in invalid {
+            let before = try lease.checkActive()
+            do { _ = try select(ids); checks["declared_sources_refuse_\(name)_before_payload"] = false }
+            catch { checks["declared_sources_refuse_\(name)_before_payload"] = try lease.checkActive().charged.rawSourceBytes == before.charged.rawSourceBytes }
+        }
+        for (name, strategy, funded) in [("recent_only", ContextRetrievalStrategy.recentOnly, true), ("unfunded", .hybrid, false)] {
+            let before = try lease.checkActive()
+            do { _ = try select([human.id], strategy: strategy, funded: funded); checks["declared_sources_refuse_\(name)"] = false }
+            catch {
+                let after = try lease.checkActive()
+                checks["declared_sources_refuse_\(name)"] = error is MeteredRetrievalError
+                    && after.charged.rawSourceBytes == before.charged.rawSourceBytes
+            }
+        }
+        let distinct = try select(distinctIDs.map(\.id))
+        checks["declared_sources_keep_byte_distinct_unicode_identifiers"] = distinct.evidence.map { Data($0.eventID.utf8) }
+            == distinctIDs.map { Data($0.id.utf8) }
+        let limitedChat = try store.createConversation(projectID: project, title: "Synthetic exhausted source control")
+        var limits = EpisodeLimits(); limits.resources.rawSourceBytes = 2 * prompt.utf8.count
+        let limitedID = UUID().uuidString, limitedHuman = "declared-limited-human"
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: limitedChat.id, turnID: "declared-limited-turn",
+            humanEventID: limitedHuman, episodeID: limitedID, text: prompt, limits: limits, clock: clock.now())
+        let limitedLease = EpisodeLease(ledger: store, episodeID: limitedID, clock: clock)
+        let limitedRecent = try ContextAssembler.prepareRecent(store: store, conversationID: limitedChat.id, projectID: project,
+            prompt: prompt, system: "Synthetic host", excludingEventID: limitedHuman, episodeLease: limitedLease)
+        let limitedBefore = try limitedLease.checkActive()
+        do {
+            _ = try ChatContextPreparation.prepareEvidence(recent: limitedRecent, store: store, conversationID: limitedChat.id,
+                projectID: project, prompt: prompt, excludingEventID: limitedHuman, episodeLease: limitedLease,
+                evidenceSourceIDs: [human.id])
+            checks["declared_sources_exhausted_raw_allowance_prevents_payload"] = false
+        } catch {
+            let state = try store.episodeReceipt(id: limitedID, clock: clock.now())
+            checks["declared_sources_exhausted_raw_allowance_prevents_payload"] = error is EpisodeBudgetError
+                && state.state == .budgetExceeded
+                && state.charged.rawSourceBytes == limitedBefore.charged.rawSourceBytes && state.limits == limits
+                && state.held.rawSourceBytes == 0
+        }
+        _ = try limitedLease.finish(reason: .cancelled)
+        _ = try lease.finish(reason: .cancelled)
+        let terminal = try store.episodeReceipt(id: episode, clock: clock.now())
+        do { _ = try select([human.id]); checks["declared_sources_terminal_cannot_renew_reads"] = false }
+        catch { checks["declared_sources_terminal_cannot_renew_reads"] = try error is EpisodeBudgetError
+            && store.episodeReceipt(id: episode, clock: clock.now()).charged == terminal.charged }
+        return checks
+    }
+
     private static func precedingHumanChecks() throws -> [String: Bool] {
         let directory = try fixtureDirectory(prefix: "boros-preceding-strategy-")
         defer { try? FileManager.default.removeItem(at: directory) }
