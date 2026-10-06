@@ -2,6 +2,8 @@
 
 `scripts/local_longmemeval_qa.py` grades the seven frozen LongMemEval development cases through the local Qwen server. It uses the unchanged upstream grading templates. It records local judgments; official GPT-4o grading and held-out judge calibration remain unrun.
 
+The separately pinned six-row complete-source diagnostic uses [its own local grader](LOCAL-QA-SOURCE-CONTROLS.md), sharing the templates, strict transport/parser and synthetic-control validation. Its source-delivery eligibility and six-case denominator remain separate from the fourteen-attempt recent/hybrid comparisons.
+
 ## Inputs and execution
 
 The protocol file is `src/evaluation/evaluate_qa.py` at upstream revision `9e0b455f4ef0e2ab8f2e582289761153549043fc`, SHA-256 `ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251`. The tool extracts only its pure prompt function through the Python AST. It does not import or execute the upstream CLI. Dataset bytes, source projections, questions, scorer annotations, dates, model configuration, answer-report hash and ordered hypothesis exports must match the [adapter contract](LONGMEMEVAL.md).

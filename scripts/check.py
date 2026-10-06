@@ -73,7 +73,8 @@ def main():
                              ("longmemeval-cases", "test_longmemeval_cases.py"),
                              ("longmemeval-evaluation", "test_longmemeval_evaluation.py"),
                              ("longmemeval-source-controls", "test_longmemeval_source_controls.py"),
-                             ("local-longmemeval-qa", "test_local_longmemeval_qa.py")):
+                             ("local-longmemeval-qa", "test_local_longmemeval_qa.py"),
+                             ("local-longmemeval-source-control-qa", "test_local_longmemeval_source_control_qa.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)
             report = json.loads(checked.stdout)
