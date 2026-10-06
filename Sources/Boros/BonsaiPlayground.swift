@@ -2136,6 +2136,31 @@ private enum BonsaiPlayground {
                 print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"context_admission_self_test\":false}"); exit(1) }
         }
+        if CommandLine.arguments.contains("--authority-clock-crash-producer") || CommandLine.arguments.contains("--authority-clock-crash-recover") {
+            let arguments = CommandLine.arguments
+            guard arguments.count == 4,
+                  arguments[1] == "--authority-clock-crash-producer" || arguments[1] == "--authority-clock-crash-recover",
+                  arguments[2].hasPrefix("/"), ["replacement", "append"].contains(arguments[3]) else {
+                print("{\"authority_clock_crash_arguments\":false}"); exit(2)
+            }
+            do {
+                let directory = URL(fileURLWithPath: arguments[2], isDirectory: true)
+                if arguments[1] == "--authority-clock-crash-producer" {
+                    try AuthorityClockChecks.produceCrashFixture(directory: directory, coalescing: arguments[3] == "replacement")
+                    exit(1)
+                }
+                let checks = try AuthorityClockChecks.verifyCrashFixture(directory: directory, coalescing: arguments[3] == "replacement")
+                let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"authority_clock_crash_fixture\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--authority-clock-self-test") {
+            do {
+                let checks = try AuthorityClockChecks.run()
+                let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"authority_clock_self_test\":false}"); exit(1) }
+        }
         if CommandLine.arguments.contains("--authority-state-self-test") {
             do {
                 let checks = try AuthorityStateChecks.run()

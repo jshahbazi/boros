@@ -21,7 +21,7 @@ def main():
     total = 0
     with tempfile.TemporaryDirectory(prefix="boros-checks-") as directory:
         env = {**os.environ, "BOROS_DATA_DIR": directory}
-        suites = ["--authority-state-self-test", "--recent-source-framing-self-test", "--retrieval-strategy-self-test", "--background-budget-self-test", "--background-ledger-self-test", "--background-worker-self-test", "--episode-self-test", "--local-read-self-test", "--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test", "--context-admission-self-test", "--semantic-self-test", "--backup-self-test"]
+        suites = ["--authority-clock-self-test", "--authority-state-self-test", "--recent-source-framing-self-test", "--retrieval-strategy-self-test", "--background-budget-self-test", "--background-ledger-self-test", "--background-worker-self-test", "--episode-self-test", "--local-read-self-test", "--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test", "--context-admission-self-test", "--semantic-self-test", "--backup-self-test"]
         for suite in suites:
             run = subprocess.run([str(binary), suite], capture_output=True, text=True, env=env, timeout=90)
             checks = json.loads(run.stdout)
@@ -30,6 +30,14 @@ def main():
             print(json.dumps({"suite": suite, "checks": len(checks), "failed": failed}))
             if run.returncode or failed:
                 return 1
+        clock_process = subprocess.run([sys.executable, str(ROOT / "scripts/test_authority_clock.py"),
+                                        "--binary", str(binary), "--process-only"],
+                                       capture_output=True, text=True, env=env, timeout=180)
+        clock_report = json.loads(clock_process.stdout)
+        print(json.dumps({"suite": "authority-clock-process", **clock_report}))
+        total += clock_report["checks"]
+        if clock_process.returncode or clock_report["failed"] or not clock_report["passed"]:
+            return 1
         fixture = subprocess.Popen([sys.executable, str(ROOT / "Tests/endpoint_fixture.py")], stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, text=True)
         try:

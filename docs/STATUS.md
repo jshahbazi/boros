@@ -14,17 +14,17 @@ The design goal is evidence-backed continuity within bounded context and resourc
 
 | Snapshot | Status |
 |---|---|
-| Latest verified code wave | Schema-6 dormant task/policy authority state, exact replay/DDL integrity, expiry/reopen and archive compatibility |
+| Latest verified code wave | Schema-6 dormant task/policy state with bounded version-2 clock checkpoints, immutable legacy history and crash recovery |
 | Latest preceding evidence documentation | `9ea5c90`: traced failures and controlled long-chat results |
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
-| Latest recorded application verification | **2,420 checks passed** on a frozen snapshot matching current Sources/scripts; 32 native public-case checks (27 overlapping) and seven old-writer archive checks passed; strict deep development signature verification passed |
+| Latest recorded application verification | **2,508 checks passed** on a frozen snapshot matching current Sources/scripts, including 70 clock contracts and 18 clock process checks; 32 native public checks passed (27 overlapping) and 22 old schema-6 writer checks passed; strict deep development signature verification passed |
 | Latest imported-chat result | Lexical, hybrid, and exact-page paths each recovered 12/12 selected answerable probes in warm and process-restart profiles |
 | Answering model | Configured Qwen completed the original pilot and all 24 DevGPT attempts on October 5; original failures retained, new run operationally complete |
-| Running GUI/build freshness | `.build/boros-n6-verified/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
+| Running GUI/build freshness | `.build/boros-clock-verified/Boros.app` rebuilt from the verified snapshot; controlled synthetic GUI success and streaming Stop passed. The user's existing GUI process and final visual release walkthrough remain unverified |
 | Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
-**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3/N4 progress:** three fixed DevGPT histories, strict rubrics, versioned recent IDs and structural diagnostics are verified. The declared repeat completed 24/24 attempts, with each strategy passing 6/12 tasks. Labels pushed one history over the recent cap; two probes lost required gold and hybrid did not recover it. **Next:** source-selection failure attribution and a separately annotated provider-fit witness, with the N6 durable authority foundation now verified. Bounded clock checkpoints and shared policy/task runtime enforcement remain the next architecture dependencies. Natural questions, actual corrections, representative measurements, service, deletion and release gates remain unfinished.
+**Completed first milestone:** shared answering path, controlled verification and the first paired production-path diagnostic. **N3/N4 progress:** three fixed DevGPT histories, strict rubrics, versioned recent IDs and structural diagnostics are verified. The declared repeat completed 24/24 attempts, with each strategy passing 6/12 tasks. Labels pushed one history over the recent cap; two probes lost required gold and hybrid did not recover it. **Next:** source-selection failure attribution and a separately annotated provider-fit witness, with the N6 durable authority foundation now verified. Bounded clock checkpoints are implemented; metered validation and shared policy/task runtime enforcement remain the next architecture dependencies. Natural questions, actual corrections, representative measurements, service, deletion and release gates remain unfinished.
 
 ### Status labels
 
@@ -158,6 +158,7 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 
 | Surface | Recorded result | Evidence boundary |
 |---|---|---|
+| Bounded clock checkpoints | **2,508 application checks passed**; strict deep signature verification; 70 clock contracts plus 18 real SIGKILL checks | Frozen 84-file Sources/scripts snapshot; 9,000 ticks retain one checkpoint; exact quota boundaries untested; runtime gates unfinished |
 | Dormant authority-state foundation | **2,420 application checks passed**; strict deep signature verification; 132 authority checks | Frozen Sources/scripts match the worktree; genuine schema-5 old-writer archive accepted through seven separate checks; policy mutations unexposed and runtime gates unfinished |
 | Shared answering source wave | **2,162 application checks passed**; strict deep signature verification | Preceding answering-wave source snapshot; includes 517 preparation/strategy/coordinator checks, 93 GUI self-checks and 20 answering contracts |
 | Recent-source framing amendment | **2,287 application checks passed**; strict deep signature verification; five additional native checks | Frozen source matches that recorded wave; 39 framing checks, 544 component/strategy/coordinator checks, 32 rubric checks and genuine v1 count/admission/archive/restore; separate 32-check public suite overlaps 27 default checks |
@@ -172,7 +173,7 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 | Historical live Qwen smoke | Two public arithmetic turns passed at `b006b6a` | Connectivity, admission, capture/accounting; no long-history quality evidence |
 | Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
 
-Latest verification record: `.build/evaluation/authority-state-wave-verification-20261005.json`. Verified bundle: `.build/boros-n6-verified/Boros.app`. Preceding framing record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+Latest verification record: `.build/evaluation/clock-checkpoint-wave-verification-20261005.json`. Verified bundle: `.build/boros-clock-verified/Boros.app`. Preceding authority record: `.build/evaluation/authority-state-wave-verification-20261005.json`. Preceding framing record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
 
 ### Durable authority-state foundation
 
@@ -182,7 +183,11 @@ The schema-6 journal validates exact DDL/implicit indexes, canonical state/reque
 
 The final bundle `.build/boros-n6-verified/Boros.app` passed **2,420 application checks**, including **132 authority checks**, strict deep signature verification and the 32-check controlled native public suite (27 overlap the default suite). Seven additional old-writer compatibility checks passed. Focused suites passed 225 episode/process, 184 backup/process, 113 memory/process, 77 local-read, 455 background/full-source/process and 49 evaluation contracts; semantic process recovery passed six checks. Counts overlap. The content-free source-hash record is `.build/evaluation/authority-state-wave-verification-20261005.json`.
 
-The state kernel remains unexposed. Existing dispatch, pages, visible chunks and derived publication do not yet consult it. Each increasing clock observation currently consumes an append-only journal entry; bounded clock checkpoints must land before continuous runtime gates use it. Full source-bound replay work also remains unmetered. Human acceptance/task binding, a policy renderer, source/route dependency grants, serialized delivery/dispatch/publication gates, deletion-aware restore, service interfaces and release remain unfinished. See [authority state](AUTHORITY-STATE.md).
+The bounded-clock wave passed **2,508 application checks**, including **70 clock contracts** and **18 real SIGKILL process checks**. A separately compiled 16-source harness passed the same 88 clock checks, and the 32-check controlled native public suite passed (27 overlap the default suite); counts overlap. Repeated observations preserve checkpoint identity and anchor; mutation, startup, activation and expiry freeze earlier receipts. Corruption, rejected CAS, rollback, archive/restore and exact human retry contracts passed. The SIGKILL barrier is after both checkpoint SQL writes and before commit; it does not establish crashes between writes or power-loss durability.
+
+A separately compiled writer using the retained `b149877` schema-6 core produced a synthetic version-1 archive with pure-time receipts, task/conversation binding, source-backed policy and the formerly allowed `authority-clock:` human request ID. The current verifier/restore/retry harness passed **22 checks**, preserving source inventory, task/policy/binding records and old receipt bytes. Later startup and new version-2 checkpoints did not change the original human retry receipt. Record: `.build/clock-legacy-writer-contracts.json`, with source and binary hashes. This is newly generated old-writer compatibility evidence, not a retained production archive.
+
+The state kernel remains unexposed. Existing dispatch, pages, visible chunks and derived publication do not yet consult it. Repeated no-effect clock observations now coalesce the final version-2 checkpoint; human, startup, temporal-transition and legacy version-1 receipts remain immutable. Full source-bound replay still runs before replacement and remains unmetered. Exact journal-cap boundaries and power-loss durability remain unmeasured. Human acceptance/task binding, a policy renderer, source/route dependency grants, serialized delivery/dispatch/publication gates, deletion-aware restore, service interfaces and release remain unfinished. See [authority state](AUTHORITY-STATE.md).
 
 ### Recent-source framing development repeat
 
@@ -319,7 +324,7 @@ The user authorized completion of the full planned architecture on October 5, 20
 | N3 | Add independent developer-history/imported-chat answering cases — partial | Three pinned DevGPT histories executed; all text fit recent context; strict reproduction/citation/absence rubrics | Separately frozen larger/cross-session histories, natural questions, corrections, immediate follow-ups, chronology and sufficient-evidence witness remain |
 | N4 | Improve baseline where N2/N3 expose failures — partial | V2 framing/legacy compatibility and structural diagnostics verified; repeat 6/12 per arm, with missing h00 gold and format/quote failures | Controlled source-selection trace, independently frozen confirmation/larger histories; preserve metering and old pins |
 | N5 | Measure scaling and practical caps | Parallel once workload defined; diagnostic timing does not establish endpoint target | Declared 1k/10k/100k corpora, bytes/chunks/concurrency, warm/restart/paused schedules; endpoint/full-path latency, backlog and work |
-| N6 | Complete standing-policy/task lifecycle | Can proceed independently of N3/N4 measurements; required for scoped-instruction category | Durable state foundation verified; clock checkpoints, human-acceptance binding, bounded policy renderer and shared dispatch/output/page/publication gates remain; retain charged/unknown work and legacy evidence |
+| N6 | Complete standing-policy/task lifecycle | Can proceed independently of N3/N4 measurements; required for scoped-instruction category | Durable state and bounded clock checkpoints verified; metered validation, human-acceptance binding, bounded policy renderer and shared dispatch/output/page/publication gates remain; retain charged/unknown work and legacy evidence |
 | N7 | Freeze/execute representative baseline evaluation | Pilot workload/variance from N2–N5; full five-category claim also needs N6 | New source/config amendment, independent splits, feasibility, failure scoring, power, usage and trajectory accounting; preserve old pins |
 | N8 | Decide whether to build optional tree | Accepted baseline/workload first | Explicit decision; then source/child/context lineage, ready queues, frontiers, nonblocking failures, correction/rebuild and pagination |
 | N9 | Compare tree-enabled and baseline paths | Tree and all comparison prerequisites | Frozen B/D pair, one primary mode; independent held-out quality/category/cost/latency gates |
@@ -391,7 +396,7 @@ All confidence bounds above are the specified 95% bounds. Replicates and tree bu
 
 | Decision | Current position | Needed choice/evidence |
 |---|---|---|
-| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 framing/diagnostics and repeat complete; baseline failures remain | Trace selection failures, freeze larger histories and sufficient question/gold context; implement bounded clock checkpoints and N6 shared gates; retain optional gates |
+| Immediate milestone | N1–N2 first diagnostic complete; N3 public pilot executed; N4 framing/diagnostics and repeat complete; baseline failures remain | Trace selection failures, freeze larger histories and sufficient question/gold context; implement metered authority validation and N6 shared gates; retain optional gates |
 | Answering runtime | Configured Qwen executed the first paired diagnostic | Retain initial admission failure and unknown output hold; establish startup/warm reliability before representative measurements |
 | Representative histories | Generated mixed-domain import, synthetic fixtures and three source-pinned DevGPT sharing histories; N4 labels trimmed h00 and hybrid failed to recover missing gold | Independent authors, natural questions, original times, larger/cross-session histories and representative workload unestablished |
 | Rubrics | Literal factual pilot and frozen strict exact-answer/cross-message/citation/abstention contracts; synthetic correction checks | Actual public correction cases, semantic reasoning and scoped lifecycle remain unmeasured/unimplemented |
@@ -424,7 +429,8 @@ Hidden reasoning capture, unrestricted orchestration, universal exactly-once act
 | [Read episodes](READ-EPISODES.md) | Browser/evaluation origins and lifecycle |
 | [Background budgets](BACKGROUND-INDEX-BUDGET.md) | Maintenance/publication/recovery/integrity |
 | [Semantic retrieval](SEMANTIC-RETRIEVAL.md) | Encoder/coverage/manifests/jobs/fallback |
-| [Authority state](AUTHORITY-STATE.md) | Internal schema-6 task/policy journal and unexposed enforcement boundary |
+| [Authority state](AUTHORITY-STATE.md) | Internal schema-6 task/policy journal, bounded clock checkpoints and unexposed enforcement boundary |
+| [Authority gates](AUTHORITY-GATES.md) | Unimplemented durable binding and shared dispatch/delivery/publication contract |
 | [Backup/restore](BACKUP-RESTORE.md) | Contents/compatibility/verification/exclusions |
 | [GUI provenance](GUI-ORIGIN.md) | Interface origin/development boundary |
 

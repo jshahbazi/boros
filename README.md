@@ -70,4 +70,4 @@ The automated commands above use synthetic data and isolated stores. The [evalua
 
 See [GUI provenance](docs/GUI-ORIGIN.md), the [independent design review](tracechat-adversarial-review.md), and [implementation status](docs/IMPLEMENTATION.md).
 
-The internal schema-6 task/policy state foundation and its enforcement boundary are documented in [authority state](docs/AUTHORITY-STATE.md). Run the isolated content-free contract suite with `.build/boros/Boros.app/Contents/MacOS/Boros --authority-state-self-test`. Task and policy mutations remain unexposed while shared runtime gates are implemented.
+The internal schema-6 task/policy state foundation and its enforcement boundary are documented in [authority state](docs/AUTHORITY-STATE.md). Run the isolated content-free contract suite with `.build/boros/Boros.app/Contents/MacOS/Boros --authority-state-self-test`. The bounded clock contract is available through `--authority-clock-self-test` and `python3 scripts/test_authority_clock.py`. Task and policy mutations remain unexposed while shared runtime gates are implemented.

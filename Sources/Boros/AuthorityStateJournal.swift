@@ -22,21 +22,26 @@ enum AuthorityStateJournal {
             guard row.count == 5,let receiptBytes=row[3].bytes,row[4].string == kernel.digest(receiptBytes) else { throw AuthorityStateError.integrity }
             let receipt=try kernel.decode(AuthorityOperationReceipt.self,receiptBytes)
             try kernel.identifier(receipt.requestID)
-            guard receipt.version == "authority-receipt-v1",row[0].integer == replay.journalSequence+1,receipt.journalSequence == row[0].integer,episodeIdentifierEqual(row[1].string,receipt.requestID),requestIDs.insert(Data(receipt.requestID.utf8)).inserted,receipt.previousStateSHA256 == kernel.digest(try kernel.canonical(replay)) else { throw AuthorityStateError.integrity }
+            guard row[0].integer == replay.journalSequence+1,receipt.journalSequence == row[0].integer,episodeIdentifierEqual(row[1].string,receipt.requestID),requestIDs.insert(Data(receipt.requestID.utf8)).inserted,receipt.previousStateSHA256 == kernel.digest(try kernel.canonical(replay)) else { throw AuthorityStateError.integrity }
             totalBytes += receiptBytes.count + (row[2].bytes?.count ?? 0)
             guard totalBytes <= kernel.maximumJournalBytes else { throw AuthorityStateError.integrity }
             let before=replay
             switch receipt.kind {
             case "startup":
-                guard receipt.origin == "startup",receipt.operation == nil,receipt.requestSHA256 == nil,row[2].bytes == nil,receipt.requestID.hasPrefix("authority-startup:"),receipt.timeHighWater == replay.timeHighWater else { throw AuthorityStateError.integrity }
+                guard receipt.version == "authority-receipt-v1",receipt.origin == "startup",receipt.operation == nil,receipt.requestSHA256 == nil,row[2].isNull,receipt.requestID.hasPrefix("authority-startup:"),receipt.timeHighWater == replay.timeHighWater else { throw AuthorityStateError.integrity }
                 try kernel.increment(&replay.controlEpoch); try kernel.increment(&replay.revision); try kernel.increment(&replay.journalSequence)
             case "time":
-                guard receipt.origin == "scheduler",receipt.operation == nil,receipt.requestSHA256 == nil,row[2].bytes == nil,receipt.requestID.hasPrefix("authority-time:"),receipt.timeHighWater > replay.timeHighWater else { throw AuthorityStateError.integrity }
+                guard receipt.version == "authority-receipt-v1",receipt.origin == "scheduler",receipt.operation == nil,receipt.requestSHA256 == nil,row[2].isNull,receipt.requestID.hasPrefix("authority-time:"),receipt.timeHighWater > replay.timeHighWater else { throw AuthorityStateError.integrity }
                 replay.timeHighWater=receipt.timeHighWater
                 if try kernel.expireAndActivate(&replay) { try kernel.increment(&replay.controlEpoch); try kernel.increment(&replay.revision) }
                 try kernel.increment(&replay.journalSequence)
+            case "clockCheckpoint":
+                guard receipt.version == "authority-receipt-v2",receipt.origin == "scheduler",receipt.operation == nil,receipt.requestSHA256 == nil,row[2].isNull,receipt.requestID.hasPrefix("authority-clock:"),receipt.timeHighWater > replay.timeHighWater,receipt.expiredPolicyIDs.isEmpty else { throw AuthorityStateError.integrity }
+                replay.timeHighWater=receipt.timeHighWater
+                guard try !kernel.expireAndActivate(&replay) else { throw AuthorityStateError.integrity }
+                try kernel.increment(&replay.journalSequence)
             case "mutation":
-                guard receipt.origin == AuthorityOrigin.humanHost.rawValue || receipt.origin == AuthorityOrigin.humanCLI.rawValue,let bytes=row[2].bytes,kernel.digest(bytes) == receipt.requestSHA256 else { throw AuthorityStateError.integrity }
+                guard receipt.version == "authority-receipt-v1",receipt.origin == AuthorityOrigin.humanHost.rawValue || receipt.origin == AuthorityOrigin.humanCLI.rawValue,let bytes=row[2].bytes,kernel.digest(bytes) == receipt.requestSHA256 else { throw AuthorityStateError.integrity }
                 let request=try kernel.decode(AuthorityOperationRequest.self,bytes)
                 guard episodeIdentifierEqual(request.requestID,receipt.requestID),request.operation == receipt.operation else { throw AuthorityStateError.integrity }
                 replay=try kernel.reduce(replay,request:request,database:database)

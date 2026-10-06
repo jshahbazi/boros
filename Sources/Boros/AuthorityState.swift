@@ -163,12 +163,40 @@ enum AuthorityStateKernel {
         try increment(&after.controlEpoch); try increment(&after.revision); try increment(&after.journalSequence)
         try record(database,before:before,after:after,request:nil,kind:"startup",origin:"startup",requestID:"authority-startup:"+UUID().uuidString.lowercased())
     }
+    /// A final v2 pure-clock receipt is a durable checkpoint. Coalescing drops
+    /// intermediate clock samples; every human and actual state-change receipt
+    /// remains immutable. The owner supplies the surrounding transaction.
     static func advanceTime(database:OpaquePointer,now:Int64) throws {
         guard now >= 0 else { throw AuthorityStateError.invalid }
         let before=try snapshot(database:database); guard now > before.timeHighWater else { return }
         var after=before; after.timeHighWater=now; let changed=try expireAndActivate(&after)
-        if changed { try increment(&after.controlEpoch); try increment(&after.revision) }; try increment(&after.journalSequence)
-        try record(database,before:before,after:after,request:nil,kind:"time",origin:"scheduler",requestID:"authority-time:"+UUID().uuidString.lowercased())
+        if changed {
+            try increment(&after.controlEpoch); try increment(&after.revision); try increment(&after.journalSequence)
+            try record(database,before:before,after:after,request:nil,kind:"time",origin:"scheduler",requestID:"authority-time:"+UUID().uuidString.lowercased())
+            return
+        }
+        let last=try rows(database,"SELECT sequence,request_id,request_payload,receipt_payload,receipt_digest FROM authority_operations ORDER BY sequence DESC LIMIT 1")
+        if let row=last.first {
+            guard let bytes=row[3].bytes,row[4].string == digest(bytes) else { throw AuthorityStateError.integrity }
+            let old=try decode(AuthorityOperationReceipt.self,bytes)
+            guard supportedReceipt(old),row[0].integer == before.journalSequence,old.journalSequence == before.journalSequence,episodeIdentifierEqual(row[1].string,old.requestID),old.stateSHA256 == digest(try canonical(before)) else { throw AuthorityStateError.integrity }
+            if old.version == "authority-receipt-v2" && old.kind == "clockCheckpoint" {
+                // Replay proves the old anchor, pure-clock semantics, schema,
+                // and every unchanged projection before any row is replaced.
+                try AuthorityStateJournal.validate(database:database)
+                guard row[0].integer == before.journalSequence,old.journalSequence == before.journalSequence,episodeIdentifierEqual(row[1].string,old.requestID),row[2].isNull,old.origin == "scheduler",old.operation == nil,old.requestSHA256 == nil,old.expiredPolicyIDs.isEmpty,old.requestID.hasPrefix("authority-clock:"),old.revision == before.revision,old.controlEpoch == before.controlEpoch,old.timeHighWater == before.timeHighWater,old.stateSHA256 == digest(try canonical(before)) else { throw AuthorityStateError.integrity }
+                var receipt=AuthorityOperationReceipt(requestID:old.requestID,operation:nil,kind:"clockCheckpoint",origin:"scheduler",revision:after.revision,controlEpoch:after.controlEpoch,journalSequence:after.journalSequence,timeHighWater:after.timeHighWater,previousStateSHA256:old.previousStateSHA256,stateSHA256:digest(try canonical(after)),requestSHA256:nil,expiredPolicyIDs:[])
+                receipt.version="authority-receipt-v2"
+                let replacement=try canonical(receipt),total=try journalBytes(database)
+                guard total >= bytes.count,total-bytes.count <= maximumJournalBytes-replacement.count else { throw AuthorityStateError.limit }
+                try execute(database,"UPDATE authority_operations SET receipt_payload=?,receipt_digest=? WHERE sequence=? AND request_id=?",[.bytes(replacement),.text(digest(replacement)),.integer(old.journalSequence),.text(old.requestID)])
+                guard sqlite3_changes(database) == 1 else { throw AuthorityStateError.integrity }
+                try persistControl(database,state:after)
+                return
+            }
+        } else { guard before.journalSequence == 0 else { throw AuthorityStateError.integrity } }
+        try increment(&after.journalSequence)
+        try record(database,before:before,after:after,request:nil,kind:"clockCheckpoint",origin:"scheduler",requestID:"authority-clock:"+UUID().uuidString.lowercased(),version:"authority-receipt-v2",controlOnly:true)
     }
     static func apply(database:OpaquePointer,request:AuthorityOperationRequest,authority:AuthorityContext,now:Int64) throws -> AuthorityOperationReceipt {
         try validateAuthority(database:database,authority:authority); try validateRequest(request)
@@ -178,6 +206,9 @@ enum AuthorityStateKernel {
             guard first[0].bytes == requestBytes else { throw AuthorityStateError.conflict }
             return try decode(AuthorityOperationReceipt.self,first[1].bytes ?? Data())
         }
+        // This namespace was not reserved by the original v1 request contract.
+        // Preserve old receipt replay/retries, while reserving all new IDs.
+        guard !request.requestID.hasPrefix("authority-clock:") else { throw AuthorityStateError.invalid }
         let before=try snapshot(database:database)
         guard now >= 0,now <= before.timeHighWater else { throw AuthorityStateError.invalid }
         let after=try reduce(before,request:request,database:database)
@@ -292,19 +323,32 @@ enum AuthorityStateKernel {
         }
     }
     @discardableResult
-    static func record(_ database:OpaquePointer,before:AuthorityStateSnapshot,after:AuthorityStateSnapshot,request:AuthorityOperationRequest?,kind:String,origin:String,requestID:String) throws -> AuthorityOperationReceipt {
+    static func record(_ database:OpaquePointer,before:AuthorityStateSnapshot,after:AuthorityStateSnapshot,request:AuthorityOperationRequest?,kind:String,origin:String,requestID:String,version:String="authority-receipt-v1",controlOnly:Bool=false) throws -> AuthorityOperationReceipt {
         guard after.journalSequence <= maximumOperations else { throw AuthorityStateError.limit }
         let requestBytes=try request.map(canonical)
         let expired=after.policies.filter { p in p.state == .expired && before.policies.first(where:{episodeIdentifierEqual($0.id,p.id)})?.state != .expired }.map(\.id)
-        let receipt=AuthorityOperationReceipt(requestID:requestID,operation:request?.operation,kind:kind,origin:origin,revision:after.revision,controlEpoch:after.controlEpoch,journalSequence:after.journalSequence,timeHighWater:after.timeHighWater,previousStateSHA256:digest(try canonical(before)),stateSHA256:digest(try canonical(after)),requestSHA256:requestBytes.map(digest),expiredPolicyIDs:expired)
+        var receipt=AuthorityOperationReceipt(requestID:requestID,operation:request?.operation,kind:kind,origin:origin,revision:after.revision,controlEpoch:after.controlEpoch,journalSequence:after.journalSequence,timeHighWater:after.timeHighWater,previousStateSHA256:digest(try canonical(before)),stateSHA256:digest(try canonical(after)),requestSHA256:requestBytes.map(digest),expiredPolicyIDs:expired)
+        receipt.version=version
         let receiptBytes=try canonical(receipt)
-        let total=try rows(database,"SELECT coalesce(sum(coalesce(length(request_payload),0)+length(receipt_payload)),0) FROM authority_operations")[0][0].integer
+        let total=try journalBytes(database)
         guard total <= maximumJournalBytes-(requestBytes?.count ?? 0)-receiptBytes.count else { throw AuthorityStateError.limit }
-        try execute(database,"INSERT INTO authority_operations(sequence,request_id,request_payload,receipt_payload,receipt_digest) VALUES(?,?,?,?,?)",[.integer(after.journalSequence),.text(requestID),requestBytes.map(Value.bytes) ?? .null,.bytes(receiptBytes),.text(digest(receiptBytes))]); try persist(database,state:after); return receipt
+        try execute(database,"INSERT INTO authority_operations(sequence,request_id,request_payload,receipt_payload,receipt_digest) VALUES(?,?,?,?,?)",[.integer(after.journalSequence),.text(requestID),requestBytes.map(Value.bytes) ?? .null,.bytes(receiptBytes),.text(digest(receiptBytes))])
+        if controlOnly { try persistControl(database,state:after) } else { try persist(database,state:after) }
+        return receipt
     }
-    static func persist(_ database:OpaquePointer,state:AuthorityStateSnapshot) throws {
+    private static func journalBytes(_ database:OpaquePointer) throws -> Int {
+        let total=try rows(database,"SELECT coalesce(sum(coalesce(length(request_payload),0)+length(receipt_payload)),0) FROM authority_operations")[0][0].integer
+        guard total >= 0,total <= maximumJournalBytes else { throw AuthorityStateError.limit }; return total
+    }
+    static func supportedReceipt(_ receipt:AuthorityOperationReceipt)->Bool {
+        (receipt.version == "authority-receipt-v1" && ["startup","time","mutation"].contains(receipt.kind)) || (receipt.version == "authority-receipt-v2" && receipt.kind == "clockCheckpoint")
+    }
+    private static func persistControl(_ database:OpaquePointer,state:AuthorityStateSnapshot) throws {
         let bytes=try canonical(state); guard bytes.count <= 4*1024*1024 else { throw AuthorityStateError.limit }
         try execute(database,"INSERT OR REPLACE INTO authority_control(id,payload,digest) VALUES(1,?,?)",[.bytes(bytes),.text(digest(bytes))])
+    }
+    static func persist(_ database:OpaquePointer,state:AuthorityStateSnapshot) throws {
+        try persistControl(database,state:state)
         for table in ["authority_tasks","authority_bindings","authority_policies"] { try execute(database,"DELETE FROM "+table) }
         for record in state.tasks { let bytes=try canonical(record); try execute(database,"INSERT INTO authority_tasks(id,payload,digest) VALUES(?,?,?)",[.text(record.id),.bytes(bytes),.text(digest(bytes))]) }
         for record in state.bindings { let bytes=try canonical(record); try execute(database,"INSERT INTO authority_bindings(conversation_id,payload,digest) VALUES(?,?,?)",[.text(record.conversationID),.bytes(bytes),.text(digest(bytes))]) }
@@ -319,6 +363,7 @@ enum AuthorityStateKernel {
     }
     static func digest(_ bytes:Data)->String { SHA256.hash(data:bytes).map { String(format:"%02x",$0) }.joined() }
     enum Value { case text(String),bytes(Data),integer(Int),null
+        var isNull:Bool { if case .null=self { return true }; return false }
         var bytes:Data? { if case .bytes(let value)=self { return value }; return nil }
         var string:String { if case .text(let value)=self { return value }; return "" }
         var integer:Int { if case .integer(let value)=self { return value }; return 0 }
@@ -342,7 +387,8 @@ enum AuthorityStateKernel {
             case SQLITE_INTEGER: row.append(.integer(Int(sqlite3_column_int64(statement,column))))
             case SQLITE_TEXT: if let p=sqlite3_column_text(statement,column) { guard let value=String(bytes:UnsafeBufferPointer(start:p,count:Int(sqlite3_column_bytes(statement,column))),encoding:.utf8) else { throw AuthorityStateError.integrity }; row.append(.text(value)) } else { row.append(.null) }
             case SQLITE_BLOB: let count=Int(sqlite3_column_bytes(statement,column)); guard count <= 4*1024*1024 else { throw AuthorityStateError.limit }; row.append(.bytes(sqlite3_column_blob(statement,column).map { Data(bytes:$0,count:count) } ?? Data()))
-            default: row.append(.null)
+            case SQLITE_NULL: row.append(.null)
+            default: throw AuthorityStateError.integrity
             } }
             result.append(row)
         }
