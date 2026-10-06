@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift",
     "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift",
-    "AuthorityBindingJournal.swift", "AuthorityValidation.swift", "AuthorityBindingChecks.swift", "BackgroundIndexBudget.swift",
+    "AuthorityBindingJournal.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityBindingChecks.swift", "BackgroundIndexBudget.swift",
     "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift",
     "ContextSourceFraming.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
     "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift",

@@ -123,9 +123,12 @@ enum AuthorityBindings {
         try state.resolvedPolicies(projectID:projectID,taskID:taskID).selected.map { AuthorityPolicyRevisionReference(policyID:$0.id,revision:$0.revision) }
     }
     static func resolutionSHA256(state:AuthorityStateSnapshot,projectID:String,taskID:String?)throws->String {
+        try resolutionSHA256(resolution:state.resolvedPolicies(projectID:projectID,taskID:taskID))
+    }
+    static func resolutionSHA256(resolution:AuthorityPolicyResolution)throws->String {
         struct Conflict:Codable { let rule:String; let policyIDs:[String] }
         struct Resolution:Codable { let selected:[AuthorityPolicyRecord]; let conflicts:[Conflict]; let blocked:Bool }
-        let result=try state.resolvedPolicies(projectID:projectID,taskID:taskID)
+        let result=resolution
         return AuthorityStateKernel.digest(try AuthorityStateKernel.canonical(Resolution(selected:result.selected,conflicts:result.conflicts.map{Conflict(rule:$0.rule,policyIDs:$0.policyIDs)},blocked:result.blocked)))
     }
     static func taskIntentSHA256(_ intent:HumanTaskIntent)throws->String { AuthorityStateKernel.digest(try AuthorityStateKernel.canonical(intent)) }

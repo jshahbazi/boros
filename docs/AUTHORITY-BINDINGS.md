@@ -12,7 +12,7 @@ Episode bindings retain store/owner and immutable startup/control receipt identi
 
 Prepared-work bindings separately bind the original request/snapshot digests, episode-binding digest, local route, declared source ranges and optional renderer-proof digest. Source dependencies require exact project, identity, UTF-8 range and excerpt digest. HTTP routes require the declared loopback adapter; memory/native routes require the matching adapter identity. Nonempty artifact lineage is refused. Invocation bindings derive from the actual linked work, exact body and admission evidence.
 
-These records do not establish a complete input dependency set, transitive artifact permission, policy rendering, tokenizer proof or immutable runtime identity. A declared route does not attest the running processor. Those contracts must precede managed consumer enablement.
+These records do not establish a complete input dependency set, transitive artifact permission, counted policy integration, tokenizer proof or immutable runtime identity. The [bounded standing-policy renderer](AUTHORITY-POLICY-RENDERING.md) now prepares a separately funded mandatory artifact; it grants no consumer permission. A declared route does not attest the running processor. Those contracts must precede managed consumer enablement.
 
 ## Schema, migration and archives
 

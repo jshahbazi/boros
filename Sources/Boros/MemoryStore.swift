@@ -867,6 +867,53 @@ final class MemoryStore: @unchecked Sendable {
         }
     }
 
+    /// Prepare mandatory policy bytes from the paid owner-private proof. The
+    /// render charge commits before the session's eligibility transaction;
+    /// denial, rollback and a thrown renderer cannot refund that work. The
+    /// returned artifact grants no dispatch or delivery permission.
+    func renderManagedPolicy(sessionID: String, lease: EpisodeLease, hostInstructions: String,
+        limits: AuthorityPolicyRenderLimits = .defaults) throws -> AuthorityFundedPolicyRendering {
+        try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
+            let limits = try limits.validated()
+            guard hostInstructions.utf8.count <= limits.maximumSystemBytes else { throw AuthorityStateError.limit }
+            guard lease.isOwned(by: self), let database, let entry = authorityCache,
+                  let session = authoritySessions[Data(sessionID.utf8)], !session.finished,
+                  ObjectIdentifier(lease) == session.leaseIdentity,
+                  episodeIdentifierEqual(session.episodeID, lease.episodeID),
+                  entry.generation == session.generation, entry.generation == authorityCacheWrites.generation,
+                  let binding = entry.bindings[Data(lease.episodeID.utf8)] else { throw AuthorityStateError.unauthorized }
+            // Sizing uses scalar lengths from already paid private proof, not
+            // fresh source or journal reads. Cover resolution passes, JSON
+            // escaping and the complete encoded result under original caps.
+            let stateCeiling = min(Self.maximumPayloadBytes, entry.proof.currentBytes + 2 * AuthorityStateKernel.maximumRecords + 64)
+            let policyRows = entry.proof.current.policies.count
+            let selectedRows = min(policyRows, limits.maximumPolicies)
+            let sourceRows = min(16 * selectedRows, limits.maximumSourceSpans)
+            let resources = EpisodeResources(memoryOperations: 1,
+                rawSourceBytes: 2 * stateCeiling + hostInstructions.utf8.count + 2 * limits.maximumSystemBytes + 2 * limits.maximumPolicyBytes,
+                // Conservative logical visit ceiling includes resolution's
+                // filters/groups/ranks and bounded ID sorting (<=4096 rows),
+                // task/selection checks and selected record/span inspection.
+                metadataRows: 64 * policyRows + 4 * entry.proof.current.tasks.count + 2 * entry.proof.current.bindings.count
+                    + 2 * sourceRows + 4 * selectedRows + 256)
+            let funded = try authorityValidationPhase(episodeID: lease.episodeID, name: AuthorityPolicyRenderer.version,
+                resources: resources, clock: lease.clockSnapshot()) {
+                try self.withAuthorityValidationSession(sessionID: sessionID, lease: lease) {
+                    let rendering = try AuthorityPolicyRenderer.render(state: entry.proof.current, binding: binding,
+                        hostInstructions: hostInstructions, limits: limits)
+                    if let reason = session.fence.interruption() { throw reason }
+                    try self.checkAuthoritySessionWitness(entry, database: database)
+                    let now = try self.authorityWallTime(lease.clockSnapshot())
+                    guard entry.proof.nextTemporalBoundary.map({ now < $0 }) ?? true else { throw AuthorityStateError.staleRevision }
+                    return rendering
+                }
+            }
+            _ = try lease.checkActive()
+            return AuthorityFundedPolicyRendering(rendering: funded.0, operationID: funded.1.id, charged: resources)
+        }
+    }
+
     func finishAuthorityValidationSession(sessionID: String, lease: EpisodeLease) throws {
         try locked {
             guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }

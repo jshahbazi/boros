@@ -30,4 +30,6 @@ Owner startup validates the original journal and cleanup ledger before recovery.
 
 The focused suite exercises bounded Stop, exhaustion, late usage, retries, rollback after original work mutation, confidence loss, repeated recovery and indexed selection with unrelated inventory. Process fixtures kill the actual process after the terminal-fence commit and inside an uncommitted cleanup batch. Final counts and the exact tested bundle/source evidence are recorded in [STATUS.md](STATUS.md).
 
-The shared managed consumer gate, policy renderer, complete input proofs, background authority bindings and terminal invalidated-capture reasons remain unfinished. This contract enables no remote processing, external action, deletion, optional tree or managed live consumer.
+The shared managed consumer gate, counted policy integration, complete input proofs, background authority bindings and terminal invalidated-capture reasons remain unfinished. This contract enables no remote processing, external action, deletion, optional tree or managed live consumer.
+
+The later [funded policy renderer](AUTHORITY-POLICY-RENDERING.md) uses this accounting/cleanup foundation to prepare mandatory policy bytes; it enables no live consumer.
