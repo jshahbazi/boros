@@ -1233,9 +1233,38 @@ final class MemoryStore: @unchecked Sendable {
         }
     }
 
+    /// Inspect complete original-input provenance only after durable funding.
+    /// This legacy preparation receipt grants no managed boundary permission.
+    func prepareAnswerInputProof(lease: EpisodeLease, requestBody: Data, providerIdentity: String,
+        admissionJSON: Data, answerRequest: EpisodeWorkRequest, hostInstructions: String) throws -> AnswerInputProofReceipt {
+        try locked {
+            guard lease.isOwned(by: self), authorityBoundaryDepth == 0, let database else { throw AuthorityStateError.unauthorized }
+            let resources = try AuthorityInputProofJournal.resources(bodyBytes: requestBody.count, admissionBytes: admissionJSON.count)
+            let descriptor = try AuthorityInputProofJournal.funding(episodeID: lease.episodeID,
+                body: requestBody, admission: admissionJSON, host: hostInstructions)
+            let work = try lease.prepare(kind: .sourceRead, resources: resources,
+                adapterIdentity: AuthorityInputProofJournal.version, snapshot: AuthorityStateKernel.canonical(descriptor))
+            let submitted = try lease.dispatch(work, start: {})
+            do {
+                let proof = try withEpisodeSQLFence(lease: lease) {
+                    try transaction {
+                        try AuthorityInputProofJournal.derive(database: database, funding: descriptor,
+                            body: requestBody, provider: providerIdentity, admission: admissionJSON, answerRequest: answerRequest)
+                    }
+                }
+                let evidence = try AuthorityStateKernel.canonical(proof)
+                _ = try lease.settle(submitted, outcome: .completed, observed: resources, evidence: evidence)
+                _ = try lease.checkActive()
+                return AnswerInputProofReceipt(operationID: submitted.id, digest: Self.digest(evidence), proof: proof)
+            } catch {
+                _ = try? lease.settle(submitted, outcome: .failedConfirmed, observed: resources)
+                throw error
+            }
+        }
+    }
+
     /// Commit the exact credential-free provider request before dispatch.
-    /// An identical begin replay returns the same attempt, including its
-    /// terminal state; beginning again never automatically dispatches it.
+    /// Identical replay returns the existing attempt and never dispatches it.
     func beginInvocation(invocationID: String, conversationID: String, turnID: String, humanEventID: String, assistantEventID: String, providerIdentity: String, requestBody: Data, admissionJSON: Data? = nil, episodeID: String? = nil, episodeWorkID: String? = nil) throws -> StoredInvocation {
         try locked {
             for (value, name) in [(invocationID, "invocation ID"), (turnID, "turn ID"), (humanEventID, "human event ID"), (assistantEventID, "assistant event ID")] {

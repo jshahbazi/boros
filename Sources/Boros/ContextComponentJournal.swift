@@ -17,104 +17,151 @@ enum ContextComponentJournal {
             LEFT JOIN episode_work w ON w.id=i.episode_work_id
             """ + (invocationID == nil ? "" : " WHERE i.id=?")
         try rows(database, sql, invocationID.map { [$0] } ?? []) { row in
+            try validateCandidate(database: database, episodeID: text(row, 1), projectID: text(row, 2),
+                conversationID: text(row, 12), humanEventID: text(row, 13), bodyBytes: { data(row, 3) },
+                bodyDigest: text(row, 4), provider: text(row, 8), admissionBytes: data(row, 5),
+                limitsBytes: data(row, 6), clockDomain: text(row, 9), createdTicks: sqlite3_column_int64(row, 10),
+                deadlineTicks: sqlite3_column_int64(row, 11), verifySourceRanges: verifySourceRanges,
+                prepared: false, answerRequest: { try JSONDecoder().decode(EpisodeWorkRequest.self, from: data(row, 7)) })
             let admissionBytes = data(row, 5)
-            let admission = admissionBytes.isEmpty ? [:] : try object(admissionBytes)
-            let endpointReceipt = admission["receipt"] as? [String: Any]
-            let proof = endpointReceipt?["componentProof"] as? [String: Any]
-            let limitsBytes = data(row, 6)
-            let limits = limitsBytes.isEmpty ? nil : try JSONDecoder().decode(EpisodeLimits.self, from: limitsBytes)
-            guard let policy = limits?.componentPolicy else {
-                guard proof == nil else { throw invalid("proof has no frozen policy") }
-                return
+            let audit = admissionBytes.isEmpty ? [:] : try object(admissionBytes)
+            if audit["version"] as? Int == 3 || audit["inputProofWorkID"] != nil || audit["inputProofSHA256"] != nil {
+                let stored = try JSONDecoder().decode(EpisodeWorkRequest.self, from: data(row, 7))
+                let request = EpisodeWorkRequest(id: stored.id, parentID: stored.parentID, kind: stored.kind,
+                    resources: stored.resources, adapterIdentity: stored.adapterIdentity, snapshot: data(row, 3), inputTokensKnown: stored.inputTokensKnown)
+                try AuthorityInputProofJournal.validateStored(database: database, episodeID: text(row, 1),
+                    body: data(row, 3), provider: text(row, 8), admission: admissionBytes, answerRequest: request,
+                    verifySourceRanges: verifySourceRanges)
             }
-            _ = try policy.validated()
-            guard let receipt = endpointReceipt, let proof else { throw invalid("frozen policy lacks proof") }
-            let bodyBytes = data(row, 3), body = try object(bodyBytes)
-            let episodeID = text(row, 1), projectID = text(row, 2), provider = text(row, 8)
-            let policyDigest = digest(try policy.canonicalData())
-            guard let proofIdentity = proof["modelIdentity"] as? [String: Any],
-                  let receiptIdentity = receipt["modelIdentity"] as? [String: Any],
-                  try canonical(proofIdentity) == canonical(receiptIdentity) else {
-                throw invalid("model observation linkage mismatch")
+        }
+    }
+
+    /// Validate retained source/count evidence before an invocation exists.
+    /// This is an integrity check; the caller owns funding and eligibility.
+    static func validatePrepared(database: OpaquePointer, episodeID: String, projectID: String,
+        conversationID: String, humanEventID: String, body: Data, providerIdentity: String,
+        admissionJSON: Data, answerRequest: EpisodeWorkRequest, verifySourceRanges: Bool = true) throws {
+        var matches = 0
+        try rows(database, """
+            SELECT limits_json,clock_domain,created_ticks,deadline_ticks,project_id,conversation_id,human_event_id
+            FROM episodes WHERE id=?
+            """, [episodeID]) { row in
+            matches += 1
+            guard matches == 1, equal(text(row, 4), projectID), equal(text(row, 5), conversationID),
+                  equal(text(row, 6), humanEventID) else { throw invalid("prepared episode scope mismatch") }
+            try validateCandidate(database: database, episodeID: episodeID, projectID: projectID,
+                conversationID: conversationID, humanEventID: humanEventID, bodyBytes: { body }, bodyDigest: digest(body),
+                provider: providerIdentity, admissionBytes: admissionJSON, limitsBytes: data(row, 0),
+                clockDomain: text(row, 1), createdTicks: sqlite3_column_int64(row, 2),
+                deadlineTicks: sqlite3_column_int64(row, 3), verifySourceRanges: verifySourceRanges,
+                prepared: true, answerRequest: { answerRequest })
+        }
+        guard matches == 1 else { throw invalid("prepared episode missing") }
+    }
+
+    private static func validateCandidate(database: OpaquePointer, episodeID: String, projectID: String,
+        conversationID: String, humanEventID: String, bodyBytes: () -> Data, bodyDigest: String, provider: String,
+        admissionBytes: Data, limitsBytes: Data, clockDomain: String, createdTicks: Int64, deadlineTicks: Int64,
+        verifySourceRanges: Bool, prepared: Bool, answerRequest: () throws -> EpisodeWorkRequest) throws {
+        let admission = admissionBytes.isEmpty ? [:] : try object(admissionBytes)
+        let endpointReceipt = admission["receipt"] as? [String: Any]
+        let proof = endpointReceipt?["componentProof"] as? [String: Any]
+        let limits = limitsBytes.isEmpty ? nil : try JSONDecoder().decode(EpisodeLimits.self, from: limitsBytes)
+        guard let policy = limits?.componentPolicy else {
+            guard proof == nil else { throw invalid("proof has no frozen policy") }
+            return
+        }
+        _ = try policy.validated()
+        guard let receipt = endpointReceipt, let proof else { throw invalid("frozen policy lacks proof") }
+        let bodyBytes = bodyBytes()
+        let body = try object(bodyBytes)
+        let policyDigest = digest(try policy.canonicalData())
+        guard let proofIdentity = proof["modelIdentity"] as? [String: Any],
+              let receiptIdentity = receipt["modelIdentity"] as? [String: Any],
+              try canonical(proofIdentity) == canonical(receiptIdentity) else {
+            throw invalid("model observation linkage mismatch")
+        }
+        let modelIdentity: ProviderObservedModelIdentity
+        do {
+            modelIdentity = try JSONDecoder().decode(ProviderObservedModelIdentity.self,
+                from: canonical(proofIdentity)).validated()
+        } catch { throw invalid("unsupported model observation") }
+        guard bodyBytes.count <= 2 * 1_048_576,
+              equal(proof["episodeID"], episodeID), equal(proof["projectID"], projectID),
+              equal(receipt["episodeID"], episodeID), equal(receipt["modelID"], Qwen38TextRendering.modelID),
+              equal(proof["endpoint"], provider), equal(receipt["endpoint"], provider),
+              proof["bodyDigest"] as? String == digest(bodyBytes),
+              receipt["bodyDigest"] as? String == digest(bodyBytes), bodyDigest == digest(bodyBytes),
+              proof["policyDigest"] as? String == policyDigest,
+              proof["policyVersion"] as? String == policy.version,
+              integer(proof["recentCap"]) == policy.recentTokens,
+              integer(proof["evidenceCap"]) == policy.evidenceTokens,
+              proof["renderingVersion"] as? String == policy.rendererVersion,
+              proof["reductionVersion"] as? String == policy.reductionVersion,
+              equal(body["model"], Qwen38TextRendering.modelID),
+              let thinking = boolean(body["enable_thinking"]), boolean(proof["thinkingEnabled"]) == thinking,
+              boolean(receipt["thinkingEnabled"]) == thinking,
+              let output = integer(body["max_tokens"]), output > 0,
+              integer(proof["outputReserve"]) == output, integer(receipt["outputReserve"]) == output,
+              let safety = integer(proof["safetyTokens"]), integer(receipt["safetyTokens"]) == safety,
+              let contextLimit = integer(proof["effectiveContextLimit"]), contextLimit > 0,
+              integer(receipt["effectiveContextLimit"]) == contextLimit,
+              contextLimit <= modelIdentity.modelContextLimit, contextLimit <= modelIdentity.maxModelLength,
+              integer(proof["modelEpoch"]) == 0, integer(receipt["loadedModelEpoch"]) == 0,
+              receipt["templateDigest"] as? String == Qwen38TextRendering.templateDigest,
+              receipt["serverVersion"] as? String == Qwen38TextRendering.serverVersion,
+              let contextString = admission["context"] as? String,
+              let contextBytes = Data(base64Encoded: contextString) else { throw invalid("proof binding mismatch") }
+        let context = try object(contextBytes)
+        guard let componentNames = context["message_components"] as? [String],
+              let sourceDigest = context["source_snapshot_sha256"] as? String, isDigest(sourceDigest),
+              proof["sourceSnapshotDigest"] as? String == sourceDigest,
+              let recentCount = integer(context["recent_source_count"]), recentCount <= policy.recentCandidates,
+              let historical = context["historical_sources"] as? [[String: Any]], historical.count <= policy.evidenceSpans,
+              componentNames == ["mandatory"] + Array(repeating: "recent", count: recentCount)
+                + (historical.isEmpty ? [] : ["historicalEvidence"]) + ["mandatory"],
+              let contextProof = context["components"] as? [String: Any],
+              try canonical(contextProof) == canonical(proof) else { throw invalid("source audit mismatch") }
+        try validateSelection(database: database, context: context, body: body, sourceDigest: sourceDigest,
+            episodeID: episodeID, projectID: projectID, conversationID: conversationID, humanID: humanEventID,
+            policy: policy, verifySourceRanges: verifySourceRanges)
+        let assignments: [ProviderMessageComponent] = try componentNames.map {
+            switch $0 {
+            case "mandatory": return .mandatory
+            case "recent": return .recent
+            case "historicalEvidence": return .evidence
+            default: throw invalid("invalid provenance label")
             }
-            let modelIdentity: ProviderObservedModelIdentity
-            do {
-                modelIdentity = try JSONDecoder().decode(ProviderObservedModelIdentity.self,
-                    from: canonical(proofIdentity)).validated()
-            } catch { throw invalid("unsupported model observation") }
-            guard bodyBytes.count <= 2 * 1_048_576,
-                  equal(proof["episodeID"], episodeID), equal(proof["projectID"], projectID),
-                  equal(receipt["episodeID"], episodeID), equal(receipt["modelID"], Qwen38TextRendering.modelID),
-                  equal(proof["endpoint"], provider), equal(receipt["endpoint"], provider),
-                  proof["bodyDigest"] as? String == digest(bodyBytes),
-                  receipt["bodyDigest"] as? String == digest(bodyBytes), text(row, 4) == digest(bodyBytes),
-                  proof["policyDigest"] as? String == policyDigest,
-                  proof["policyVersion"] as? String == policy.version,
-                  integer(proof["recentCap"]) == policy.recentTokens,
-                  integer(proof["evidenceCap"]) == policy.evidenceTokens,
-                  proof["renderingVersion"] as? String == policy.rendererVersion,
-                  proof["reductionVersion"] as? String == policy.reductionVersion,
-                  equal(body["model"], Qwen38TextRendering.modelID),
-                  let thinking = boolean(body["enable_thinking"]), boolean(proof["thinkingEnabled"]) == thinking,
-                  boolean(receipt["thinkingEnabled"]) == thinking,
-                  let output = integer(body["max_tokens"]), output > 0,
-                  integer(proof["outputReserve"]) == output, integer(receipt["outputReserve"]) == output,
-                  let safety = integer(proof["safetyTokens"]), integer(receipt["safetyTokens"]) == safety,
-                  let contextLimit = integer(proof["effectiveContextLimit"]), contextLimit > 0,
-                  integer(receipt["effectiveContextLimit"]) == contextLimit,
-                  contextLimit <= modelIdentity.modelContextLimit, contextLimit <= modelIdentity.maxModelLength,
-                  integer(proof["modelEpoch"]) == 0, integer(receipt["loadedModelEpoch"]) == 0,
-                  receipt["templateDigest"] as? String == Qwen38TextRendering.templateDigest,
-                  receipt["serverVersion"] as? String == Qwen38TextRendering.serverVersion,
-                  let contextString = admission["context"] as? String,
-                  let contextBytes = Data(base64Encoded: contextString) else { throw invalid("proof binding mismatch") }
-            let context = try object(contextBytes)
-            guard let componentNames = context["message_components"] as? [String],
-                  let sourceDigest = context["source_snapshot_sha256"] as? String, isDigest(sourceDigest),
-                  proof["sourceSnapshotDigest"] as? String == sourceDigest,
-                  let recentCount = integer(context["recent_source_count"]), recentCount <= policy.recentCandidates,
-                  let historical = context["historical_sources"] as? [[String: Any]], historical.count <= policy.evidenceSpans,
-                  componentNames == ["mandatory"] + Array(repeating: "recent", count: recentCount)
-                    + (historical.isEmpty ? [] : ["historicalEvidence"]) + ["mandatory"],
-                  let contextProof = context["components"] as? [String: Any],
-                  try canonical(contextProof) == canonical(proof) else { throw invalid("source audit mismatch") }
-            try validateSelection(database: database, context: context, body: body, sourceDigest: sourceDigest,
-                episodeID: episodeID, projectID: projectID, conversationID: text(row, 12), humanID: text(row, 13),
-                policy: policy, verifySourceRanges: verifySourceRanges)
-            let assignments: [ProviderMessageComponent] = try componentNames.map {
-                switch $0 {
-                case "mandatory": return .mandatory
-                case "recent": return .recent
-                case "historicalEvidence": return .evidence
-                default: throw invalid("invalid provenance label")
-                }
-            }
-            let assignmentDigest = digest(Data(assignments.map(\.rawValue).joined(separator: "\0").utf8))
-            guard proof["assignmentDigest"] as? String == assignmentDigest else { throw invalid("provenance digest mismatch") }
-            let rendered = try Qwen38TextRendering.renderAttributed(body, assignments: assignments)
-            let adapter = ProviderObservedModelIdentity.adapterIdentity(endpoint: provider,
-                metadataDigest: digest(try modelIdentity.canonicalData()), thinking: thinking)
-            guard equal(proof["adapterIdentity"], adapter) else { throw invalid("adapter binding mismatch") }
-            let recent = try count(database: database, proof: proof, key: "recent", kind: "recent",
-                rendered: rendered.recent, episodeID: episodeID, projectID: projectID, adapter: adapter, policy: policy)
-            let evidence = try count(database: database, proof: proof, key: "evidence", kind: "evidence",
-                rendered: rendered.evidence, episodeID: episodeID, projectID: projectID, adapter: adapter, policy: policy)
-            let whole = try count(database: database, proof: proof, key: "wholePrompt", kind: "wholePrompt",
-                rendered: rendered.complete, episodeID: episodeID, projectID: projectID, adapter: adapter, policy: policy)
-            let createdTicks = sqlite3_column_int64(row, 10), deadlineTicks = sqlite3_column_int64(row, 11)
-            guard recent.tokens <= policy.recentTokens, evidence.tokens <= policy.evidenceTokens,
-                  recent.sessionID == evidence.sessionID, evidence.sessionID == whole.sessionID,
-                  equal(recent.domain, whole.domain), equal(evidence.domain, whole.domain), equal(whole.domain, text(row, 9)),
-                  recent.ticks == whole.ticks, evidence.ticks == whole.ticks,
-                  createdTicks > 0, deadlineTicks > createdTicks,
-                  whole.ticks >= UInt64(createdTicks), whole.ticks < UInt64(deadlineTicks),
-                  output <= contextLimit, safety <= contextLimit - output, whole.tokens <= contextLimit - output - safety,
-                  integer(receipt["promptTokens"]) == whole.tokens,
-                  integer(receipt["envelopeBytes"]) == bodyBytes.count else { throw invalid("component allowance mismatch") }
-            let answer = try JSONDecoder().decode(EpisodeWorkRequest.self, from: data(row, 7))
-            guard answer.kind == .answer, answer.resources.inputTokens == whole.tokens,
-                  answer.resources.outputTokens == output, answer.resources.modelCalls == 1,
-                  equal(answer.adapterIdentity, adapter) else { throw invalid("answer count linkage mismatch") }
+        }
+        let assignmentDigest = digest(Data(assignments.map(\.rawValue).joined(separator: "\0").utf8))
+        guard proof["assignmentDigest"] as? String == assignmentDigest else { throw invalid("provenance digest mismatch") }
+        let rendered = try Qwen38TextRendering.renderAttributed(body, assignments: assignments)
+        let adapter = ProviderObservedModelIdentity.adapterIdentity(endpoint: provider,
+            metadataDigest: digest(try modelIdentity.canonicalData()), thinking: thinking)
+        guard equal(proof["adapterIdentity"], adapter) else { throw invalid("adapter binding mismatch") }
+        let recent = try count(database: database, proof: proof, key: "recent", kind: "recent",
+            rendered: rendered.recent, episodeID: episodeID, projectID: projectID, adapter: adapter, policy: policy)
+        let evidence = try count(database: database, proof: proof, key: "evidence", kind: "evidence",
+            rendered: rendered.evidence, episodeID: episodeID, projectID: projectID, adapter: adapter, policy: policy)
+        let whole = try count(database: database, proof: proof, key: "wholePrompt", kind: "wholePrompt",
+            rendered: rendered.complete, episodeID: episodeID, projectID: projectID, adapter: adapter, policy: policy)
+        guard recent.tokens <= policy.recentTokens, evidence.tokens <= policy.evidenceTokens,
+              recent.sessionID == evidence.sessionID, evidence.sessionID == whole.sessionID,
+              equal(recent.domain, whole.domain), equal(evidence.domain, whole.domain), equal(whole.domain, clockDomain),
+              recent.ticks == whole.ticks, evidence.ticks == whole.ticks,
+              createdTicks > 0, deadlineTicks > createdTicks,
+              whole.ticks >= UInt64(createdTicks), whole.ticks < UInt64(deadlineTicks),
+              output <= contextLimit, safety <= contextLimit - output, whole.tokens <= contextLimit - output - safety,
+              integer(receipt["promptTokens"]) == whole.tokens,
+              integer(receipt["envelopeBytes"]) == bodyBytes.count else { throw invalid("component allowance mismatch") }
+        let answer = try answerRequest()
+        guard answer.kind == .answer, answer.resources.inputTokens == whole.tokens,
+              answer.resources.outputTokens == output, answer.resources.modelCalls == 1,
+              equal(answer.adapterIdentity, adapter) else { throw invalid("answer count linkage mismatch") }
+        if prepared {
+            guard answer.inputTokensKnown, answer.snapshot == bodyBytes,
+                  answer.resources == EpisodeResources(inputTokens: whole.tokens, outputTokens: output,
+                      modelCalls: 1, httpAttempts: 1) else { throw invalid("prepared answer linkage mismatch") }
         }
     }
 

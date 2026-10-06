@@ -65,6 +65,7 @@ enum ComponentPreparationChecks {
         var operation: ComponentContextPreparationOperation?
         var legacySession: ProviderComponentSession?
         var completed = false
+        private var inputProof: AnswerInputProofReceipt?
         private var failureStage = "preparation_audit"
         let droppedSourceID: String
 
@@ -261,6 +262,8 @@ enum ComponentPreparationChecks {
             let receipt: EndpointAdmissionReceipt
             let attempts: [ProviderAdmissionAccounting]
             let context: Data
+            var inputProofWorkID: String? = nil
+            var inputProofSHA256: String? = nil
         }
         private func validateJournal() throws {
             var raw: OpaquePointer?
@@ -278,8 +281,9 @@ enum ComponentPreparationChecks {
                 resources: EpisodeResources(inputTokens: prepared.receipt.promptTokens, outputTokens: prepared.receipt.outputReserve,
                     modelCalls: 1, httpAttempts: 1), adapterIdentity: prepared.receipt.answerAdapterIdentity, snapshot: prepared.body)
             failureStage = "admission_encoding"
-            let admission = try JSONEncoder().encode(AdmissionAudit(version: 2, receipt: prepared.receipt,
-                attempts: prepared.receipt.accounting.map { [$0] } ?? [], context: prepared.snapshot.deliveryAudit()))
+            let admission = try JSONEncoder().encode(AdmissionAudit(version: inputProof == nil ? 2 : 3, receipt: prepared.receipt,
+                attempts: prepared.receipt.accounting.map { [$0] } ?? [], context: prepared.snapshot.deliveryAudit(),
+                inputProofWorkID: inputProof?.operationID, inputProofSHA256: inputProof?.digest))
             failureStage = "invocation_admission"
             _ = try store.beginInvocation(invocationID: "fixture-invocation", conversationID: chat.id, turnID: "fixture-current-turn",
                 humanEventID: currentID, assistantEventID: "fixture-assistant", providerIdentity: prepared.receipt.endpoint,
@@ -288,6 +292,119 @@ enum ComponentPreparationChecks {
             _ = try lease.finish(reason: .cancelled)
             failureStage = "invocation_terminalization"
             _ = try store.finalizeInvocation(invocationID: "fixture-invocation", status: .cancelled, reason: .cancelled)
+        }
+        private func inputProofEvidence(_ workID: String, directory: URL) throws -> Data? {
+            var raw: OpaquePointer?
+            guard sqlite3_open_v2(directory.appendingPathComponent("memory.sqlite3").path, &raw, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+                  let database = raw else { if let raw { sqlite3_close(raw) }; throw MemoryError.database("synthetic input proof evidence open failed") }
+            defer { sqlite3_close(database) }
+            var rawStatement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, "SELECT receipt_json FROM episode_work WHERE id=?", -1, &rawStatement, nil) == SQLITE_OK,
+                  let statement = rawStatement else { throw MemoryError.database("synthetic input proof evidence query failed") }
+            defer { sqlite3_finalize(statement) }
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            guard workID.withCString({ sqlite3_bind_text(statement, 1, $0, Int32(workID.utf8.count), transient) }) == SQLITE_OK,
+                  sqlite3_step(statement) == SQLITE_ROW, let bytes = sqlite3_column_blob(statement, 0) else {
+                throw MemoryError.database("synthetic input proof evidence missing")
+            }
+            let chain = try JSONDecoder().decode([EpisodeWorkSettlement].self,
+                from: Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0))))
+            return chain.last?.evidence
+        }
+        private func inputProofChecks(_ prepared: PreparedComponentContext) throws -> [String: Bool] {
+            guard [.pipeline, .boundary, .envelope].contains(kind) else { return [:] }
+            failureStage = "original_input_proof"
+            let prefix = "component_preparation_" + kind.rawValue + "_input_proof"
+            let admission = try JSONEncoder().encode(AdmissionAudit(version: 2, receipt: prepared.receipt,
+                attempts: prepared.receipt.accounting.map { [$0] } ?? [], context: prepared.snapshot.deliveryAudit()))
+            let request = EpisodeWorkRequest(id: "fixture-proof-answer", parentID: nil, kind: .answer,
+                resources: EpisodeResources(inputTokens: prepared.receipt.promptTokens, outputTokens: prepared.receipt.outputReserve,
+                    modelCalls: 1, httpAttempts: 1), adapterIdentity: prepared.receipt.answerAdapterIdentity,
+                snapshot: prepared.body, inputTokensKnown: true)
+            var checks: [String: Bool] = [:]
+            let original = try lease.checkActive()
+            if kind == .pipeline {
+                var oversizedDenied = false
+                do { _ = try store.prepareAnswerInputProof(lease: lease, requestBody: prepared.body,
+                    providerIdentity: prepared.receipt.endpoint, admissionJSON: admission, answerRequest: request,
+                    hostInstructions: String(repeating: "x", count: 131073)) } catch { oversizedDenied = true }
+                let afterRefusal = try lease.checkActive()
+                checks[prefix + "_oversized_host_refused_before_inspection"] = oversizedDenied
+                    && afterRefusal.charged == original.charged
+                let receipt = try store.prepareAnswerInputProof(lease: lease, requestBody: prepared.body,
+                    providerIdentity: prepared.receipt.endpoint, admissionJSON: admission, answerRequest: request,
+                    hostInstructions: prepared.settings.system)
+                inputProof = receipt
+                let proof = receipt.proof
+                let after = try lease.checkActive()
+                let resources = try AuthorityInputProofJournal.resources(bodyBytes: prepared.body.count, admissionBytes: admission.count)
+                checks[prefix + "_original_allowance_funds_exact_declared_work"] = try after.charged == original.charged.adding(resources)
+                    && after.held == original.held && after.limits == original.limits
+                let retained = try store.episodeWork(episodeID: lease.episodeID, operationID: receipt.operationID)
+                let proofBytes = try AuthorityStateKernel.canonical(proof)
+                checks[prefix + "_durable_completed_evidence_is_bound"] = try retained?.state == .completed
+                    && retained?.request.kind == .sourceRead && retained?.request.adapterIdentity == AuthorityInputProofJournal.version
+                    && retained?.charged == resources && retained?.observed == resources
+                    && retained?.request.snapshot != nil && retained?.held == .zero
+                    && ContextSnapshot.digest(proofBytes) == receipt.digest && proofBytes.count <= 16384
+                    && inputProofEvidence(receipt.operationID, directory: directory) == proofBytes
+                let body = try JSONSerialization.jsonObject(with: prepared.body) as! [String: Any]
+                let component = try JSONSerialization.jsonObject(with: JSONEncoder().encode(prepared.receipt.componentProof!))
+                checks[prefix + "_actual_body_host_and_count_hashes"] = try proof.requestBodySHA256 == ContextSnapshot.digest(prepared.body)
+                    && proof.hostInstructionsSHA256 == ContextSnapshot.digest(Data(prepared.settings.system.utf8))
+                    && proof.messagesSHA256 == ContextSnapshot.digest(JSONSerialization.data(withJSONObject: body["messages"]!, options: [.sortedKeys]))
+                    && proof.componentProofSHA256 == ContextSnapshot.digest(JSONSerialization.data(withJSONObject: component, options: [.sortedKeys]))
+                checks[prefix + "_original_scope_and_selection_are_bound"] = try proof.episodeID == lease.episodeID
+                    && proof.projectID == chat.projectID && proof.conversationID == chat.id && proof.acceptedHumanEventID == currentID
+                    && proof.endpoint == prepared.receipt.endpoint && proof.sourceSelectionWorkID == prepared.snapshot.selectionWorkID
+                    && proof.sourceSelectionSHA256 == prepared.snapshot.selectionDigest()
+                var expected: [Data: AuthoritySourceDependency] = [:]
+                func include(_ id: String, offset: Int = 0, length: Int? = nil, excerpt: String? = nil) throws {
+                    guard let source = try store.sourceReference(eventID: id, projectID: chat.projectID) else {
+                        throw MemoryError.database("synthetic input proof original missing")
+                    }
+                    let dependency = AuthoritySourceDependency(source: source, offset: offset,
+                        byteLength: length ?? source.byteCount, excerptSHA256: excerpt ?? source.digest)
+                    expected[try AuthorityStateKernel.canonical(dependency)] = dependency
+                }
+                try include(currentID)
+                for source in prepared.snapshot.recentSources { try include(source.eventID) }
+                for source in prepared.snapshot.evidence {
+                    try include(source.eventID, offset: source.excerptOffset, length: source.excerpt.utf8.count,
+                        excerpt: ContextSnapshot.digest(Data(source.excerpt.utf8)))
+                }
+                let union = expected.sorted { $0.key.lexicographicallyPrecedes($1.key) }.map(\.value)
+                checks[prefix + "_complete_accepted_recent_historical_union"] = try union.count == 3
+                    && proof.sourceDependencyCount == union.count
+                    && proof.sourceDependenciesSHA256 == ContextSnapshot.digest(AuthorityStateKernel.canonical(union))
+            }
+            var body = prepared.body, candidateAdmission = admission, host = prepared.settings.system
+            let refusal: String
+            if kind == .boundary { host += "Synthetic host mismatch"; refusal = "host_mismatch" }
+            else if kind == .envelope { body.append(contentsOf: " ".utf8); refusal = "actual_body_mismatch" }
+            else {
+                var audit = try JSONSerialization.jsonObject(with: admission) as! [String: Any]
+                var context = try JSONSerialization.jsonObject(with: prepared.snapshot.deliveryAudit()) as! [String: Any]
+                context["selection_work_id"] = "fixture-missing-original-selection"
+                audit["context"] = try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]).base64EncodedString()
+                candidateAdmission = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
+                refusal = "missing_selection"
+            }
+            let before = try lease.checkActive()
+            var denied = false
+            do { _ = try store.prepareAnswerInputProof(lease: lease, requestBody: body,
+                providerIdentity: prepared.receipt.endpoint, admissionJSON: candidateAdmission, answerRequest: request,
+                hostInstructions: host) } catch { denied = true }
+            let after = try lease.checkActive()
+            let resources = try AuthorityInputProofJournal.resources(bodyBytes: body.count, admissionBytes: candidateAdmission.count)
+            let inventory = try journalInventory()
+            checks[prefix + "_" + refusal + "_refused_after_retained_charge"] = try denied
+                && after.charged == before.charged.adding(resources) && after.held == before.held
+                && after.limits == original.limits && after.state == .active
+                && inventory.answerWork == 0 && inventory.invocations == 0
+            checks[prefix + "_denial_preserves_original_accepted_source"] = try store.events(conversationID: chat.id)
+                .first { episodeIdentifierEqual($0.id, currentID) }.map { Data($0.text.utf8) } == Data(prompt.utf8)
+            return checks
         }
         private func finish(_ outcome: Result<PreparedComponentContext, Error>) {
             guard !completed else { return }
@@ -352,6 +469,7 @@ enum ComponentPreparationChecks {
                             && proof.evidence.tokens == 0 && proof.evidence.tokenizerWorkID == nil
                     default: checks[prefix + "_expected_failure"] = false
                     }
+                    checks.merge(try inputProofChecks(prepared)) { _, latest in latest }
                     try capturePrepared(prepared)
                     checks[prefix + "_prepared_proof_accepts_durable_invocation"] = true
                     let archive = directory.appendingPathComponent("verified-component-archive")
@@ -376,6 +494,17 @@ enum ComponentPreparationChecks {
                         && restoredReceipt.held == originalReceipt.held
                         && invocation?.admissionJSON == originalAdmission
                     if kind == .pipeline {
+                        if let inputProof {
+                            let proofWork = try restored.episodeWork(episodeID: lease.episodeID, operationID: inputProof.operationID)
+                            let restoredAudit: [String: Any]
+                            if let bytes = invocation?.admissionJSON { restoredAudit = (try JSONSerialization.jsonObject(with: bytes) as? [String: Any]) ?? [:] }
+                            else { restoredAudit = [:] }
+                            checks[prefix + "_restore_retains_durable_input_proof_link"] = try proofWork?.state == .completed
+                                && proofWork?.request.snapshot == store.episodeWork(episodeID: lease.episodeID, operationID: inputProof.operationID)?.request.snapshot
+                                && restoredAudit["inputProofWorkID"] as? String == inputProof.operationID
+                                && restoredAudit["inputProofSHA256"] as? String == inputProof.digest
+                                && inputProofEvidence(inputProof.operationID, directory: restoredDirectory) == inputProofEvidence(inputProof.operationID, directory: directory)
+                        } else { checks[prefix + "_restore_retains_durable_input_proof_link"] = false }
                         checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory)) { _, latest in latest }
                     }
                     if kind == .legacyVersion {

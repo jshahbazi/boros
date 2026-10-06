@@ -21,7 +21,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = tuple("Sources/Boros/" + name + ".swift" for name in (
-    "MemoryStore", "AuthorityState", "AuthorityStateJournal", "AuthorityValidatedClock", "AuthorityValidationCache", "EpisodeAccountingJournal", "AuthoritySchemaSeven", "AuthoritySchemaEight", "EpisodeTerminalCleanup", "AuthorityBindings", "AuthorityBindingJournal", "AuthorityValidation", "AuthorityPolicyRendering", "BackgroundIndexBudget", "BackgroundIndexJournal", "ContextComponentJournal",
+    "MemoryStore", "AuthorityState", "AuthorityStateJournal", "AuthorityValidatedClock", "AuthorityValidationCache", "EpisodeAccountingJournal", "AuthoritySchemaSeven", "AuthoritySchemaEight", "EpisodeTerminalCleanup", "AuthorityBindings", "AuthorityBindingJournal", "AuthorityValidation", "AuthorityPolicyRendering", "AuthorityInputProof", "BackgroundIndexBudget", "BackgroundIndexJournal", "ContextComponentJournal",
     "QwenTextRendering", "ContextSourceFraming", "ContextAssembler", "ChatContextPreparation",
     "SemanticIndex", "BackgroundIndexWorker", "EpisodeBudget", "EpisodeLease", "EpisodeSQLFence", "MeteredRetrieval"))
 SUPPORT = ("Tests/Evaluation/ImportedChatHarness.swift", "Sources/CSQLite/module.modulemap", "Sources/CSQLite/shim.h")

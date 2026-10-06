@@ -293,6 +293,8 @@ class NativeContracts(unittest.TestCase):
         self.assertTrue(process.returncode == 0 and isinstance(checks, dict) and bool(checks))
         self.assertTrue(all(type(value) is bool and value for value in checks.values()))
         self.assertTrue(checks.get("gui_shared_saved_instructions_restored_at_launch") is True)
+        for outcome in ("success", "stop"):
+            self.assertTrue(checks.get(f"gui_shared_{outcome}_durable_v3_original_input_proof_revalidated") is True)
         self.assertTrue(self.observed["saved_instruction_answers"] == 2)
         self.assertTrue(self.saved_instructions.encode() not in process.stdout + process.stderr)
 

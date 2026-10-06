@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import CSQLite
 
 // The document grows inside its clip view; it must not supply a preferred
 // height to the surrounding window or stack view.
@@ -1523,6 +1524,30 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         ]
     }
 
+    private func revalidateSharedInputProof(store: MemoryStore, result: AnswerAttemptCompletion) throws -> Bool {
+        guard let invocation = try store.invocation(id: result.identifiers.invocationID),
+              let admission = invocation.admissionJSON,
+              let audit = try JSONSerialization.jsonObject(with: admission) as? [String: Any],
+              audit["version"] as? Int == 3, let workID = audit["inputProofWorkID"] as? String,
+              let digest = audit["inputProofSHA256"] as? String, AuthorityBindings.isDigest(digest),
+              let work = try store.episodeWork(episodeID: result.identifiers.episodeID, operationID: workID),
+              work.state == .completed, work.request.kind == .sourceRead,
+              work.request.adapterIdentity == AuthorityInputProofJournal.version,
+              work.charged == work.request.resources, work.observed == work.request.resources else { return false }
+        var raw: OpaquePointer?
+        guard sqlite3_open_v2(store.directory.appendingPathComponent("memory.sqlite3").path, &raw,
+            SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let database = raw else {
+            if let raw { sqlite3_close(raw) }
+            return false
+        }
+        defer { sqlite3_close(database) }
+        guard sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_exec(database, "ROLLBACK", nil, nil, nil) }
+        try ContextComponentJournal.validate(database: database, invocationID: result.identifiers.invocationID,
+            verifySourceRanges: true)
+        return true
+    }
+
     // Exercise the actual controls in an undisplayed window. No system input,
     // clipboard changes, model calls, or conversation text leave this process.
     func sharedAnswerIntegrationChecks(baseURL: String, completion: @escaping ([String: Bool]) -> Void) {
@@ -1586,6 +1611,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                             && Data(system.utf8) == Data(ContextAssembler.mandatoryMessages(prompt: "", system: savedInstructions)[0].content.utf8)
                             && result.preparation?.admission.componentProof != nil
                     } else { checks[prefix + "_saved_instructions_in_actual_counted_request"] = false }
+                    checks[prefix + "_durable_v3_original_input_proof_revalidated"] =
+                        (try? revalidateSharedInputProof(store: store, result: result)) == true
                     checks[prefix + "_durable_text_matches_visible_transcript"] = assistant?.text.isEmpty == false
                         && responseView.string.contains(assistant!.text) && assistant?.status == result.captureStatus
                     checks[prefix + "_operational_outcome"] = result.episode?.state == (cancel ? .cancelled : .completed)

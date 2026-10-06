@@ -228,8 +228,14 @@ final class AnswerAttemptCoordinator {
                         outputTokens: settings.maximumOutput, modelCalls: 1, httpAttempts: 1),
                     adapterIdentity: value.receipt.answerAdapterIdentity, snapshot: value.body)
                 let audit = try value.snapshot.deliveryAudit()
-                let admission = try JSONEncoder().encode(AdmissionAudit(version: 2, receipt: value.receipt,
+                let baseAdmission = try JSONEncoder().encode(AdmissionAudit(version: 2, receipt: value.receipt,
                     attempts: value.receipt.accounting.map { [$0] } ?? [], nativeConfiguration: nil, context: audit))
+                let inputProof = try store.prepareAnswerInputProof(lease: lease, requestBody: value.body,
+                    providerIdentity: value.receipt.endpoint, admissionJSON: baseAdmission,
+                    answerRequest: work.request, hostInstructions: settings.system)
+                let admission = try JSONEncoder().encode(AdmissionAudit(version: 3, receipt: value.receipt,
+                    attempts: value.receipt.accounting.map { [$0] } ?? [], nativeConfiguration: nil, context: audit,
+                    inputProofWorkID: inputProof.operationID, inputProofSHA256: inputProof.digest))
                 _ = try store.beginInvocation(invocationID: identifiers.invocationID, conversationID: conversationID,
                     turnID: identifiers.turnID, humanEventID: identifiers.humanEventID,
                     assistantEventID: identifiers.assistantEventID, providerIdentity: value.receipt.endpoint,
@@ -263,6 +269,8 @@ final class AnswerAttemptCoordinator {
         let attempts: [ProviderAdmissionAccounting]
         let nativeConfiguration: Data?
         let context: Data
+        var inputProofWorkID: String? = nil
+        var inputProofSHA256: String? = nil
     }
 
     private func receive(_ text: String) {
