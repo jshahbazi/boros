@@ -246,11 +246,17 @@ def _empty_attempt(history, request, ordinal, reason):
         "failure_code": reason, "metadata": None}
 
 
-def score_native(native, directory, history, document):
+def score_native(native, directory, history, document, *, configuration=None, runner_document_version=None):
     """Return content-free attempts and a separate private prediction inventory."""
+    configuration = CONFIGURATION if configuration is None else configuration
+    runner_document_version = RUNNER_DOCUMENT_VERSION if runner_document_version is None else runner_document_version
+    if type(runner_document_version) is not int or runner_document_version not in (4, 5, 7):
+        raise e.EvaluationError("unsupported benchmark scoring version")
     probe = validate_history(history)
     requested = document["attempts"]
-    if (canonical_json(document) != canonical_json(cases.runner_input(history, CONFIGURATION, version=RUNNER_DOCUMENT_VERSION))
+    expected = cases.runner_input(history, configuration, version=5 if runner_document_version == 7 else runner_document_version)
+    expected["version"] = runner_document_version
+    if (canonical_json(document) != canonical_json(expected)
             or len(requested) != 2 or [r["strategy"] for r in requested] != list(e.STRATEGIES)
             or any(type(r.get("replicate")) is not int or r["replicate"] != 0 for r in requested)):
         raise e.EvaluationError("benchmark runner document mismatch")
@@ -261,7 +267,7 @@ def score_native(native, directory, history, document):
         raise e.EvaluationError("invalid native attempt inventory")
     pins = {"input_sha256": e.digest(canonical_json(document)),
             "public_projection_sha256": e.digest(canonical_json({k: v for k, v in document.items() if k != "configuration"})),
-            "native_configuration_sha256": native_configuration_sha256(CONFIGURATION)}
+            "native_configuration_sha256": native_configuration_sha256(configuration)}
     if any((key in native and native[key] != value) or (raw and key not in native) for key, value in pins.items()):
         raise e.EvaluationError("native document provenance mismatch")
     if raw and (native.get("history_id") != history["id"] or native.get("split") != "development"
@@ -291,7 +297,7 @@ def score_native(native, directory, history, document):
                     raise e.EvaluationError("invalid native terminal state")
                 ranges, recent = item.get("delivered_ranges"), item.get("delivered_recent_source_ids")
                 coverage = delivery_diagnostic(history, request, ranges, recent)
-                validate_request_links(item, request, CONFIGURATION)
+                validate_request_links(item, request, configuration)
                 encoded = e.read_file(directory / item["answer_file"], 4 * 1024 * 1024)
                 if (type(item.get("answer_bytes")) is not int or item["answer_bytes"] != len(encoded)
                         or item.get("answer_sha256") != e.digest(encoded)):
@@ -409,6 +415,19 @@ def _paths(output, hypotheses_directory):
     if directory.exists() or directory.is_symlink() or output.exists() or output.is_symlink():
         raise e.EvaluationError("evaluation output already exists")
     resolved = directory.resolve()
+    resolved_output = output.resolve()
+    if resolved_output == resolved or resolved_output in resolved.parents or resolved in resolved_output.parents:
+        raise e.EvaluationError("evaluation report and hypotheses must be separate")
+    # macOS exposes its temporary directories through these system aliases.
+    # Preserve their canonical identity while refusing caller-created links.
+    system_aliases = {Path("/var"): Path("/private/var"), Path("/tmp"): Path("/private/tmp")}
+    for destination in (output, directory):
+        if any(ancestor.is_symlink() and system_aliases.get(ancestor) != ancestor.resolve()
+                for ancestor in (destination, *destination.parents)):
+            raise e.EvaluationError("evaluation destination symlink refused")
+        for ancestor in (destination.resolve(), *destination.resolve().parents):
+            if (ancestor / ".git").exists() and not destination.resolve().is_relative_to(ancestor / ".build"):
+                raise e.EvaluationError("runtime evaluation output must be outside tracked source")
     # Also protect another repository selected by an absolute output path.
     for ancestor in (resolved, *resolved.parents):
         if (ancestor / ".git").exists() and not resolved.is_relative_to(ancestor / ".build"):
@@ -420,20 +439,35 @@ def _paths(output, hypotheses_directory):
     return output, resolved
 
 
-def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, binary_verification=None):
+def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, binary_verification=None, cohort="pilot"):
     output, directory = _paths(output, hypotheses_directory)
     if type(timeout) is not int or not 60 <= timeout <= 21600:
         raise e.EvaluationError("invalid runner timeout")
     if (binary is None) != (binary_verification is None):
         raise e.EvaluationError("binary and verification record must be paired")
-    histories = cases.prepare(source)
-    if len(histories) != 7 or len({h["id"] for h in histories}) != 7:
+    selection_manifest = None
+    if cohort == "pilot":
+        histories = cases.prepare(source)
+        configuration, runner_version, expected_count = CONFIGURATION, RUNNER_DOCUMENT_VERSION, 7
+        documents = [cases.runner_input(history, configuration, version=runner_version) for history in histories]
+    elif cohort == "independent-v1":
+        if binary is None:
+            raise e.EvaluationError("independent cohort requires terminally verified prebuilt binary")
+        import longmemeval_independent_cases as independent
+        histories, selection_manifest = independent.prepare_with_manifest(source)
+        configuration, runner_version, expected_count = {**CONFIGURATION, "maximum_output": 1024}, 7, 14
+        documents = [independent.runner_input(history, configuration) for history in histories]
+    else:
+        raise e.EvaluationError("unsupported benchmark cohort")
+    if len(histories) != expected_count or len({h["id"] for h in histories}) != expected_count:
         raise e.EvaluationError("invalid declared benchmark case inventory")
     probes = [validate_history(history) for history in histories]
-    if (sum(probe["abstention"] for probe in probes) != 1
+    if cohort != "pilot" and (tuple(h["id"] for h in histories) != independent.CASE_IDS
+            or tuple(probe["question_type"] for probe in probes) != independent.CASE_TYPES):
+        raise e.EvaluationError("independent cohort order mismatch")
+    if (sum(probe["abstention"] for probe in probes) != (1 if cohort == "pilot" else 2)
             or {probe["question_type"] for probe in probes if not probe["abstention"]} != TYPES):
         raise e.EvaluationError("invalid declared benchmark category inventory")
-    documents = [cases.runner_input(history, CONFIGURATION, version=RUNNER_DOCUMENT_VERSION) for history in histories]
     annotations = []
     for history, document in zip(histories, documents):
         probe = validate_history(history)
@@ -444,15 +478,17 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
             "public_projection_sha256": e.digest(canonical_json({k: v for k, v in document.items() if k != "configuration"})),
             "scorer_annotations_sha256": oracle_sha256(history)})
     inventory = code_inventory()
-    declaration = {"version": 1, "split": "development", "declared_attempts": 14,
-        "runner_document_version": RUNNER_DOCUMENT_VERSION,
+    declaration = {"version": 1 if cohort == "pilot" else 2, "split": "development", "declared_attempts": 2 * expected_count,
+        "runner_document_version": runner_version,
         "case_ids": [row["question_id"] for row in annotations], "cases": annotations,
         "source_revision": cases.SOURCE_REVISION, "source_sha256": cases.SOURCE_SHA256,
-        "configuration_sha256": e.digest(canonical_json(CONFIGURATION)),
-        "native_configuration_sha256": native_configuration_sha256(CONFIGURATION),
-        "system_sha256": e.digest(CONFIGURATION["system"].encode()), "source_hashes": inventory,
+        "configuration_sha256": e.digest(canonical_json(configuration)),
+        "native_configuration_sha256": native_configuration_sha256(configuration),
+        "system_sha256": e.digest(configuration["system"].encode()), "source_hashes": inventory,
         "protocol_commit": PROTOCOL_COMMIT, "protocol_hashes": PROTOCOL_HASHES,
         "official_qa_score": None, "official_qa_status": "pending_official_judge"}
+    if cohort != "pilot":
+        declaration.update(cohort=cohort, selection_manifest=selection_manifest)
     # This durable, content-free declaration precedes compiler or provider work.
     directory.parent.mkdir(parents=True, exist_ok=True)
     directory.mkdir(mode=0o700)
@@ -472,13 +508,15 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
                 if (e.digest(e.read_file(input_path)) != annotations[index]["runner_input_sha256"]
                         or oracle_sha256(history) != annotations[index]["scorer_annotations_sha256"]):
                     raise e.EvaluationError("frozen benchmark evidence changed")
-                attempts, private_predictions = score_native(native, native_directory, history, document)
+                attempts, private_predictions = score_native(native, native_directory, history, document,
+                    configuration=configuration, runner_document_version=runner_version)
             except Exception as error:
                 # Do not publish exceptions containing source-bearing paths/text.
                 native = {"version": 1, "fatal_failure": "runner_report_invalid", "attempts": []}
                 if isinstance(error, e.EvaluationError):
                     native["validation_error_sha256"] = e.digest(str(error).encode())
-                attempts, private_predictions = score_native(native, native_directory, history, document)
+                attempts, private_predictions = score_native(native, native_directory, history, document,
+                    configuration=configuration, runner_document_version=runner_version)
             results.append({"case": annotations[index], "attempts": attempts, "driver": e.native_metadata(native)})
             predictions.extend(private_predictions)
         if code_inventory() != inventory or e.digest(e.read_file(built, 256 * 1024 * 1024)) != implementation["binary_sha256"]:
@@ -486,17 +524,19 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
         exports = export_hypotheses(directory, predictions, declaration["case_ids"])
         predictions.clear()
         attempts = [attempt for result in results for attempt in result["attempts"]]
-        report = {"longmemeval_evaluation_version": 1, "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
-            "registration_status": "unregistered_development_subset", "split": "development", "runner_document_version": RUNNER_DOCUMENT_VERSION,
+        report = {"longmemeval_evaluation_version": 1 if cohort == "pilot" else 2, "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "registration_status": "unregistered_development_subset" if cohort == "pilot" else "predeclared_independent_development_subset",
+            "split": "development", "runner_document_version": runner_version,
             "source": {"repository": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned",
                 "revision": cases.SOURCE_REVISION, "path": cases.SOURCE_NAME, "sha256": cases.SOURCE_SHA256, "bytes": cases.SOURCE_BYTES},
-            "configuration": {key: value for key, value in CONFIGURATION.items() if key != "system"},
+            "configuration": {key: value for key, value in configuration.items() if key != "system"},
             "declaration": declaration, "declaration_sha256": e.digest(canonical_json(declaration) + b"\n"),
             "implementation": implementation, "histories": results, "summary": summarize(attempts),
             "private_hypothesis_exports": exports, "replicates": 1, "strategy_order": list(e.STRATEGIES),
             "official_qa_score": None, "official_qa_status": "pending_official_judge",
             "official_retrieval_score": None, "longmemeval_v2_status": "unimplemented",
-            "limitations": ["seven frozen development cases; no full benchmark or representative quality claim",
+            "limitations": ["seven frozen development cases; no full benchmark or representative quality claim" if cohort == "pilot"
+                else "fourteen session-disjoint development cases; independent authors and semantic near-duplicate histories unverified",
                 "official QA judge not called; complete natural answers exported privately for separate authorized scoring",
                 "session hit diagnostic requires any validated source range; it does not establish complete session recall",
                 "full evidence turn delivery checks both roles and all original UTF-8 bytes; it is not official top-k recall",
@@ -504,6 +544,9 @@ def run(source, output, hypotheses_directory, *, timeout=10800, binary=None, bin
                 "request linkage check is metadata consistency; native journal verification establishes original source and body provenance",
                 "recent-only uses the final supplied session; source array need not be date-sorted",
                 "one replicate; fixed strategy order; uncontrolled caches; judge and host diagnostic work excluded from episode charges"]}
+        if cohort != "pilot":
+            report.update(cohort=cohort, selection_manifest=selection_manifest, implementation_continuity=True)
+            report["limitations"].append("1024-token output cap differs from earlier 512-token pilot; cross-cohort differences are not causal improvements")
         output.parent.mkdir(parents=True, exist_ok=True)
         e.private_write(output, canonical_json(report) + b"\n")
     return report

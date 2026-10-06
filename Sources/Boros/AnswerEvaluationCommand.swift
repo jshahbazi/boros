@@ -80,6 +80,25 @@ enum AnswerEvaluationCommand {
         "3bec8104d1c60064cd378b304754e876ad0891470e20c4679df0e21bda36e0a3"
     ]
     static let longMemoryConfigurationSHA256 = "c23bf5d0bb63e7a348adfc4f673c9c01a1217d89e4c9e51c61f9bf80a300cf21"
+    /// Independent development cohort: original histories and paired ordinary
+    /// strategies, separately pinned from the reused v4-v6 diagnostic cases.
+    static let independentLongMemoryCorpusProjectionSHA256: Set<String> = [
+        "4aad7cb5d65069b853c6852bca223049020417ecae799344a9ff579600c469e8",
+        "877999e49027c2d1801da2072dffdfc1b625dc1cc90f3954909d78a91fb95d7d",
+        "d34354e4d795f92a65535b1b4c7038f0917772790263b3466aa7e3ee4da822e1",
+        "e43a5d27f41961f8aae69bdab5858cea1ede19e1d0d7a30e5d37c3a315081942",
+        "d7768d3ae9538f26a6d377d3351448e432f821d22df79ee99521c0fa3c907b76",
+        "d522f012e5ec259dc6154934462cc96c5a131a0d68a06b83d504d66db5f85a04",
+        "adfa18a04185021306d5a7602fa81f74b32402506cf8d6b1cc0fbaa8e247f48f",
+        "9263f9f93c02b4764b8c7ca78251627abf95ad2100c4cb5262a665562825457f",
+        "5f0a5b74a478f640e55971f48d2f7f91270bf79a05496832722cc3a7b0f847a8",
+        "baf71a226fb86f2e515a30d863ac1e408e84fee183987eef5e928c8edf9f1999",
+        "98983bd7eaaad4e48c182293adb8dcc66900d9eb472841750f6b665733aeffeb",
+        "205a6863707939eb00720a72c7166d3ae98720190275a2425ef589ae538b92d9",
+        "b276edab0ad6cfc4e27f3c4834f6f4dd3375049d7a053cf591e4f7bb1d7af314",
+        "853e68bd253f3ae19612131600b16a86c37dff639c555aa510efa3c6752c3780"
+    ]
+    static let independentLongMemoryConfigurationSHA256 = "59dee690589e35b394ea40b6adfbf4bde36aacb349912abb0e94a09aebbefe07"
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
     private struct Event: Decodable {
@@ -177,6 +196,8 @@ enum AnswerEvaluationCommand {
         var longMemoryConfiguration: String? = nil
         var semanticLongMemory: Set<String> = []
         var completeSourceLongMemory: Set<String> = []
+        var independentLongMemory: Set<String> = []
+        var independentLongMemoryConfiguration: String? = nil
         static var production: InputPins {
             InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
                 witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256,
@@ -184,7 +205,9 @@ enum AnswerEvaluationCommand {
                 jsonWitness: jsonObjectCorpusProjectionSHA256, jsonConfiguration: jsonObjectConfigurationSHA256,
                 longMemory: longMemoryCorpusProjectionSHA256, longMemoryConfiguration: longMemoryConfigurationSHA256,
                 semanticLongMemory: semanticLongMemoryCorpusProjectionSHA256,
-                completeSourceLongMemory: completeSourceLongMemoryCorpusProjectionSHA256)
+                completeSourceLongMemory: completeSourceLongMemoryCorpusProjectionSHA256,
+                independentLongMemory: independentLongMemoryCorpusProjectionSHA256,
+                independentLongMemoryConfiguration: independentLongMemoryConfigurationSHA256)
         }
     }
     private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
@@ -199,7 +222,7 @@ enum AnswerEvaluationCommand {
         let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
             options: [.sortedKeys, .withoutEscapingSlashes]))
         guard let mode = root["version"] as? NSNumber, CFGetTypeID(mode) != CFBooleanGetTypeID(),
-              mode.doubleValue == Double(mode.intValue), (1...6).contains(mode.intValue) else { throw Failure.invalid }
+              mode.doubleValue == Double(mode.intValue), (1...7).contains(mode.intValue) else { throw Failure.invalid }
         let eventKeys: Set<String> = ["id", "project_id", "conversation_key", "role", "status", "text"]
         let attemptKeys: Set<String> = ["probe_id", "project_id", "conversation_key", "prompt", "strategy", "replicate"]
         guard events.allSatisfy({ Set($0.keys) == (mode.intValue >= 4 ? eventKeys.union(["source_time"]) : eventKeys) }),
@@ -220,6 +243,10 @@ enum AnswerEvaluationCommand {
             guard pins.jsonWitness.contains(projectionDigest),
                   digest(try JSONSerialization.data(withJSONObject: configuration,
                     options: [.sortedKeys, .withoutEscapingSlashes])) == pins.jsonConfiguration else { throw Failure.invalid }
+        } else if mode.intValue == 7 {
+            guard pins.independentLongMemory.contains(projectionDigest),
+                  digest(try JSONSerialization.data(withJSONObject: configuration,
+                    options: [.sortedKeys, .withoutEscapingSlashes])) == pins.independentLongMemoryConfiguration else { throw Failure.invalid }
         } else {
             let projections = mode.intValue == 4 ? pins.longMemory
                 : mode.intValue == 5 ? pins.semanticLongMemory : pins.completeSourceLongMemory
@@ -1090,30 +1117,54 @@ extension AnswerEvaluationCommand {
     private static func longMemoryDecodeChecks(baseURL: String) throws -> [String: Bool] {
         try longMemoryDecodeChecks(baseURL: baseURL, version: 4).merging(
             longMemoryDecodeChecks(baseURL: baseURL, version: 5)) { _, newer in newer }
+            .merging(longMemoryDecodeChecks(baseURL: baseURL, version: 7)) { _, newer in newer }
             .merging(sourceControlDecodeChecks(baseURL: baseURL)) { _, newer in newer }
+    }
+
+    private static func longMemoryFixturePins(_ root: [String: Any]) throws -> InputPins {
+        var pins = InputPins(ordinary: [], witness: [], witnessConfiguration: witnessConfigurationSHA256)
+        let projection: Set<String> = [try projectionSHA256(witnessFixtureBytes(root))]
+        let configuration = digest(try witnessFixtureBytes(root["configuration"] as! [String: Any]))
+        switch root["version"] as? Int {
+        case 4: pins.longMemory = projection; pins.longMemoryConfiguration = configuration
+        case 5: pins.semanticLongMemory = projection; pins.longMemoryConfiguration = configuration
+        case 7: pins.independentLongMemory = projection; pins.independentLongMemoryConfiguration = configuration
+        default: throw Failure.invalid
+        }
+        return pins
     }
 
     private static func longMemoryDecodeChecks(baseURL: String, version: Int) throws -> [String: Bool] {
         var root = witnessFixture(baseURL: baseURL)
         root["version"] = version
+        if version == 7 {
+            var configuration = root["configuration"] as! [String: Any]
+            configuration["maximum_output"] = 1024; root["configuration"] = configuration
+        }
         let time = EventSourceTime(value: "2023-07-27T18:00", precision: "minute", timezone: "unspecified",
             sourceSHA256: String(repeating: "a", count: 64), locator: "/0/haystack_dates/0", originalValue: "2023/07/27 (Thu) 18:00")
         var events = root["events"] as! [[String: Any]]
         events[0]["source_time"] = time.object; events[1]["source_time"] = time.object
         events[1]["conversation_key"] = "synthetic-other-session"
+        if version == 7 {
+            let secondTime = EventSourceTime(value: "2023-07-26T18:00", precision: "minute", timezone: "unspecified",
+                sourceSHA256: String(repeating: "b", count: 64), locator: "/0/haystack_dates/1", originalValue: "2023/07/26 (Wed) 18:00")
+            events[1]["source_time"] = secondTime.object
+            events[0]["text"] = (events[0]["text"] as! String) + "\u{0} preserved scalar 界."
+        }
         root["events"] = events
         var attempt = (root["attempts"] as! [[String: Any]])[0]
+        if version == 7 { attempt["prompt"] = "Identify the public synthetic café e\u{301} decision 界." }
         let questionTime = EventSourceTime(value: "2023-07-28T18:00", precision: "minute", timezone: "unspecified",
             sourceSHA256: time.sourceSHA256, locator: "/0/question_date", originalValue: "2023/07/28 (Fri) 18:00")
         attempt["question_time"] = questionTime.object
         var hybrid = attempt; hybrid["strategy"] = "hybrid"
         root["attempts"] = [attempt, hybrid]
         let bytes = try witnessFixtureBytes(root)
-        var pins = InputPins(ordinary: [], witness: [], witnessConfiguration: witnessConfigurationSHA256)
-        if version == 4 { pins.longMemory = [try projectionSHA256(bytes)] }
-        else { pins.semanticLongMemory = [try projectionSHA256(bytes)] }
-        pins.longMemoryConfiguration = digest(try witnessFixtureBytes(root["configuration"] as! [String: Any]))
+        let pins = try longMemoryFixturePins(root)
         let document = try decode(bytes, pins: pins)
+        let productionProjections = version == 4 ? longMemoryCorpusProjectionSHA256
+            : version == 5 ? semanticLongMemoryCorpusProjectionSHA256 : InputPins.production.independentLongMemory
         var checks: [String: Bool] = [
             "longmem_v\(version)_paired_dates_decode": document.events.count == 2 && document.attempts.count == 2,
             "longmem_v\(version)_question_date_separate": document.attempts[0].prompt == attempt["prompt"] as? String
@@ -1121,17 +1172,26 @@ extension AnswerEvaluationCommand {
             "longmem_v\(version)_lexical_range_is_exact_original_question": try HistoricalQueryFormulation.input(document.attempts[0].effectivePrompt,
                 utf8Range: document.attempts[0].lexicalQueryUTF8Range) == document.attempts[0].prompt,
             "longmem_v\(version)_semantic_input_boundary": try HistoricalQueryFormulation.input(document.attempts[0].effectivePrompt,
-                utf8Range: document.version == 5 ? document.attempts[0].lexicalQueryUTF8Range : nil)
-                    == (version == 5 ? document.attempts[0].prompt : document.attempts[0].effectivePrompt),
+                utf8Range: document.version >= 5 ? document.attempts[0].lexicalQueryUTF8Range : nil)
+                    == (version >= 5 ? document.attempts[0].prompt : document.attempts[0].effectivePrompt),
             "longmem_v\(version)_timezone_remains_unknown": document.events[0].source_time?.timezone == "unspecified",
             "longmem_v\(version)_production_disjoint": longMemoryCorpusProjectionSHA256.count == 7
                 && semanticLongMemoryCorpusProjectionSHA256.count == 7
                 && semanticLongMemoryCorpusProjectionSHA256.isDisjoint(with: longMemoryCorpusProjectionSHA256)
-                && (version == 4 ? longMemoryCorpusProjectionSHA256 : semanticLongMemoryCorpusProjectionSHA256)
-                    .isDisjoint(with: InputPins.production.ordinary)
-                && (version == 4 ? longMemoryCorpusProjectionSHA256 : semanticLongMemoryCorpusProjectionSHA256)
-                    .isDisjoint(with: witnessCorpusProjectionSHA256)
+                && productionProjections.count == (version == 7 ? 14 : 7)
+                && productionProjections.isDisjoint(with: InputPins.production.ordinary)
+                && productionProjections.isDisjoint(with: witnessCorpusProjectionSHA256)
         ]
+        if version == 7 {
+            checks["longmem_v7_production_independent_from_all_prior_versions"] = productionProjections
+                .isDisjoint(with: longMemoryCorpusProjectionSHA256.union(semanticLongMemoryCorpusProjectionSHA256)
+                    .union(completeSourceLongMemoryCorpusProjectionSHA256).union(jsonObjectCorpusProjectionSHA256))
+            checks["longmem_v7_synthetic_configuration_separate"] = document.configuration.maximum_output == 1024
+                && pins.independentLongMemoryConfiguration != pins.longMemoryConfiguration
+            checks["longmem_v7_production_configuration_independent"] = independentLongMemoryConfigurationSHA256
+                != longMemoryConfigurationSHA256 && InputPins.production.independentLongMemoryConfiguration
+                    == independentLongMemoryConfigurationSHA256
+        }
         func refused(_ changed: [String: Any], using selected: InputPins) -> Bool {
             do { _ = try decode(witnessFixtureBytes(changed), pins: selected); return false } catch { return true }
         }
@@ -1146,7 +1206,7 @@ extension AnswerEvaluationCommand {
             case "changed_question": var rows = [attempt, hybrid]; rows[0]["prompt"] = "Changed synthetic question"; changed["attempts"] = rows
             case "legacy": changed["version"] = 1
             case "other_longmem_version": changed["version"] = version == 4 ? 5 : 4
-            case "unsupported_version": changed["version"] = 7
+            case "unsupported_version": changed["version"] = 8
             default: var c = root["configuration"] as! [String: Any]; c["maximum_output"] = 129; changed["configuration"] = c
             }
             checks["longmem_v\(version)_" + kind + "_refused"] = refused(changed, using: pins)
@@ -1154,10 +1214,71 @@ extension AnswerEvaluationCommand {
         // Re-pin a malformed synthetic projection to test grammar separately from its checksum.
         var malformed = root; var badEvents = events; var invalidTime = time.object
         invalidTime["original_value"] = "2023/02/30 (Thu) 18:00"; badEvents[0]["source_time"] = invalidTime; malformed["events"] = badEvents
-        var malformedPins = pins
-        if version == 4 { malformedPins.longMemory = [try projectionSHA256(witnessFixtureBytes(malformed))] }
-        else { malformedPins.semanticLongMemory = [try projectionSHA256(witnessFixtureBytes(malformed))] }
+        let malformedPins = try longMemoryFixturePins(malformed)
         checks["longmem_v\(version)_invalid_date_grammar_refused"] = refused(malformed, using: malformedPins)
+        if version == 7 {
+            for kind in ["source_id", "source_role", "source_status", "source_date", "question_date", "session", "project", "source_order", "attempt_order", "replicate", "strategy", "declared_sources", "attempt_oracle", "event_oracle"] {
+                var changed = root
+                switch kind {
+                case "source_id": var rows = events; rows[0]["id"] = "synthetic-other-source"; changed["events"] = rows
+                case "source_role": var rows = events; rows[0]["role"] = "assistant"; changed["events"] = rows
+                case "source_status": var rows = events; rows[0]["status"] = "partial"; changed["events"] = rows
+                case "source_date": var rows = events; var date = time.object; date["locator"] = "/1/haystack_dates/0"; rows[0]["source_time"] = date; changed["events"] = rows
+                case "question_date": var rows = [attempt, hybrid]; var date = questionTime.object; date["locator"] = "/1/question_date"; rows[0]["question_time"] = date; changed["attempts"] = rows
+                case "session": var rows = events; rows[1]["conversation_key"] = attempt["conversation_key"]; changed["events"] = rows
+                case "project": var rows = events; rows[0]["project_id"] = "synthetic-other-project"; changed["events"] = rows
+                case "source_order": changed["events"] = Array(events.reversed())
+                case "attempt_order": changed["attempts"] = [hybrid, attempt]
+                case "replicate": var rows = [attempt, hybrid]; rows[1]["replicate"] = 1; changed["attempts"] = rows
+                case "strategy": var rows = [attempt, hybrid]; rows[1]["strategy"] = "recent_only"; changed["attempts"] = rows
+                case "declared_sources": var rows = [attempt, hybrid]; rows[1]["evidence_source_ids"] = [events[0]["id"] as! String]; changed["attempts"] = rows
+                case "attempt_oracle": var rows = [attempt, hybrid]; rows[1]["has_answer"] = true; changed["attempts"] = rows
+                default: var rows = events; rows[0]["answer"] = "Synthetic scorer only"; changed["events"] = rows
+                }
+                checks["longmem_v7_frozen_\(kind)_change_refused"] = refused(changed, using: pins)
+            }
+            for otherVersion in [4, 5, 6] {
+                var crossPins = pins
+                let projection: Set<String> = [try projectionSHA256(bytes)]
+                crossPins.independentLongMemory = []
+                if otherVersion == 4 { crossPins.longMemory = projection }
+                else if otherVersion == 5 { crossPins.semanticLongMemory = projection }
+                else { crossPins.completeSourceLongMemory = projection }
+                crossPins.longMemoryConfiguration = pins.independentLongMemoryConfiguration
+                checks["longmem_v7_version_\(otherVersion)_pins_cannot_authorize"] = refused(root, using: crossPins)
+                var changedVersion = root; changedVersion["version"] = otherVersion
+                var independentPins = pins
+                independentPins.independentLongMemory = [try projectionSHA256(witnessFixtureBytes(changedVersion))]
+                checks["longmem_v7_independent_pins_cannot_authorize_version_\(otherVersion)"] = refused(changedVersion, using: independentPins)
+            }
+            var crossConfiguration = pins
+            crossConfiguration.longMemoryConfiguration = pins.independentLongMemoryConfiguration
+            crossConfiguration.independentLongMemoryConfiguration = nil
+            checks["longmem_v7_legacy_configuration_pin_cannot_authorize"] = refused(root, using: crossConfiguration)
+            for kind in ["event_date_null", "question_date_null", "source_status", "source_project", "attempt_order", "replicate", "declared_sources"] {
+                var changed = root
+                switch kind {
+                case "event_date_null": var rows = events; rows[0]["source_time"] = NSNull(); changed["events"] = rows
+                case "question_date_null": var rows = [attempt, hybrid]; rows[0]["question_time"] = NSNull(); changed["attempts"] = rows
+                case "source_status": var rows = events; rows[0]["status"] = "partial"; changed["events"] = rows
+                case "source_project": var rows = events; rows[0]["project_id"] = "synthetic-other-project"; changed["events"] = rows
+                case "attempt_order": changed["attempts"] = [hybrid, attempt]
+                case "replicate": var rows = [attempt, hybrid]; rows[1]["replicate"] = 1; changed["attempts"] = rows
+                default: var rows = [attempt, hybrid]; rows[1]["evidence_source_ids"] = [events[0]["id"] as! String]; changed["attempts"] = rows
+                }
+                checks["longmem_v7_repin_malformed_\(kind)_refused"] = refused(changed, using: try longMemoryFixturePins(changed))
+            }
+            var changedConfiguration = root
+            var configuration = root["configuration"] as! [String: Any]
+            configuration["maximum_output"] = 512; changedConfiguration["configuration"] = configuration
+            checks["longmem_v7_output_512_cannot_use_independent_1024_pin"] = refused(changedConfiguration, using: pins)
+            for malformedVersion in [true as Any, 7.5 as Any, 0 as Any, 8 as Any] {
+                var changed = root; changed["version"] = malformedVersion
+                var repinned = pins; repinned.independentLongMemory = [try projectionSHA256(witnessFixtureBytes(changed))]
+                let name = malformedVersion is Bool ? "boolean" : (malformedVersion as? Double == 7.5 ? "fractional" : "out_of_range_\(malformedVersion)")
+                checks["longmem_v7_repin_malformed_version_\(name)_refused"] = refused(changed, using: repinned)
+            }
+        }
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.io }
         let temporaryRoot = String(cString: resolved); free(resolved)
         let directory = URL(fileURLWithPath: temporaryRoot, isDirectory: true).appendingPathComponent("boros-longmem-check-" + UUID().uuidString)
@@ -1177,6 +1298,55 @@ extension AnswerEvaluationCommand {
         let reopened = try MemoryStore(directory: restored)
         checks["longmem_v\(version)_dates_survive_attempt_checkpoint"] = try document.events.allSatisfy { event in
             try reopened.sourceReference(eventID: event.id, projectID: project(event.project_id))?.sourceTime == event.source_time
+        }
+        if version == 7 {
+            let references = try document.events.map { event -> MemorySourceReference in
+                guard let reference = try owner.sourceReference(eventID: event.id, projectID: project(event.project_id)) else { throw Failure.invalid }
+                return reference
+            }
+            let restoredReferences = try document.events.map { event -> MemorySourceReference in
+                guard let reference = try reopened.sourceReference(eventID: event.id, projectID: project(event.project_id)) else { throw Failure.invalid }
+                return reference
+            }
+            checks["longmem_v7_checkpoint_preserves_exact_source_identity_order_and_metadata"] = references == restoredReferences
+                && zip(references, references.dropFirst()).allSatisfy { pair in pair.0.sequence < pair.1.sequence }
+                && zip(document.events, restoredReferences).allSatisfy { pair in
+                    let (event, reference) = pair
+                    return Data(reference.eventID.utf8) == Data(event.id.utf8)
+                        && reference.projectID == project(event.project_id)
+                        && reference.conversationID == conversations[key(event.project_id, event.conversation_key)]
+                        && reference.status == .complete && reference.role == (event.role == "user" ? .human : .assistant)
+                        && reference.byteCount == event.text.utf8.count && reference.digest == digest(Data(event.text.utf8))
+                }
+            checks["longmem_v7_checkpoint_preserves_exact_original_source_bodies"] = try document.events.allSatisfy { event in
+                let chat = conversations[key(event.project_id, event.conversation_key)]!
+                return try reopened.events(conversationID: chat).contains { stored in
+                    Data(stored.id.utf8) == Data(event.id.utf8) && Data(stored.text.utf8) == Data(event.text.utf8)
+                        && stored.sourceTime == event.source_time && stored.status == .complete
+                        && stored.role == (event.role == "user" ? .human : .assistant)
+                }
+            }
+            let originalQuestion = document.attempts[0].effectivePrompt
+            let body = try EndpointRequest.build(prompt: originalQuestion, settings: document.configuration.settings, conversation: Conversation())
+            guard let request = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let messages = request["messages"] as? [[String: String]] else { throw Failure.invalid }
+            checks["longmem_v7_request_encoding_preserves_full_dated_question_and_output_cap"] = request["max_tokens"] as? Int == 1024
+                && messages.last?["role"] == "user" && (messages.last?["content"]).map { Data($0.utf8) } == Data(originalQuestion.utf8)
+                && document.attempts.allSatisfy { Data($0.effectivePrompt.utf8) == Data(originalQuestion.utf8) }
+            let chat = conversations[key(document.attempts[0].project_id, document.attempts[0].conversation_key)]!
+            let accepted = try reopened.append(conversationID: chat, role: .human, text: originalQuestion,
+                status: .complete, turnID: "synthetic-independent-question-turn", eventID: "synthetic-independent-question")
+            let questionArchive = directory.appendingPathComponent("question-archive"), questionRestored = directory.appendingPathComponent("question-restored")
+            _ = try BackupArchive.create(from: reopened, at: questionArchive)
+            _ = try BackupArchive.restore(from: questionArchive, to: questionRestored, authority: .unmanagedNoDeletion)
+            let questionOwner = try MemoryStore(directory: questionRestored)
+            let storedQuestion = try questionOwner.events(conversationID: chat).first { $0.id == accepted.id }
+            let restoredQuestionReference = try questionOwner.sourceReference(eventID: accepted.id, projectID: project(document.attempts[0].project_id))
+            let acceptedQuestionReference = try reopened.sourceReference(eventID: accepted.id, projectID: project(document.attempts[0].project_id))
+            checks["longmem_v7_checkpoint_preserves_exact_full_dated_accepted_question"] = storedQuestion.map { Data($0.text.utf8) } == Data(originalQuestion.utf8)
+                && restoredQuestionReference == acceptedQuestionReference
+            checks["longmem_v7_checkpoint_question_reencodes_same_request_body"] = try EndpointRequest.build(prompt: storedQuestion?.text ?? "",
+                settings: document.configuration.settings, conversation: Conversation()) == body
         }
         return checks
     }

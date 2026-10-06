@@ -392,7 +392,21 @@ class NativeContracts(unittest.TestCase):
                     "source_control_complete_exact_declared_union_spans_recent_and_cross_conversation_history",
                     "source_control_reduced_explicit_reduction_or_complete_outcome",
                     "source_control_stopped_complete_delivery_is_independent_of_answer_status",
-                    "source_control_stopped_terminal_capture_and_original_accounting_preserved")
+                    "source_control_stopped_terminal_capture_and_original_accounting_preserved",
+                    "longmem_v7_paired_dates_decode",
+                    "longmem_v7_semantic_input_boundary",
+                    "longmem_v7_production_independent_from_all_prior_versions",
+                    "longmem_v7_production_configuration_independent",
+                    "longmem_v7_version_5_pins_cannot_authorize",
+                    "longmem_v7_independent_pins_cannot_authorize_version_5",
+                    "longmem_v7_legacy_configuration_pin_cannot_authorize",
+                    "longmem_v7_output_512_cannot_use_independent_1024_pin",
+                    "longmem_v7_repin_malformed_declared_sources_refused",
+                    "longmem_v7_checkpoint_preserves_exact_source_identity_order_and_metadata",
+                    "longmem_v7_checkpoint_preserves_exact_original_source_bodies",
+                    "longmem_v7_request_encoding_preserves_full_dated_question_and_output_cap",
+                    "longmem_v7_checkpoint_preserves_exact_full_dated_accepted_question",
+                    "longmem_v7_checkpoint_question_reencodes_same_request_body")
         self.assertTrue(all(checks.get(name) is True for name in required))
 
     def test_native_refuses_existing_output_unknown_fields_nondev_and_store(self):
