@@ -76,6 +76,8 @@ File → Create Backup produces a verified archive of complete sources and durab
 
 Answering and standalone reads share durable episode allowances and deadlines. Selected-Qwen recent context and evidence have independent token caps. Schema 5 adds global background-index limits across projects, retries and rebuilds, with conservative crash/restore accounting. Scoped lexical selection loads one bounded complete candidate at a time; literal scans use metered pages. Raw-work counters describe logical source work rather than physical disk I/O. Apple/native input tokens remain opaque. User-facing policy lifecycle, deletion, summary trees and external actions remain pending. Representative encoder and answering quality remain unproven. See [project status](docs/STATUS.md) and [implementation status](docs/IMPLEMENTATION.md) for verified boundaries.
 
+The [synthetic scaling diagnostic](docs/SCALING.md) declares optimized, provider-free 1k/10k/100k retrieval measurements with warm and process-restart profiles.
+
 ## Local verification
 
 The automated commands above use synthetic data and isolated stores. The [evaluation specification](docs/EVALUATION.md) freezes fixtures, splits, estimands and decision gates. Synthetic source coverage and arithmetic smoke tests do not establish general model quality or production cost/latency improvements.

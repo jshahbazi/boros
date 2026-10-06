@@ -21,6 +21,8 @@ Independent work proceeds concurrently under explicit file ownership:
 
 Parallel work does not remove shared-state constraints. Database ownership and the local model's request capacity remain serialized where required.
 
+The [adversarial judging/retrieval review](reviews/JUDGING-RETRIEVAL-ADVERSARIAL-20261006.md) identifies lost ranked primaries and missing adjacency directions in the current selected-Qwen path. The new bounded-neighborhood helper remains an unintegrated working-tree draft. The [standalone scaling runner](SCALING.md) completed six 1k/10k/100k warm/restart profiles with no provider work; 100k literal/lexical endpoint p95 exceeds one second and legacy automatic-context memory p95 exceeds 111 seconds. This diagnostic does not execute counted Qwen Send or change the last verified application binary. See [STATUS.md](STATUS.md) for metrics and limitations.
+
 ## Storage boundary
 
 The first store accepts bounded text payloads, retained completely as SQLite BLOBs with SHA-256 digests. A payload above the explicit acceptance limit is rejected. This avoids introducing separate database/file commit recovery before the text-only prototype needs external payload files. Preview and prompt budgets do not truncate the stored source.

@@ -72,6 +72,7 @@ def main():
                              ("evidence-controls", "test_evidence_controls.py"),
                              ("longmemeval-cases", "test_longmemeval_cases.py"),
                              ("longmemeval-evaluation", "test_longmemeval_evaluation.py"),
+                             ("synthetic-scaling", "test_scaling_evaluation.py"),
                              ("longmemeval-independent-cases", "test_longmemeval_independent_cases.py"),
                              ("longmemeval-independent-evaluation", "test_longmemeval_independent_evaluation.py"),
                              ("longmemeval-source-controls", "test_longmemeval_source_controls.py"),
