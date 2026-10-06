@@ -80,4 +80,21 @@ Report: `.build/evaluation/longmemeval-natural-v2-20261006.json`; private export
 
 The matching `.build/boros-longmemeval-lexical-range/Boros.app` passed **3,430 application checks** and strict deep signature verification against its 139-file capture. Five new pure query checks verify exact input/default behavior, invalid ranges and Unicode/NUL preservation. The new shared-coordinator fixture uses a metadata-prefixed accepted prompt, selects an archived needle using the original-question range, and verifies full-prompt capture and exact stored admission-audit linkage. The native v4 fixture also checks range equality with the original question.
 
-Immutable verification: `.build/evaluation/longmemeval-lexical-range-verification-20261006.json`. The same-case 14-attempt repeat is active in verified session `93206`. Output destinations are `.build/evaluation/longmemeval-natural-v3-20261006.json` and `.build/evaluation/longmemeval-natural-hypotheses-v3-20261006`. Source/question/settings/oracle pins and semantic/model input remain unchanged. No delivery improvement or semantic QA score is established yet.
+Immutable verification: `.build/evaluation/longmemeval-lexical-range-verification-20261006.json`. The same-case repeat terminalized in session `93206`, with **14/14 operational completions**. Source/question/settings/oracle pins, semantic query and mandatory model-facing question/date text are unchanged. Selected evidence changes as intended.
+
+| Hybrid development diagnostic | Preceding v2 | Lexical-range v3 |
+|---|---|---|
+| Operational completions | 6/7 | 7/7 |
+| Gold-session hits across six answerable cases | 1/10 | 9/10 |
+| Mean per-case session-hit fraction | 8.33% | 83.33% |
+| Positive turns in candidate lists | 0/11 | 7/11 |
+| Positive turns with any delivered bytes | 0/11 | 7/11 |
+| Fully delivered positive turns | 0/11 | 4/11 |
+| Cases with all positive turns delivered | 0/6 | 3/6 |
+| Official QA | Unscored | Unscored |
+
+Recent-only remained 7/7 operational with zero gold-session hits and whole positive turns. Private exports contain seven complete hypotheses per arm. All seven explicit lexical-input hashes and offsets match the original questions; complete accepted-prompt hashes remain intact.
+
+The remaining range failures are short sources: two multi-session positives of 331 and 271 bytes retain only suffixes, and a temporal positive of 281 bytes loses 17 leading bytes. They fit the existing 4,096-byte per-span bound. The preference session and a second temporal positive remain absent from candidates. Next work promotes bounded short primary hits to complete authoritative ranges and separately diagnoses candidate misses; source byte size alone is not provider token-feasibility proof.
+
+Report: `.build/evaluation/longmemeval-natural-v3-20261006.json`; private exports: `.build/evaluation/longmemeval-natural-hypotheses-v3-20261006`; pin/export/range/candidate verification: `.build/evaluation/longmemeval-natural-v3-verification-20261006.json`. These development diagnostics do not establish semantic QA, the official full score or representative quality.
