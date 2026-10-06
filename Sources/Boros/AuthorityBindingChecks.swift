@@ -186,7 +186,7 @@ enum AuthorityBindingChecks {
         let retained=try bindingBytes(source), inventory=try database(source) { try AuthorityBindingJournal.inventory(database:$0) }
         checks["authority_binding_inventory_explicit_managed_and_legacy_classification"]=inventory.managedEpisodes == 1 && inventory.legacyEpisodes == 1 && inventory.managedWork == 1 && inventory.legacyWork == 0
         let manifest=try BackupArchive.create(from:owner,at:archive)
-        checks["authority_binding_archive_manifest_inventory_exact"]=manifest.inventory.authorityBindingInventory == inventory && manifest.databaseSchema == 8
+        checks["authority_binding_archive_manifest_inventory_exact"]=manifest.inventory.authorityBindingInventory == inventory && manifest.databaseSchema == 9
         checks["authority_binding_archive_verify_exact_manifest"]=try BackupArchive.verify(at:archive) == manifest
         _ = try BackupArchive.restore(from:archive,to:restored,authority:.unmanagedNoDeletion)
         let restoredOwner=try MemoryStore(directory:restored)

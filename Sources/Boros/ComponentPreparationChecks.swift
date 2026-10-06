@@ -633,8 +633,15 @@ enum ComponentPreparationChecks {
                         try MemoryStore.validateEpisodeJournal(database: database.handle)
                         try apply(mutation, database: database)
                         if mutation == .policyExtraKey || mutation == .policyChangedCap {
+                            // Prove the policy contract independently even when
+                            // schema-9 cleanup validation rejects limits first.
+                            var policyRejected = false
+                            do { try ContextComponentJournal.validate(database: database.handle) }
+                            catch DecodingError.dataCorrupted { policyRejected = mutation == .policyExtraKey }
+                            catch EpisodeBudgetError.invalid { policyRejected = mutation == .policyChangedCap || mutation == .policyExtraKey }
                             do { try MemoryStore.validateEpisodeJournal(database: database.handle); return false }
-                            catch MemoryError.database(let reason) { return reason == "invalid episode archive metadata" }
+                            catch AuthorityStateError.integrity { return policyRejected }
+                            catch MemoryError.database(let reason) { return policyRejected && reason == "invalid episode archive metadata" }
                         }
                         // Changed snapshots may first fail schema-8 accounting
                         // reconstruction. Independently prove the intended

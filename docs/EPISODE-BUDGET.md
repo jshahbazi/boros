@@ -121,6 +121,10 @@ Semantic search uses the metadata-first lexical path, reserves query-encoder inf
 
 Memory-operation slots are defined at the host boundary: one composite context preparation, search or retrieval replay consumes a slot, and every host-requested page read/neighbor expansion consumes its own slot. Internal source-reference checks belong to their parent operation while all underlying bytes/work remain charged. The current read and evaluation paths use `memory_operations_v1`; a future external client contract must preserve that definition and the scanner/ranking version identities.
 
+## Prepaid terminal cleanup
+
+Schema 9 freezes a separate cleanup allowance in each new episode's original limits. Work admission atomically allocates one slot with two automatic attempt units. A fixed terminal fence commits before metadata-only cleanup batches of at most 32 rows. Attempt debits commit separately and survive failed batches or process death; exhausted cleanup attempts retain the terminal fence and pending holds. Startup administrative units are explicit and never refund automatic permission. Historical schemas 1–8 acquire no invented prepayment. [EPISODE-CLEANUP.md](EPISODE-CLEANUP.md) defines the fee ceilings, pending-state invariant, late usage and archive delta. The nine content caps above retain their original meanings.
+
 ## Deadline, Stop and restart
 
 Start a continuous monotonic deadline before capture/context preparation, including queue wait. Use a verified clock backend that advances during sleep; persist its boot/clock identity and deadline ticks. UTC is display metadata. Wall-clock changes cannot replenish time. On process restart, all active episodes become terminal interrupted or deadline-exceeded; no automatic continuation is admitted. If the prior clock domain cannot be compared, elapsed time remains unknown instead of resetting to zero.
@@ -131,7 +135,7 @@ Move context/retrieval preparation onto the episode coordinator so the main thre
 
 Durably received visible chunks remain available as partial evidence. Late content callbacks cannot append or display new chunks through a terminal episode's lease. A later authoritative usage receipt may settle accounting by its original work ID without reopening the episode or publishing late answer content. Cancellation cannot establish that the server immediately stopped; unknown output reserves stay retained. A provider receipt exceeding its output reservation or disagreeing with exact prompt admission is an explicit adapter violation, preserving the receipt and blocking new work through that adapter until reverified.
 
-Startup recovery reads every active work record before new episode admission. Prepared-but-unarmed records cancel without handoff; armed/submitted records recover unknown; valid terminal receipts are replayed idempotently. The invocation journal independently recovers committed answer fragments. Episode and invocation terminal states must agree on interruption/Stop/error attribution. A process-kill fixture must distinguish preflight-only episodes from answer invocations; preflight should no longer disappear merely because the answer invocation had not started.
+Startup recovery inspects every pending original work record in bounded metadata batches before new episode admission. Prepared-but-unarmed records cancel without handoff; armed/submitted records recover unknown; valid terminal receipts are replayed idempotently. The invocation journal independently recovers committed answer fragments. Episode and invocation terminal states must agree on interruption/Stop/error attribution. A process-kill fixture must distinguish preflight-only episodes from answer invocations; preflight should no longer disappear merely because the answer invocation had not started.
 
 ## Implementation ownership
 

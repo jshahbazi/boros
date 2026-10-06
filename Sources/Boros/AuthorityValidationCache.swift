@@ -134,7 +134,7 @@ final class AuthorityCacheWriteObserver {
             SQLITE_ATTACH, SQLITE_DETACH]
     private static let accountingTables: Set<String> = ["episodes", "episode_resource_totals", "episode_work",
         "episode_request_snapshots", "episode_accounting", "episode_snapshot_references",
-        "episode_settlement_receipts", "episode_adapter_quarantine"]
+        "episode_settlement_receipts", "episode_adapter_quarantine", "episode_cleanup_budget", "episode_cleanup_receipts"]
 
     private func observe(action: Int32, table: String?, column: String?) -> Int32 {
         if action == SQLITE_READ, table == "events", column == "payload", sourcePayloadStatements < Int.max {
@@ -162,7 +162,7 @@ final class AuthorityCacheWriteObserver {
         case .ledger:
             if action == SQLITE_INSERT {
                 return ["episodes", "episode_resource_totals", "episode_work", "episode_request_snapshots", "authority_work_bindings",
-                    "episode_accounting", "episode_snapshot_references", "episode_settlement_receipts", "episode_adapter_quarantine"].contains(table)
+                    "episode_accounting", "episode_snapshot_references", "episode_settlement_receipts", "episode_adapter_quarantine", "episode_cleanup_budget", "episode_cleanup_receipts"].contains(table)
             }
             guard action == SQLITE_UPDATE, let column else { return false }
             switch table {
@@ -172,6 +172,7 @@ final class AuthorityCacheWriteObserver {
                 "ended_ticks", "receipt_id", "receipt_json", "receipt_digest", "adapter_violation", "recovered"].contains(column)
             case "episode_accounting": return ["work_count", "snapshot_bytes", "unknown_input_operations"].contains(column)
             case "episode_adapter_quarantine": return column == "witness_work_id"
+            case "episode_cleanup_budget": return ["prepaid_rows", "consumed_rows", "pending_rows", "attempted_rows", "administrative_rows", "terminal_ticks"].contains(column)
             default: return false
             }
         case .chunks:

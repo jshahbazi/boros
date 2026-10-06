@@ -179,6 +179,8 @@ struct EpisodeLimits: Codable, Equatable {
     // Historical and standalone-read journals retain nil. Only selected-model
     // answering explicitly freezes this policy and obtains a count proof.
     var componentPolicy: ContextComponentPolicy? = nil
+    // Frozen independently from content resources; historical encodings omit it.
+    var terminalCleanup: EpisodeCleanupLimits? = .defaults
 }
 
 struct EpisodeClockSnapshot: Codable, Equatable {
@@ -212,7 +214,7 @@ private struct EpisodeOriginKey: CodingKey {
     init(stringValue: String) { self.stringValue = stringValue }
     init?(intValue: Int) { return nil }
 }
-private func requireEpisodeKeys(_ decoder: Decoder, _ expected: Set<String>) throws {
+func requireEpisodeKeys(_ decoder: Decoder, _ expected: Set<String>) throws {
     let values = try decoder.container(keyedBy: EpisodeOriginKey.self)
     guard Set(values.allKeys.map(\.stringValue)) == expected else { throw EpisodeBudgetError.invalid }
 }

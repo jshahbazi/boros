@@ -186,6 +186,7 @@ enum AuthorityValidationCacheChecks {
             let retry=try f.owner.beginAuthorityValidationSession(lease:f.lease,sessionID:session.sessionID,maximumAttempts:8)
             checks["authority_cache_external_"+name+"_exact_creation_retry_does_not_restore_eligibility"]=retry.attemptsUsed == 2 && reject { _ = try f.owner.withAuthorityValidationSession(sessionID:session.sessionID,lease:f.lease) { callbacks += 1 } } && callbacks == 0
             checks["authority_cache_external_"+name+"_accounting_lookup_refuses_unvalidated_owner"]=reject { _ = try charged(f) }
+            checks["authority_cache_external_"+name+"_work_publication_refuses_unvalidated_owner"]=reject { _ = try f.owner.episodeWork(episodeID:f.acceptance.episode.id,operationID:session.operationID) }
             checks["authority_cache_external_"+name+"_fresh_funding_refuses_unvalidated_accounting"]=reject { _ = try f.owner.beginAuthorityValidationSession(lease:f.lease,sessionID:"fresh-unvalidated",maximumAttempts:4) }
             checks["authority_cache_external_"+name+"_refusal_preserves_incurred_charges"]=try durableCharged(location,episodeID:f.acceptance.episode.id) == cost
             return (f.clock,f.conversation.id)

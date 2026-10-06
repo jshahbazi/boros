@@ -91,7 +91,7 @@ def main():
         binary = scratch / "backup-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
             "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
-            "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "EpisodeAccountingJournal.swift", "BackupCommand.swift", "BackupChecks.swift", "ReadIdentityChecks.swift"
+            "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeAccountingJournal.swift", "EpisodeTerminalCleanup.swift", "BackupCommand.swift", "BackupChecks.swift", "ReadIdentityChecks.swift"
         )]
         # Compile one captured dependency set. Other integration agents may be
         # editing shared Swift sources while this isolated suite is running.

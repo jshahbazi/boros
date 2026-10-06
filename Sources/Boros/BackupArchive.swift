@@ -72,6 +72,9 @@ struct BackupInventory: Codable, Equatable {
     // Schema 8 verifies indexed episode accounting against the original journal.
     // Historical schemas 1–7 have no accounting projection inventory.
     var episodeAccounting: EpisodeAccountingInventory? = nil
+    // Schema 9 records prepaid terminal cleanup and bounded consumption.
+    // Historical schemas 1–8 have no cleanup inventory.
+    var episodeCleanup: EpisodeCleanupInventory? = nil
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Canonical bytes preserve SQLite's exact identifier semantics for
         // scopes, providers and model IDs, including equivalent-looking Unicode.
@@ -146,7 +149,7 @@ enum BackupArchive {
         let candidate = try Database(copied.appendingPathComponent("memory.sqlite3"), writable: true)
         defer { candidate.close() }
         let version = try candidate.integer("PRAGMA user_version")
-        guard (1...8).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
+        guard (1...9).contains(version) else { throw BackupError.invalid("source database has an unsupported schema") }
         let actualSchema = try schemaObjects(candidate)
         candidate.close()
         guard actualSchema == (try recognizedSchemaObjects(version: version, at: reference)) else {
@@ -179,6 +182,7 @@ enum BackupArchive {
     /// Frozen historical contracts captured from checkpoint 22c3402. Legacy
     /// recognition never derives old constraints by subtracting newer DDL.
     private static func historicalSchemaSQL(version: Int) throws -> String {
+        if version == 8 { return AuthoritySchemaEight.sql }
         if version == 7 { return AuthoritySchemaSeven.sql }
         if version == 6 { return AuthoritySchemaSix.sql }
         if version == 5 { return AuthoritySchemaFive.sql }
@@ -357,9 +361,9 @@ enum BackupArchive {
     }
 
     private static func recognizedSchemaObjects(version: Int, at directory: URL) throws -> [SchemaObject] {
-        if version == 8 {
+        if version == 9 {
             // Only the current contract derives from the current owner. All
-            // historical schemas 1–7 retain their frozen DDL.
+            // historical schemas 1–8 retain their frozen DDL.
             do { let owner = try MemoryStore(directory: directory); withExtendedLifetime(owner) {} }
         } else {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -410,7 +414,7 @@ enum BackupArchive {
             files.append(try fileRecord(staging.appendingPathComponent("settings.json"), name: "settings.json"))
             settingsCapture = "independent-atomic-file-point-capture"
         }
-        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 8, archiveID: UUID().uuidString,
+        let manifest = BackupManifest(archiveVersion: 1, databaseSchema: 9, archiveID: UUID().uuidString,
             createdAt: timestamp(), databaseCapture: databaseCapture, settingsCapture: settingsCapture,
             control: control, files: files, inventory: inventory, excluded: excluded)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -429,7 +433,7 @@ enum BackupArchive {
         let manifest: BackupManifest
         do { manifest = try JSONDecoder().decode(BackupManifest.self, from: manifestData) }
         catch { throw BackupError.invalid("missing or malformed archive manifest") }
-        guard manifest.archiveVersion == 1, (1...8).contains(manifest.databaseSchema),
+        guard manifest.archiveVersion == 1, (1...9).contains(manifest.databaseSchema),
               UUID(uuidString: manifest.archiveID) != nil, !manifest.createdAt.isEmpty,
               manifest.databaseCapture == databaseCapture, manifest.excluded == excluded,
               ["absent", "independent-atomic-file-point-capture"].contains(manifest.settingsCapture),
@@ -600,6 +604,21 @@ enum BackupArchive {
         } else if manifest.inventory.episodeAccounting != nil {
             throw BackupError.invalid("historical archive contains unsupported episode accounting inventory")
         }
+        guard restored.episodeCleanup != nil else {
+            throw BackupError.invalid("restored episode cleanup inventory is missing")
+        }
+        if manifest.databaseSchema >= 9 {
+            guard manifest.inventory.episodeCleanup != nil else {
+                throw BackupError.invalid("archived episode cleanup inventory is missing")
+            }
+        } else if manifest.inventory.episodeCleanup != nil {
+            throw BackupError.invalid("historical archive contains unsupported episode cleanup inventory")
+        }
+        // Recovery may consume prepaid cleanup and add receipts. Hash equality
+        // would reject that required progress; compare original immutable work,
+        // budget reservations and every prior receipt, and prove each new receipt.
+        try verifyCleanupRestore(archived: archive.appendingPathComponent("memory.sqlite3"),
+            restored: staging.appendingPathComponent("memory.sqlite3"), schema: manifest.databaseSchema)
         // No stale archive manifest is placed alongside the recovered database.
         let receipt: [String: Any] = ["archive_id": manifest.archiveID, "restored_at": timestamp(),
             "archive_database_sha256": manifest.files.first { $0.name == "memory.sqlite3" }!.sha256,
@@ -615,6 +634,133 @@ enum BackupArchive {
         try target.publish(staging)
         published = true
         return manifest
+    }
+
+    private enum RestoreCell: Equatable {
+        case text(Data), blob(Data), integer(Int64), null
+        var integer: Int64? { if case .integer(let value) = self { return value }; return nil }
+        var string: String? { if case .text(let value) = self { return String(data: value, encoding: .utf8) }; return nil }
+    }
+    private static func restoreCells(_ row: OpaquePointer) throws -> [RestoreCell] {
+        try (0..<sqlite3_column_count(row)).map { column in
+            let kind = sqlite3_column_type(row, column)
+            switch kind {
+            case SQLITE_INTEGER: return .integer(sqlite3_column_int64(row, column))
+            case SQLITE_NULL: return .null
+            case SQLITE_TEXT, SQLITE_BLOB:
+                let bytes = Int(sqlite3_column_bytes(row, column))
+                guard bytes <= 65536 else { throw BackupError.invalid("restore metadata exceeds its bound") }
+                let value = sqlite3_column_blob(row, column).map { Data(bytes: $0, count: bytes) } ?? Data()
+                return kind == SQLITE_TEXT ? .text(value) : .blob(value)
+            default: throw BackupError.invalid("restore metadata has an unsupported type")
+            }
+        }
+    }
+    private static func restoreRow(_ database: Database, _ sql: String, _ id: String) throws -> [RestoreCell]? {
+        var result: [RestoreCell]?
+        try database.each(sql, bindings: [id]) { row in
+            guard result == nil else { throw BackupError.invalid("restore metadata identity is duplicated") }
+            result = try restoreCells(row)
+        }
+        return result
+    }
+    /// Offline comparison streams metadata only. Accepted source/request bytes
+    /// are compared privately and never emitted in diagnostics.
+    private static func verifyCleanupRestore(archived: URL, restored: URL, schema: Int) throws {
+        let source = try Database(archived, writable: false), target = try Database(restored, writable: false)
+        defer { source.close(); target.close() }
+        guard let handle = target.handle else { throw BackupError.database }
+        do { try EpisodeTerminalCleanupJournal.validate(database: handle) }
+        catch { throw BackupError.invalid("restored cleanup journal failed integrity verification") }
+        let budgetColumns = "episode_id,classification,limit_rows,prepaid_rows,consumed_rows,pending_rows,attempted_rows,administrative_rows,terminal_ticks"
+        let receiptColumns = "work_id,episode_id,from_state,ticks"
+        let pendingStates = Set(["prepared", "dispatchArmed", "submitted"])
+        let episodeCount = schema >= 3 ? try source.integer("SELECT count(*) FROM episodes") : 0
+        guard try target.integer("SELECT count(*) FROM episode_cleanup_budget") == episodeCount else {
+            throw BackupError.invalid("restore introduced cleanup budget identities")
+        }
+        if schema >= 3 {
+            try source.each("SELECT id,state FROM episodes ORDER BY id COLLATE BINARY") { row in
+                let id = source.text(row, 0), active = source.text(row, 1) == "active"
+                guard let current = try restoreRow(target, "SELECT " + budgetColumns + " FROM episode_cleanup_budget WHERE episode_id=?", id),
+                      current.count == 9, let used = current[4].integer, current[5].integer == 0,
+                      let ticks = current[8].integer else { throw BackupError.invalid("restored cleanup budget is incomplete") }
+                let pending = try source.integer("SELECT count(*) FROM episode_work WHERE episode_id=? AND state IN ('prepared','dispatchArmed','submitted')", bindings: [id])
+                if schema >= 9 {
+                    guard let previous = try restoreRow(source, "SELECT " + budgetColumns + " FROM episode_cleanup_budget WHERE episode_id=?", id),
+                          Array(current.prefix(4)) == Array(previous.prefix(4)),
+                          let previousUsed = previous[4].integer, previous[5].integer == Int64(pending),
+                          used == previousUsed + Int64(pending), current[6] == previous[6],
+                          let previousAdministrative = previous[7].integer,
+                          current[7].integer == previousAdministrative + Int64(pending), let previousTicks = previous[8].integer,
+                          previousTicks == 0 ? (ticks == 0 ? (!active && pending == 0) : (active || pending > 0)) : ticks == previousTicks else {
+                        throw BackupError.invalid("restore changed immutable cleanup prepayment or lifecycle fence")
+                    }
+                } else {
+                    let work = try source.integer("SELECT count(*) FROM episode_work WHERE episode_id=?", bindings: [id])
+                    guard current[1].string == "legacy-administrative", current[2].integer == 100000,
+                          current[3].integer == Int64(work), used == Int64(pending),
+                          current[6].integer == 0, current[7].integer == Int64(pending),
+                          (active || pending > 0) ? ticks > 0 : ticks == 0 else {
+                        throw BackupError.invalid("legacy restore invented cleanup prepayment")
+                    }
+                }
+            }
+        }
+        let previousReceipts = schema >= 9 ? try source.integer("SELECT count(*) FROM episode_cleanup_receipts") : 0
+        let originalPending = schema >= 3 ? try source.integer("SELECT count(*) FROM episode_work WHERE state IN ('prepared','dispatchArmed','submitted')") : 0
+        guard try target.integer("SELECT count(*) FROM episode_cleanup_receipts") == previousReceipts + originalPending else {
+            throw BackupError.invalid("restore cleanup receipt count changed beyond pending work")
+        }
+        if schema >= 9 {
+            try source.each("SELECT " + receiptColumns + " FROM episode_cleanup_receipts ORDER BY work_id COLLATE BINARY") { row in
+                let previous = try restoreCells(row)
+                guard let id = previous[0].string,
+                      try restoreRow(target, "SELECT " + receiptColumns + " FROM episode_cleanup_receipts WHERE work_id=?", id) == previous else {
+                    throw BackupError.invalid("restore changed an existing cleanup receipt")
+                }
+            }
+        }
+        if schema >= 3 {
+            // Original work rows keep their requests, snapshot identities,
+            // prior settlement bytes and charges. Only pending lifecycle/holds,
+            // end ticks and administrative recovery flags may change.
+            let columns = "id,episode_id,parent_id,kind,adapter_identity,request_json,request_digest,snapshot_digest,revision,state,charged_json,held_json,observed_json,receipt_id,receipt_json,receipt_digest,created_ticks,armed_ticks,ended_ticks,recovered,adapter_violation"
+            try source.each("SELECT " + columns + " FROM episode_work ORDER BY id COLLATE BINARY") { row in
+                let previous = try restoreCells(row)
+                guard let id = previous[0].string, let episode = previous[1].string, let state = previous[9].string,
+                      let current = try restoreRow(target, "SELECT " + columns + " FROM episode_work WHERE id=?", id), current.count == previous.count else {
+                    throw BackupError.invalid("restore lost original work metadata")
+                }
+                for index in [0,1,2,3,4,5,6,7,10,12,13,14,15,16,17,20] {
+                    guard current[index] == previous[index] else { throw BackupError.invalid("restore changed immutable work or prior settlement metadata") }
+                }
+                guard let recovered = current[19].integer, let previousRecovered = previous[19].integer,
+                      recovered == previousRecovered || (previousRecovered == 0 && recovered == 1) else {
+                    throw BackupError.invalid("restore changed administrative recovery flags")
+                }
+                if pendingStates.contains(state) {
+                    let expected = state == "prepared" ? "cancelledBeforeDispatch" : "outcomeUnknown"
+                    guard current[9].string == expected, let revision = previous[8].integer,
+                          current[8].integer == revision,
+                          let receipt = try restoreRow(target, "SELECT " + receiptColumns + " FROM episode_cleanup_receipts WHERE work_id=?", id),
+                          receipt[1].string == episode, receipt[2].string == state,
+                          let budget = try restoreRow(target, "SELECT terminal_ticks FROM episode_cleanup_budget WHERE episode_id=?", episode),
+                          receipt[3] == budget[0], current[18] == budget[0] else {
+                        throw BackupError.invalid("restore introduced an unproven cleanup transition")
+                    }
+                    if state == "prepared" {
+                        guard case .blob(let held) = current[11], (try? JSONDecoder().decode(EpisodeResources.self, from: held)) == EpisodeResources.zero else {
+                            throw BackupError.invalid("restore retained an unarmed reservation")
+                        }
+                    } else if current[11] != previous[11] { throw BackupError.invalid("restore lost an armed output bound") }
+                } else {
+                    for index in [8,9,11,18] {
+                        guard current[index] == previous[index] else { throw BackupError.invalid("restore changed already terminal work") }
+                    }
+                }
+            }
+        }
     }
 
     private static func requireCurrentAuthority(archive: BackupControlState, current: BackupControlState) throws {
@@ -672,7 +818,7 @@ enum BackupArchive {
         let db = try Database(url, writable: false)
         defer { db.close() }
         let schema = try db.integer("PRAGMA user_version")
-        guard (1...8).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
+        guard (1...9).contains(schema) else { throw BackupError.invalid("unsupported database schema") }
         guard try db.texts("PRAGMA integrity_check") == ["ok"], try db.integer("SELECT count(*) FROM pragma_foreign_key_check") == 0 else {
             throw BackupError.invalid("SQLite integrity or foreign-key check failed")
         }
@@ -684,6 +830,7 @@ enum BackupArchive {
         if schema >= 6 { allowedTables.formUnion(AuthorityStateKernel.tableNames) }
         if schema >= 7 { allowedTables.formUnion(AuthorityBindingJournal.tableNames) }
         if schema >= 8 { allowedTables.formUnion(EpisodeAccountingJournal.tableNames) }
+        if schema >= 9 { allowedTables.formUnion(EpisodeTerminalCleanupJournal.tableNames) }
         guard Set(try db.texts("SELECT name FROM sqlite_schema WHERE type='table'")) == allowedTables,
               try db.integer("SELECT count(*) FROM sqlite_schema WHERE type IN ('view','trigger')") == 0 else {
             throw BackupError.invalid("unsupported database object inventory")
@@ -722,6 +869,10 @@ enum BackupArchive {
             columns["episode_snapshot_references"] = ["episode_id", "snapshot_digest"]
             columns["episode_settlement_receipts"] = ["episode_id", "receipt_id", "work_id", "ordinal", "receipt_sha256"]
             columns["episode_adapter_quarantine"] = ["kind", "identity", "witness_work_id"]
+        }
+        if schema >= 9 {
+            columns["episode_cleanup_budget"] = ["episode_id", "classification", "limit_rows", "prepaid_rows", "consumed_rows", "pending_rows", "attempted_rows", "administrative_rows", "terminal_ticks"]
+            columns["episode_cleanup_receipts"] = ["work_id", "episode_id", "from_state", "ticks"]
         }
         for (table, expected) in columns {
             guard try db.texts("SELECT name FROM pragma_table_info('\(table)') ORDER BY cid") == expected else { throw BackupError.invalid("unsupported table contract") }
@@ -874,6 +1025,13 @@ enum BackupArchive {
                 try EpisodeAccountingJournal.validate(database: handle)
                 inventory.episodeAccounting = try EpisodeAccountingJournal.inventory(database: handle)
             } catch { throw BackupError.invalid("episode accounting projection failed integrity verification") }
+        }
+        if schema >= 9 {
+            guard let handle = db.handle else { throw BackupError.database }
+            do {
+                try EpisodeTerminalCleanupJournal.validate(database: handle)
+                inventory.episodeCleanup = try EpisodeTerminalCleanupJournal.inventory(database: handle)
+            } catch { throw BackupError.invalid("episode cleanup journal failed integrity verification") }
         }
         return inventory
     }

@@ -170,6 +170,10 @@ final class MemoryStore: @unchecked Sendable {
     private var accountingExternalVersion: Int?
     private var accountingWriteGeneration: UInt64?
     private var accountingBootstrapping = true
+    private let automaticallyDrainEpisodeCleanup: Bool
+    private let episodeCleanupCheckpoint: ((String, OpaquePointer) throws -> Void)?
+    private let episodeCleanupQueue = DispatchQueue(label: "boros.episode-terminal-cleanup")
+    private var scheduledEpisodeCleanup = Set<Data>()
     private let authorityCacheWrites = AuthorityCacheWriteObserver()
     private var authorityCache: AuthorityValidationCacheEntry?
     private var authoritySessions: [Data: AuthorityValidationSession] = [:]
@@ -189,12 +193,16 @@ final class MemoryStore: @unchecked Sendable {
         authorityValidationCheckpoint: ((String) throws -> Void)? = nil,
         authorityCacheLimits: AuthorityValidationCacheLimits = .defaults,
         authorityCacheCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil,
-        episodeAccountingCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil) throws {
+        episodeAccountingCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil,
+        automaticallyDrainEpisodeCleanup: Bool = true,
+        episodeCleanupCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil) throws {
         self.directory = directory.standardizedFileURL
         self.authorityValidationCheckpoint = authorityValidationCheckpoint
         self.authorityCacheLimits = try authorityCacheLimits.validated()
         self.authorityCacheCheckpoint = authorityCacheCheckpoint
         self.episodeAccountingCheckpoint = episodeAccountingCheckpoint
+        self.automaticallyDrainEpisodeCleanup = automaticallyDrainEpisodeCleanup
+        self.episodeCleanupCheckpoint = episodeCleanupCheckpoint
         do {
             try Self.prepareDirectory(self.directory)
             let lockPath = self.directory.appendingPathComponent("owner.lock").path
@@ -213,12 +221,24 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard (0...8).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            guard (0...9).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
             if version == 7, let database { try AuthoritySchemaSeven.validate(database: database) }
             if version == 8, let database {
                 try transaction {
-                    try AuthoritySchemaSeven.validate(database: database, additionalStatements: EpisodeAccountingJournal.schemaStatements)
+                    try AuthoritySchemaEight.validate(database: database)
                     try Self.validateEpisodeJournal(database: database)
+                }
+            }
+            if version == 9, let database {
+                try transaction {
+                    try AuthoritySchemaEight.validate(database: database, additionalStatements: EpisodeTerminalCleanupJournal.schemaStatements)
+                    try Self.validateEpisodeJournal(database: database)
+                }
+            }
+            if version < 9 {
+                let names = (EpisodeTerminalCleanupJournal.tableNames + ["episode_cleanup_pending"]).map { "'" + $0 + "'" }.joined(separator: ",")
+                guard try query("SELECT name FROM sqlite_schema WHERE name IN (" + names + ") OR tbl_name IN (" + names + ")", map: { string($0, 0) }).isEmpty else {
+                    throw MemoryError.database("historical schema contains terminal cleanup accounting")
                 }
             }
             if version < 8 {
@@ -312,9 +332,11 @@ final class MemoryStore: @unchecked Sendable {
                 if version < 7 { try AuthorityBindingJournal.classifyLegacy(database: database) }
                 try EpisodeAccountingJournal.install(database: database)
                 if version < 8 { try EpisodeAccountingJournal.backfill(database: database) }
+                try EpisodeTerminalCleanupJournal.install(database: database)
+                if version < 9 { try EpisodeTerminalCleanupJournal.backfill(database: database) }
                 let violations = try query("PRAGMA foreign_key_check") { string($0, 0) }
                 guard violations.isEmpty else { throw MemoryError.database("episode migration foreign-key failure") }
-                try execute("PRAGMA user_version=8")
+                try execute("PRAGMA user_version=9")
                 if version == 3 { try episodeMigrationCheckpoint?("beforeCommit") }
             }
             try execute("PRAGMA foreign_keys=ON")
@@ -325,6 +347,7 @@ final class MemoryStore: @unchecked Sendable {
             // The exclusive process lock is already held. Publish interrupted
             // attempts before any caller can read history or start a request.
             try recoverInterruptedEpisodes()
+            try recoverPendingEpisodeCleanup()
             try recoverInterruptedInvocations()
             try recoverInterruptedBackgroundWork()
             try secureSidecars()
@@ -332,7 +355,7 @@ final class MemoryStore: @unchecked Sendable {
             // Never silently repair a current projection after corruption.
             try transaction {
                 guard let database else { throw MemoryError.database("closed owner") }
-                try AuthoritySchemaSeven.validate(database: database, additionalStatements: EpisodeAccountingJournal.schemaStatements)
+                try AuthoritySchemaEight.validate(database: database, additionalStatements: EpisodeTerminalCleanupJournal.schemaStatements)
                 try Self.validateEpisodeJournal(database: database)
                 accountingExternalVersion = try scalarInteger("PRAGMA data_version")
                 accountingWriteGeneration = authorityCacheWrites.accountingGeneration
@@ -1872,7 +1895,12 @@ extension MemoryStore: EpisodeLedger {
         try validateIdentifier(limits.version, name: "episode limit version")
         _ = try limits.resources.validated()
         _ = try limits.componentPolicy?.validated()
+        _ = try limits.terminalCleanup?.validated()
         guard limits.deadlineMilliseconds > 0, limits.deadlineMilliseconds <= 86_400_000 else { throw EpisodeBudgetError.invalid }
+    }
+    private func requiredEpisodeCleanupLimits(_ limits: EpisodeLimits) throws -> EpisodeCleanupLimits {
+        guard let cleanup = limits.terminalCleanup else { throw EpisodeBudgetError.invalid }
+        return try cleanup.validated()
     }
     private func findEpisode(_ id: String) throws -> EpisodeReceipt? {
         guard let database else { throw MemoryError.database("closed owner") }
@@ -1957,27 +1985,138 @@ extension MemoryStore: EpisodeLedger {
             try execute("UPDATE episode_resource_totals SET charged=?,held=? WHERE episode_id=? AND resource=?", [.integer(nextCharged[resource]), .integer(nextHeld[resource]), .text(episode.id), .text(resource.rawValue)])
         }
     }
+    /// The terminal fence is fixed-size. Metadata cleanup spends prepaid slots
+    /// only after this transaction commits; its failure cannot reopen Stop.
     private func terminalizeEpisode(_ episode: EpisodeReceipt, reason: EpisodeState, ticks: UInt64) throws {
         try withAuthorityCacheWrites(.ledger) {
             guard reason != .active else { throw EpisodeBudgetError.invalid }
             if episode.state != .active { return }
-            guard episode.revision < Int.max else { throw EpisodeBudgetError.invalid }
-            let works = try query("SELECT id FROM episode_work WHERE episode_id=? AND state IN ('prepared','dispatchArmed','submitted')", [.text(episode.id)]) { string($0, 0) }
-            for id in works {
-                guard let work = try findEpisodeWork(id), let current = try findEpisode(episode.id) else { throw MemoryError.database("episode work disappeared") }
-                guard let database else { throw MemoryError.database("closed owner") }
-                if work.state == .prepared {
-                    try updateEpisodeTotals(current, replacing: work, charged: work.charged, held: .zero)
-                    try execute("UPDATE episode_work SET state='cancelledBeforeDispatch',held_json=?,ended_ticks=? WHERE id=?", [.blob(try episodeJSON(EpisodeResources.zero)), .integer(Int(ticks)), .text(id)])
-                    try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episode.id, request: work.request,
-                        from: work.state, to: .cancelledBeforeDispatch)
-                } else {
-                    try execute("UPDATE episode_work SET state='outcomeUnknown',ended_ticks=? WHERE id=?", [.integer(Int(ticks)), .text(id)])
-                    try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episode.id, request: work.request,
-                        from: work.state, to: .outcomeUnknown)
-                }
-            }
+            guard episode.revision < Int.max, let database else { throw EpisodeBudgetError.invalid }
+            try requireAccountingConfidenceLocked()
             try execute("UPDATE episodes SET state=?,terminal_reason=?,revision=revision+1 WHERE id=? AND state='active'", [.text(reason.rawValue), .text(reason.rawValue), .text(episode.id)])
+            _ = try EpisodeTerminalCleanupJournal.terminalFence(database: database, episodeID: episode.id, ticks: ticks)
+        }
+    }
+    private func scheduleEpisodeCleanupLocked(_ episodeID: String) {
+        guard !accountingBootstrapping, automaticallyDrainEpisodeCleanup else { return }
+        let key = Data(episodeID.utf8)
+        guard scheduledEpisodeCleanup.insert(key).inserted else { return }
+        episodeCleanupQueue.async { [weak self] in
+            guard let self else { return }
+            // One transaction per queued turn, releasing the owner between
+            // batches. A refusal leaves the explicit pending ledger intact.
+            try? self.authorityLedgerLocked {
+                self.scheduledEpisodeCleanup.remove(key)
+                let receipt = try self.drainEpisodeCleanupLocked(episodeID: episodeID, maximumRows: EpisodeCleanupLimits.batchRows)
+                if receipt.pendingRows > 0 { self.scheduleEpisodeCleanupLocked(episodeID) }
+            }
+        }
+    }
+    private func cleanupEpisodeWorkLocked(episodeID: String, workID: String, recovering: Bool = false) throws {
+        guard let database, sqlite3_get_autocommit(database) == 0 else { throw AuthorityStateError.integrity }
+        try requireAccountingConfidenceLocked()
+        guard let episode = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
+        guard episode.state != .active else { return }
+        let budget = try EpisodeTerminalCleanupJournal.receipt(database: database, episodeID: episodeID)
+        let rows = try query("SELECT id,episode_id,state,request_json,request_digest,charged_json,held_json,revision FROM episode_work WHERE id=?", [.text(workID)]) { row -> EpisodeWorkRecord in
+            let metadata = blob(row, 3), charged = blob(row, 5), held = blob(row, 6)
+            guard metadata.count + charged.count + held.count + string(row, 0).utf8.count + string(row, 1).utf8.count + 128 <= EpisodeCleanupLimits.maximumMetadataBytes,
+                Self.digest(metadata) == string(row, 4), let state = EpisodeWorkState(rawValue: string(row, 2)) else { throw AuthorityStateError.integrity }
+            let request = try episodeDecode(EpisodeWorkRequest.self, metadata)
+            guard request.snapshot == nil, episodeIdentifierEqual(request.id, string(row, 0)), episodeIdentifierEqual(string(row, 1), episodeID) else { throw AuthorityStateError.integrity }
+            return EpisodeWorkRecord(id: string(row, 0), episodeID: string(row, 1), request: request, revision: Int(sqlite3_column_int64(row, 7)), state: state,
+                charged: try episodeDecode(EpisodeResources.self, charged).validated(), held: try episodeDecode(EpisodeResources.self, held).validated(), observed: nil, receiptID: nil, recovered: recovering)
+        }
+        guard let work = rows.first else { throw MemoryError.missing("episode work") }
+        guard [.prepared, .dispatchArmed, .submitted].contains(work.state) else { return }
+        guard budget.terminalTicks > 0, budget.pendingRows > 0, budget.consumedRows < budget.prepaidRows else { throw AuthorityStateError.integrity }
+        let next: EpisodeWorkState = work.state == .prepared ? .cancelledBeforeDispatch : .outcomeUnknown
+        if work.state == .prepared {
+            guard work.charged == .zero, work.held == work.request.resources else { throw AuthorityStateError.integrity }
+            try updateEpisodeTotals(episode, replacing: work, charged: .zero, held: .zero)
+            try execute("UPDATE episode_work SET state=?,held_json=?,ended_ticks=?,recovered=max(recovered,?) WHERE id=? AND state='prepared'", [.text(next.rawValue), .blob(try episodeJSON(EpisodeResources.zero)), .integer(Int(budget.terminalTicks)), .integer(recovering ? 1 : 0), .text(workID)])
+        } else {
+            try execute("UPDATE episode_work SET state=?,ended_ticks=?,recovered=max(recovered,?) WHERE id=? AND state IN ('dispatchArmed','submitted')", [.text(next.rawValue), .integer(Int(budget.terminalTicks)), .integer(recovering ? 1 : 0), .text(workID)])
+        }
+        try withAuthorityCacheWrites(.unknown) { try episodeCleanupCheckpoint?("after-work-before-cleanup-receipt", database) }
+        try requireAccountingConfidenceLocked()
+        try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episodeID, request: work.request, from: work.state, to: next)
+        try EpisodeTerminalCleanupJournal.recordTransition(database: database, episodeID: episodeID, workID: workID, from: work.state, to: next)
+        try EpisodeTerminalCleanupJournal.recordCleanup(database: database, episodeID: episodeID, workID: workID, from: work.state, ticks: budget.terminalTicks)
+    }
+    private func cleanupEpisodeTargetLocked(episodeID: String, workID: String) throws {
+        guard let database else { throw AuthorityStateError.integrity }
+        let pending = try authorityLedgerTransaction { () -> Bool in
+            try requireAccountingConfidenceLocked()
+            guard let episode = try findEpisode(episodeID), episode.state != .active else { return false }
+            let rows = try query("SELECT episode_id,state FROM episode_work WHERE id=?", [.text(workID)]) { (string($0, 0), string($0, 1)) }
+            guard let row = rows.first else { return false }
+            guard episodeIdentifierEqual(row.0, episodeID) else { throw EpisodeBudgetError.conflict }
+            return ["prepared", "dispatchArmed", "submitted"].contains(row.1)
+        }
+        guard pending else { return }
+        _ = try authorityLedgerTransaction {
+            try requireAccountingConfidenceLocked()
+            return try EpisodeTerminalCleanupJournal.chargeAttempt(database: database, episodeID: episodeID, maximumRows: 1)
+        }
+        try withAuthorityCacheWrites(.unknown) { try episodeCleanupCheckpoint?("after-cleanup-attempt-commit", database) }
+        try authorityLedgerTransaction { try cleanupEpisodeWorkLocked(episodeID: episodeID, workID: workID) }
+        let after = try EpisodeTerminalCleanupJournal.receipt(database: database, episodeID: episodeID)
+        if after.pendingRows > 0 { scheduleEpisodeCleanupLocked(episodeID) }
+    }
+    private func drainEpisodeCleanupLocked(episodeID: String, maximumRows: Int, recovering: Bool = false) throws -> EpisodeCleanupReceipt {
+        guard (1...EpisodeCleanupLimits.batchRows).contains(maximumRows), let database else { throw EpisodeBudgetError.invalid }
+        let before = try authorityLedgerTransaction {
+            try requireAccountingConfidenceLocked()
+            return try EpisodeTerminalCleanupJournal.receipt(database: database, episodeID: episodeID)
+        }
+        guard before.terminalTicks > 0 && before.pendingRows > 0 else { return before }
+        // Charge a bounded attempt in its own durable transaction. A failed or
+        // killed batch cannot refund permission for unlimited automatic retries.
+        let fundedRows = try authorityLedgerTransaction {
+            try requireAccountingConfidenceLocked()
+            return try EpisodeTerminalCleanupJournal.chargeAttempt(database: database, episodeID: episodeID, maximumRows: maximumRows, recovering: recovering)
+        }
+        try withAuthorityCacheWrites(.unknown) { try episodeCleanupCheckpoint?("after-cleanup-attempt-commit", database) }
+        let result = try authorityLedgerTransaction {
+            try requireAccountingConfidenceLocked()
+            guard let episode = try findEpisode(episodeID), episode.state != .active else { throw AuthorityStateError.integrity }
+            let ids = try query("SELECT id FROM episode_work INDEXED BY episode_cleanup_pending WHERE episode_id=? AND state IN ('prepared','dispatchArmed','submitted') ORDER BY id LIMIT ?", [.text(episodeID), .integer(fundedRows)]) { string($0, 0) }
+            guard !ids.isEmpty else { throw AuthorityStateError.integrity }
+            for id in ids { try cleanupEpisodeWorkLocked(episodeID: episodeID, workID: id, recovering: recovering) }
+            return try EpisodeTerminalCleanupJournal.receipt(database: database, episodeID: episodeID)
+        }
+        if result.pendingRows > 0 { scheduleEpisodeCleanupLocked(episodeID) }
+        return result
+    }
+    /// Internal owner maintenance uses the original episode's frozen slots. It
+    /// never admits work, reads source payloads or extends the content deadline.
+    func drainEpisodeCleanup(episodeID: String, maximumRows: Int = EpisodeCleanupLimits.batchRows) throws -> EpisodeCleanupReceipt {
+        try authorityLedgerLocked {
+            try validateIdentifier(episodeID, name: "episode ID")
+            return try drainEpisodeCleanupLocked(episodeID: episodeID, maximumRows: maximumRows)
+        }
+    }
+    func episodeCleanupReceipt(episodeID: String) throws -> EpisodeCleanupReceipt {
+        try authorityLedgerLocked {
+            try authorityLedgerTransaction {
+                try validateIdentifier(episodeID, name: "episode ID")
+                try requireAccountingConfidenceLocked()
+                guard let database else { throw AuthorityStateError.integrity }
+                return try EpisodeTerminalCleanupJournal.receipt(database: database, episodeID: episodeID)
+            }
+        }
+    }
+    private func recoverPendingEpisodeCleanup() throws {
+        // Administrative owner-open validation already established integrity.
+        // Enumerate episode IDs with a cursor; never materialize all work rows.
+        var previous: String?
+        while true {
+            let ids = try query("SELECT b.episode_id FROM episode_cleanup_budget b JOIN episodes e ON e.id=b.episode_id WHERE e.state!='active' AND b.pending_rows>0" + (previous == nil ? "" : " AND b.episode_id>?") + " ORDER BY b.episode_id LIMIT 1", previous.map { [.text($0)] } ?? []) { string($0, 0) }
+            guard let id = ids.first else { break }
+            var receipt: EpisodeCleanupReceipt
+            repeat { receipt = try drainEpisodeCleanupLocked(episodeID: id, maximumRows: EpisodeCleanupLimits.batchRows, recovering: true) } while receipt.pendingRows > 0
+            previous = id
         }
     }
     /// Returns an error only after the lifecycle mutation has committed.
@@ -2018,6 +2157,7 @@ extension MemoryStore: EpisodeLedger {
             }
             guard try findEvent(humanEventID) == nil,
                   try query("SELECT id FROM invocations WHERE assistant_event_id=?", [.text(humanEventID)], map: { string($0, 0) }).isEmpty else { throw EpisodeBudgetError.conflict }
+            _ = try requiredEpisodeCleanupLimits(limits)
             let duration = UInt64(limits.deadlineMilliseconds) * 1_000_000
             let (deadline, overflow) = clock.continuousNanoseconds.addingReportingOverflow(duration)
             guard !overflow, deadline <= UInt64(Int64.max) else { throw EpisodeBudgetError.clockUnavailable }
@@ -2033,6 +2173,7 @@ extension MemoryStore: EpisodeLedger {
                 }
                 guard let database else { throw MemoryError.database("closed owner") }
                 try EpisodeAccountingJournal.createEpisode(database: database, episodeID: episodeID)
+                try EpisodeTerminalCleanupJournal.create(database: database, episodeID: episodeID, limits: try requiredEpisodeCleanupLimits(limits))
                 if let buildBinding, let managedAuthority {
                     try AuthorityBindingJournal.insertManagedEpisode(database: database, binding: buildBinding(), authority: managedAuthority)
                 } else { try AuthorityBindingJournal.insertLegacyEpisode(database: database, id: episodeID) }
@@ -2064,6 +2205,7 @@ extension MemoryStore: EpisodeLedger {
                   AND json_extract(origin_json,'$.binding.initiator')=? AND json_extract(origin_json,'$.binding.requestID')=?
                 """, [.text(binding.initiator.rawValue), .text(binding.requestID)]) { string($0, 0) }
             guard priorRequest.isEmpty else { throw EpisodeBudgetError.conflict }
+            _ = try requiredEpisodeCleanupLimits(limits)
             let (deadline, overflow) = clock.continuousNanoseconds.addingReportingOverflow(UInt64(limits.deadlineMilliseconds) * 1_000_000)
             guard !overflow, deadline <= UInt64(Int64.max) else { throw EpisodeBudgetError.clockUnavailable }
             let limitsJSON = try episodeJSON(limits), originJSON = try episodeJSON(origin)
@@ -2079,6 +2221,7 @@ extension MemoryStore: EpisodeLedger {
                 }
                 guard let database else { throw MemoryError.database("closed owner") }
                 try EpisodeAccountingJournal.createEpisode(database: database, episodeID: episodeID)
+                try EpisodeTerminalCleanupJournal.create(database: database, episodeID: episodeID, limits: try requiredEpisodeCleanupLimits(limits))
                 if let buildBinding, let managedAuthority {
                     try AuthorityBindings.insertManagedEpisode(database: database, binding: buildBinding(), authority: managedAuthority)
                 } else { try AuthorityBindings.insertLegacyEpisode(database: database, id: episodeID) }
@@ -2148,7 +2291,8 @@ extension MemoryStore: EpisodeLedger {
                         snapshotBytes = next
                     }
                 }
-                guard workCount < Self.maximumEpisodeWorkRecords, snapshotBytes <= Self.maximumEpisodeSnapshotBytes else {
+                guard workCount < Self.maximumEpisodeWorkRecords, snapshotBytes <= Self.maximumEpisodeSnapshotBytes,
+                    try EpisodeTerminalCleanupJournal.canReserve(database: database, episodeID: episodeID) else {
                     try terminalizeEpisode(episode, reason: .budgetExceeded, ticks: clock.continuousNanoseconds)
                     failure = .exhausted; return
                 }
@@ -2180,10 +2324,14 @@ extension MemoryStore: EpisodeLedger {
                 try requireAccountingConfidenceLocked()
                 try EpisodeAccountingJournal.recordReservedWork(database: database, episodeID: episodeID, request: request,
                     snapshotDigest: request.snapshot.map(Self.digest), snapshotByteCount: request.snapshot?.count ?? 0)
+                try EpisodeTerminalCleanupJournal.recordReserved(database: database, episodeID: episodeID, workID: request.id)
                 if let authorityBinding { try AuthorityBindingJournal.insertManagedWork(database: database, binding: authorityBinding) }
                 else { try AuthorityBindingJournal.insertLegacyWork(database: database, id: request.id) }
             }
-            if let failure { throw failure }
+            if let failure {
+                _ = try drainEpisodeCleanupLocked(episodeID: episodeID, maximumRows: EpisodeCleanupLimits.batchRows)
+                throw failure
+            }
             guard let result = try findEpisodeWork(request.id) else { throw MemoryError.database("episode reservation publication failed") }
             return result
         }
@@ -2226,8 +2374,12 @@ extension MemoryStore: EpisodeLedger {
             try execute("UPDATE episode_work SET state='dispatchArmed',charged_json=?,held_json=?,armed_ticks=? WHERE id=?", [.blob(try episodeJSON(charged)), .blob(try episodeJSON(held)), .integer(Int(clock.continuousNanoseconds)), .text(operationID)])
             try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episodeID, request: work.request,
                 from: work.state, to: .dispatchArmed)
+            try EpisodeTerminalCleanupJournal.recordTransition(database: database, episodeID: episodeID, workID: operationID, from: work.state, to: .dispatchArmed)
         }
-        if let failure { throw failure }
+        if let failure {
+            _ = try drainEpisodeCleanupLocked(episodeID: episodeID, maximumRows: EpisodeCleanupLimits.batchRows)
+            throw failure
+        }
         guard let result = try findEpisodeWork(operationID) else { throw MemoryError.database("episode arming failed") }
         return result
     }
@@ -2243,6 +2395,7 @@ extension MemoryStore: EpisodeLedger {
                 let finalClock = try episodeRuntimeClock(clock)
                 if episode.state != .active || !episodeIdentifierEqual(finalClock.domain, episode.clockDomain) || finalClock.continuousNanoseconds >= episode.deadlineNanoseconds {
                     try transaction { try terminalizeEpisode(episode, reason: .deadlineExceeded, ticks: finalClock.continuousNanoseconds) }
+                    _ = try drainEpisodeCleanupLocked(episodeID: episodeID, maximumRows: EpisodeCleanupLimits.batchRows)
                     throw EpisodeBudgetError.deadlineExceeded
                 }
             } else { throw MemoryError.missing("episode") }
@@ -2253,6 +2406,7 @@ extension MemoryStore: EpisodeLedger {
                 guard let database else { throw MemoryError.database("closed owner") }
                 try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episodeID,
                     request: work.request, from: .dispatchArmed, to: .submitted)
+                try EpisodeTerminalCleanupJournal.recordTransition(database: database, episodeID: episodeID, workID: operationID, from: .dispatchArmed, to: .submitted)
             }
             guard let result = try findEpisodeWork(work.id) else { throw MemoryError.database("episode handoff failed") }
             return result
@@ -2269,14 +2423,14 @@ extension MemoryStore: EpisodeLedger {
                 guard evidence.count <= 16384 else { throw EpisodeBudgetError.invalid }
                 try validateRequestBody(evidence)
             }
+            try transaction {
+                guard let episode = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
+                if episode.state == .active { _ = try advanceEpisodeClock(episode, clock: clock) }
+            }
+            try cleanupEpisodeTargetLocked(episodeID: episodeID, workID: operationID)
             var failure: EpisodeBudgetError?
             try transaction {
-                guard var episode = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
-                if episode.state == .active {
-                    _ = try advanceEpisodeClock(episode, clock: clock)
-                    guard let latest = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
-                    episode = latest
-                }
+                guard let episode = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
                 guard let work = try findEpisodeWork(operationID), episodeIdentifierEqual(work.episodeID, episodeID) else { throw MemoryError.missing("episode work") }
                 let oldData = try query("SELECT receipt_json FROM episode_work WHERE id=?", [.text(operationID)], map: { blob($0, 0) }).first ?? Data()
                 var receipts = oldData.isEmpty ? [] : try episodeDecode([EpisodeWorkSettlement].self, oldData)
@@ -2341,6 +2495,7 @@ extension MemoryStore: EpisodeLedger {
                 try requireAccountingConfidenceLocked()
                 try EpisodeAccountingJournal.recordTransition(database: database, episodeID: episodeID, request: work.request,
                     from: work.state, to: nextState)
+                try EpisodeTerminalCleanupJournal.recordTransition(database: database, episodeID: episodeID, workID: operationID, from: work.state, to: nextState)
                 try EpisodeAccountingJournal.recordSettlement(database: database, episodeID: episodeID,
                     workID: operationID, ordinal: receipts.count - 1, settlement: settlement)
                 if violation { try EpisodeAccountingJournal.recordQuarantine(database: database, workID: operationID, adapterIdentity: work.request.adapterIdentity) }
@@ -2350,7 +2505,11 @@ extension MemoryStore: EpisodeLedger {
                     failure = .adapterViolation
                 }
             }
-            if let failure { throw failure }
+            if let failure {
+                _ = try drainEpisodeCleanupLocked(episodeID: episodeID, maximumRows: EpisodeCleanupLimits.batchRows)
+                throw failure
+            }
+            if let budget = try database.map({ try EpisodeTerminalCleanupJournal.receipt(database: $0, episodeID: episodeID) }), budget.terminalTicks > 0 && budget.pendingRows > 0 { scheduleEpisodeCleanupLocked(episodeID) }
             guard let result = try findEpisodeWork(operationID) else { throw MemoryError.database("episode settlement publication failed") }
             return result
         }
@@ -2360,12 +2519,18 @@ extension MemoryStore: EpisodeLedger {
             let clock = try episodeRuntimeClock(clock)
             try validateIdentifier(episodeID, name: "episode ID"); try validateEpisodeClock(clock)
             guard reason != .active else { throw EpisodeBudgetError.invalid }
+            var closedNow = false
             try transaction {
                 guard let episode = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
                 if episode.state == .active {
+                    closedNow = true
                     if let _ = try advanceEpisodeClock(episode, clock: clock) { return }
                     try terminalizeEpisode(episode, reason: reason, ticks: clock.continuousNanoseconds)
                 }
+            }
+            if closedNow {
+                if let database { try withAuthorityCacheWrites(.unknown) { try episodeCleanupCheckpoint?("after-terminal-fence-commit", database) } }
+                _ = try drainEpisodeCleanupLocked(episodeID: episodeID, maximumRows: EpisodeCleanupLimits.batchRows)
             }
             guard let result = try findEpisode(episodeID) else { throw MemoryError.database("episode terminal publication failed") }
             return result
@@ -2375,10 +2540,12 @@ extension MemoryStore: EpisodeLedger {
         try authorityLedgerLocked {
             let clock = try episodeRuntimeClock(clock)
             try validateIdentifier(id, name: "episode ID"); try validateEpisodeClock(clock)
+            var closedNow = false
             try transaction {
                 guard let episode = try findEpisode(id) else { throw MemoryError.missing("episode") }
-                if episode.state == .active { _ = try advanceEpisodeClock(episode, clock: clock) }
+                if episode.state == .active { closedNow = try advanceEpisodeClock(episode, clock: clock) != nil }
             }
+            if closedNow { _ = try drainEpisodeCleanupLocked(episodeID: id, maximumRows: EpisodeCleanupLimits.batchRows) }
             guard let result = try findEpisode(id) else { throw MemoryError.database("episode unavailable") }
             return result
         }
@@ -2393,19 +2560,28 @@ extension MemoryStore: EpisodeLedger {
                 let ticks = comparable ? max(previous, now!.continuousNanoseconds) : previous
                 let reason: EpisodeState = comparable && ticks >= episode.deadlineNanoseconds ? .deadlineExceeded : .interrupted
                 try terminalizeEpisode(episode, reason: reason, ticks: ticks)
-                try execute("UPDATE episode_work SET recovered=1 WHERE episode_id=?", [.text(id)])
+
             }
         }
     }
 
     func episodeWork(episodeID: String, operationID: String) throws -> EpisodeWorkRecord? {
-        try locked {
+        try authorityLedgerLocked {
             try validateIdentifier(episodeID, name: "episode ID"); try validateIdentifier(operationID, name: "work ID")
-            guard let work = try findEpisodeWork(operationID) else { return nil }
-            guard episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.conflict }
-            return work
+            let terminalPending = try authorityLedgerTransaction {
+                try requireAccountingConfidenceLocked()
+                return try query("SELECT w.episode_id FROM episode_work w JOIN episode_cleanup_budget b ON b.episode_id=w.episode_id WHERE w.id=? AND b.terminal_ticks>0 AND w.state IN ('prepared','dispatchArmed','submitted')", [.text(operationID)]) { string($0, 0) }.first
+            }
+            if let terminalPending, episodeIdentifierEqual(terminalPending, episodeID) { try cleanupEpisodeTargetLocked(episodeID: episodeID, workID: operationID) }
+            return try authorityLedgerTransaction {
+                try requireAccountingConfidenceLocked()
+                guard let work = try findEpisodeWork(operationID) else { return nil }
+                guard episodeIdentifierEqual(work.episodeID, episodeID) else { throw EpisodeBudgetError.conflict }
+                return work
+            }
         }
     }
+
     /// Read-only archive validation. This accepts active snapshot records as
     /// well as recovered records; it never migrates or terminalizes a store.
     static func validateEpisodeJournal(database: OpaquePointer) throws {
@@ -2462,10 +2638,11 @@ extension MemoryStore: EpisodeLedger {
         }
         guard Set(snapshots).count == snapshots.count else { throw MemoryError.database("duplicate episode archive snapshots") }
         let schemaVersion = try rows("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
-        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 || schemaVersion == 7 || schemaVersion == 8 else { throw MemoryError.database("unsupported episode archive schema") }
+        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 || schemaVersion == 7 || schemaVersion == 8 || schemaVersion == 9 else { throw MemoryError.database("unsupported episode archive schema") }
         if schemaVersion >= 6 { try AuthorityStateJournal.validate(database: database) }
         if schemaVersion >= 7 { try AuthorityBindingJournal.validate(database: database) }
-        if schemaVersion == 8 { try EpisodeAccountingJournal.validate(database: database) }
+        if schemaVersion >= 8 { try EpisodeAccountingJournal.validate(database: database) }
+        if schemaVersion >= 9 { try EpisodeTerminalCleanupJournal.validate(database: database) }
         struct CheckEpisode { let id: String; let origin: EpisodeOrigin; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
         let originColumns = schemaVersion >= 4 ? ",origin_json,origin_digest" : ""
         var localReadRequestIDs = Set<Data>()
@@ -2495,6 +2672,7 @@ extension MemoryStore: EpisodeLedger {
             try credentialFree(bytes)
             let limits = try decode(EpisodeLimits.self, bytes); _ = try limits.resources.validated(); try identifier(limits.version)
             _ = try limits.componentPolicy?.validated()
+            _ = try limits.terminalCleanup?.validated()
             let revision = Int(sqlite3_column_int64(row, 8)), created = Int(sqlite3_column_int64(row, 10)), deadline = Int(sqlite3_column_int64(row, 11)), last = Int(sqlite3_column_int64(row, 12))
             guard limits.deadlineMilliseconds > 0, limits.deadlineMilliseconds <= 86_400_000,
                   created > 0, deadline > created, last >= created, revision >= 0,
@@ -2583,9 +2761,9 @@ extension MemoryStore: EpisodeLedger {
                 if let usage = receipt.observed { _ = try usage.validated() }
             }
             let violation = sqlite3_column_int(row, 20) == 1
-            if state == .prepared { guard charged == .zero, held == request.resources, episode.state == .active, sqlite3_column_int64(row, 17) == 0, receipts.isEmpty else { throw MemoryError.database("invalid prepared episode archive work") } }
+            if state == .prepared { guard charged == .zero, held == request.resources, (episode.state == .active || schemaVersion >= 9), sqlite3_column_int64(row, 17) == 0, receipts.isEmpty else { throw MemoryError.database("invalid prepared episode archive work") } }
             if state == .cancelledBeforeDispatch || (state == .failedConfirmed && sqlite3_column_int64(row, 17) == 0) { guard held == .zero, charged == .zero, observed == nil || observed == .zero else { throw MemoryError.database("invalid unarmed terminal episode archive work") } }
-            if state == .dispatchArmed || state == .submitted { guard episode.state == .active, sqlite3_column_int64(row, 17) > 0, receipts.isEmpty else { throw MemoryError.database("invalid armed episode archive work") } }
+            if state == .dispatchArmed || state == .submitted { guard (episode.state == .active || schemaVersion >= 9), sqlite3_column_int64(row, 17) > 0, receipts.isEmpty else { throw MemoryError.database("invalid armed episode archive work") } }
             if state != .prepared && state != .cancelledBeforeDispatch && !(state == .failedConfirmed && sqlite3_column_int64(row, 17) == 0) {
                 guard sqlite3_column_int64(row, 17) > 0 else { throw MemoryError.database("episode archive work never armed") }
                 for resource in EpisodeResource.allCases {

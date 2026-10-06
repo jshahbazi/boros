@@ -14,7 +14,7 @@ SOURCES = (
     "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift",
     "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift",
     "AuthorityBindings.swift", "AuthorityBindingJournal.swift", "AuthorityValidation.swift",
-    "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthorityValidationCacheChecks.swift",
+    "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityValidationCacheChecks.swift",
     "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift",
     "QwenTextRendering.swift", "ContextSourceFraming.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
 )

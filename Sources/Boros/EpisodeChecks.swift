@@ -231,7 +231,7 @@ enum EpisodeChecks {
               try scalar(handle, "SELECT count(*) FROM background_index_windows") == "0" else {
             sqlite3_close(handle); throw MemoryError.database("historical fixture contains background work")
         }
-        let authorityDrops = (EpisodeAccountingJournal.tableNames + AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE " + $0 + ";" }.joined()
+        let authorityDrops = "DROP INDEX episode_cleanup_pending;" + (Array(EpisodeTerminalCleanupJournal.tableNames.reversed()) + EpisodeAccountingJournal.tableNames + AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE " + $0 + ";" }.joined()
         let sql = authorityDrops + "DROP TABLE background_index_work; DROP TABLE background_index_windows; ALTER TABLE invocations DROP COLUMN episode_work_id; ALTER TABLE invocations DROP COLUMN episode_id; DROP TABLE episode_resource_totals; DROP TABLE episode_work; DROP TABLE episode_request_snapshots; DROP TABLE episodes; PRAGMA user_version=2;"
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else { sqlite3_close(handle); throw MemoryError.database("could not construct schema two fixture") }
         sqlite3_close(handle)
@@ -593,7 +593,7 @@ enum EpisodeChecks {
             let sql = """
                 PRAGMA foreign_keys=OFF;
                 BEGIN IMMEDIATE;
-                \((EpisodeAccountingJournal.tableNames + AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE IF EXISTS " + $0 + ";" }.joined())
+                DROP INDEX IF EXISTS episode_cleanup_pending;\((Array(EpisodeTerminalCleanupJournal.tableNames.reversed()) + EpisodeAccountingJournal.tableNames + AuthorityBindingJournal.tableNames + AuthorityStateKernel.tableNames).map { "DROP TABLE IF EXISTS " + $0 + ";" }.joined())
                 DROP TABLE IF EXISTS background_index_work;
                 DROP TABLE IF EXISTS background_index_windows;
                 CREATE TABLE episodes_three (

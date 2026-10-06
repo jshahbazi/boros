@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify isolated schema-8 accounting and actual process-death boundaries."""
+"""Verify isolated indexed accounting and actual process-death boundaries."""
 from __future__ import annotations
 
 import hashlib
@@ -19,7 +19,7 @@ SOURCES = (
     "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift",
     "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift",
     "AuthorityBindings.swift", "AuthorityBindingJournal.swift", "AuthorityValidation.swift",
-    "AuthorityValidationCache.swift", "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift",
+    "AuthorityValidationCache.swift", "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift",
     "EpisodeAccountingJournal.swift", "EpisodeAccountingChecks.swift",
     "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift",
     "QwenTextRendering.swift", "ContextSourceFraming.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
@@ -125,10 +125,10 @@ def killed_boundary(binary: Path, stage: str, directory: Path) -> dict[str, bool
             charged = scalar("SELECT sum(charged) FROM episode_resource_totals")
             held = scalar("SELECT sum(held) FROM episode_resource_totals")
             if stage == "work":
-                original = version == 8 and work_count == 0 and projection_count == 0 and snapshot_bytes == 0 and unknown == 0
+                original = version == 9 and work_count == 0 and projection_count == 0 and snapshot_bytes == 0 and unknown == 0
                 bounds = scalar("SELECT count(*) FROM episode_request_snapshots") == 0 and receipts == 0 and charged == 0 and held == 0
             else:
-                original = version == 8 and work_count == projection_count == 1 and snapshot_bytes > 0 and unknown == 1
+                original = version == 9 and work_count == projection_count == 1 and snapshot_bytes > 0 and unknown == 1
                 bounds = scalar("SELECT state FROM episode_work") == "dispatchArmed" and scalar("SELECT length(receipt_json) FROM episode_work") == 0 and receipts == 0 and charged == 4 and held == 4
             checks["accounting_sigkill_" + stage + "_pre_recovery_original_and_projection_agree"] = original
             checks["accounting_sigkill_" + stage + "_uncommitted_accounting_and_receipt_prefix_is_absent"] = bounds

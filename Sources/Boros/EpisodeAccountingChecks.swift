@@ -365,6 +365,8 @@ enum EpisodeAccountingChecks {
         try database(directory) { db in
             try AuthorityStateKernel.execute(db, "BEGIN IMMEDIATE")
             do {
+                try AuthorityStateKernel.execute(db, "DROP INDEX episode_cleanup_pending")
+                for name in EpisodeTerminalCleanupJournal.tableNames.reversed() { try AuthorityStateKernel.execute(db, "DROP TABLE " + name) }
                 for name in EpisodeAccountingJournal.tableNames.reversed() { try AuthorityStateKernel.execute(db, "DROP TABLE " + name) }
                 try AuthorityStateKernel.execute(db, "PRAGMA user_version=7")
                 for index in 0..<count {
@@ -421,7 +423,7 @@ enum EpisodeAccountingChecks {
             checks["accounting_indexed_" + names[index] + "_vm_work_stays_bounded_with_4096_original_records"] = large[index][0] > 0 && large[index][0] <= small[index][0] + 128 && large[index][0] < 2000 && large[index][2] <= small[index][2] + 2
         }
         checks["accounting_bulk_fixture_uses_validated_old_schema_upgrade"] = try database(directory.appendingPathComponent("large")) { db in
-            try AuthorityStateKernel.rows(db, "PRAGMA user_version")[0][0].integer == 8 && EpisodeAccountingJournal.summary(database: db, episodeID: "accounting-episode").workCount == 4098
+            try AuthorityStateKernel.rows(db, "PRAGMA user_version")[0][0].integer == 9 && EpisodeAccountingJournal.summary(database: db, episodeID: "accounting-episode").workCount == 4098
         }
     }
     /// Standalone runner process boundaries. Only fixed readiness or Boolean
@@ -452,7 +454,7 @@ enum EpisodeAccountingChecks {
         let work = try owner.episodeWork(episodeID: receipt.id, operationID: "process-work"), projection = try summary(directory, receipt.id), proof = try inventory(directory)
         var checks: [String: Bool] = [:]
         checks["accounting_process_recovery_retains_complete_original_human_capture"] = try owner.events(conversationID: receipt.conversationID!).count == 1 && owner.events(conversationID: receipt.conversationID!).first!.text == "Synthetic complete accounting process capture"
-        checks["accounting_process_recovery_publishes_schema_eight_and_valid_projection"] = try database(directory) { try AuthorityStateKernel.rows($0, "PRAGMA user_version")[0][0].integer == 8 } && proof.episodes == 1
+        checks["accounting_process_recovery_publishes_schema_eight_and_valid_projection"] = try database(directory) { try AuthorityStateKernel.rows($0, "PRAGMA user_version")[0][0].integer == 9 } && proof.episodes == 1
         checks["accounting_process_recovery_never_publishes_interrupted_settlement_receipt"] = proof.settlementReceipts == 0
         if mode == "recover-work" {
             checks["accounting_process_work_prefix_rolls_back_original_and_projection"] = work == nil && projection.workCount == 0 && projection.snapshotBytes == 0 && projection.unknownInputOperations == 0 && proof.snapshotReferences == 0
