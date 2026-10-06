@@ -31,13 +31,13 @@ Digests establish consistency, not authenticity against someone able to replace 
 | Metadata | Bounded control/journal/projection cardinality, BLOB types and byte lengths |
 | Journal descriptors | Canonical operation requests and source-proof occurrence discovery |
 | Source metadata | Original payload lengths and accepted-source metadata |
-| Replay and clock | Two conservative journal/projection/source passes, extra control/tail reads, historical anchor validation, clock advancement and current eligibility |
+| Replay and clock | Conservative two-pass byte ceiling; one complete journal/projection/source replay reused by the trusted clock writer, extra control/tail reads, historical anchor validation and current eligibility |
 
-Each phase reserves and arms its durable charge before inspection; failure retains incurred charges and settles confirmed failure. Exhaustion stops before unfunded original payload access. This private funding path avoids recursive public lease dispatch. Bounded point reads of the accounting ledger and canonical binding needed to reserve/arm/settle are a bootstrap exception; counters do not measure every SQLite byte, physical I/O or CPU instruction.
+Each phase reserves and arms its durable charge before inspection; failure retains incurred charges and settles confirmed failure. Exhaustion stops before unfunded original payload access. This private funding path avoids recursive public lease dispatch. Accounting-ledger and canonical-binding inspection needed to reserve/arm/settle is a bootstrap exception. Per-episode aggregates can scan the existing 100,000-work cap, and unsupported-adapter quarantine can scan the global work inventory without an inspected-row bound. Complete setup metering remains unfinished; fixed session metadata prepayment covers warm checks, not these inherited bootstrap scans. Counters do not measure every SQLite byte, physical I/O or CPU instruction.
 
 SQLite `data_version` witnesses and immediate transactions fence externally changed sizing before descriptor or original-source reads. The final receipt hashes the exact binding validated in the fenced transaction. Complete historical binding validation includes its immutable receipt, startup, origin, accepted source, policy resolution and host contract. Expiry remains committed when current eligibility fails afterward. Late accounting settlement does not revive an invalidated or cancelled episode.
 
-This is a bounded conservative full-replay diagnostic. It can exhaust an interactive allowance quickly. Efficient prefix caching, progress/cancellation during replay and the serialized consumer boundary remain unfinished. No validator callback itself grants permission to launch inference or publish content.
+This is a bounded conservative full-replay diagnostic. It can exhaust an interactive allowance quickly. The internal [funded cache/session recipe](AUTHORITY-VALIDATION-CACHE.md) now reuses paid current-state evidence with progress/cancellation and owner/write fences. Complete consumer proofs and serialized runtime boundaries remain unfinished. No validator callback itself grants permission to launch inference or publish content.
 
 ## Verification
 

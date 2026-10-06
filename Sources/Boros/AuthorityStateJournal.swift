@@ -7,27 +7,111 @@ struct AuthorityHistoricalState {
     let startupReceiptID:String
 }
 
+typealias AuthorityValidationProgress = () throws -> Void
+
+/// Owner-private replay evidence. This value is never serialized or accepted
+/// from an external caller. The owner must additionally fence its connection's
+/// data_version and every same-connection write before reusing it.
+struct AuthorityValidatedCurrent {
+    let current:AuthorityStateSnapshot
+    let anchor:AuthorityHistoricalState
+    let tail:AuthorityOperationReceipt
+    let beforeTail:AuthorityStateSnapshot
+    let tailReceiptSHA256:String
+    let tailReceiptBytes:Int
+    let tailRequestBytes:Int
+    let journalBytes:Int
+    let verifiedRequestIDs:Set<Data>
+    let nextTemporalBoundary:Int64?
+    let currentBytes:Int
+    let beforeTailBytes:Int
+    let requestIDBytes:Int
+    let retainedCanonicalBytes:Int
+    let sourceProofDescriptors:Int
+    var controlSHA256:String { tail.stateSHA256 }
+    fileprivate init(current:AuthorityStateSnapshot,anchor:AuthorityHistoricalState,tail:AuthorityOperationReceipt,beforeTail:AuthorityStateSnapshot,tailReceiptSHA256:String,tailReceiptBytes:Int,tailRequestBytes:Int,journalBytes:Int,verifiedRequestIDs:Set<Data>) throws {
+        self.current=current; self.anchor=anchor; self.tail=tail; self.beforeTail=beforeTail
+        self.tailReceiptSHA256=tailReceiptSHA256; self.tailReceiptBytes=tailReceiptBytes; self.tailRequestBytes=tailRequestBytes
+        self.journalBytes=journalBytes; self.verifiedRequestIDs=verifiedRequestIDs
+        let kernel=AuthorityStateKernel.self
+        currentBytes=try kernel.canonical(current).count
+        beforeTailBytes=try kernel.canonical(beforeTail).count
+        requestIDBytes=verifiedRequestIDs.reduce(0,{$0+$1.count})
+        retainedCanonicalBytes=try currentBytes+kernel.canonical(anchor.state).count+beforeTailBytes+kernel.canonical(anchor.receipt).count+tailReceiptBytes+anchor.startupReceiptID.utf8.count+tailReceiptSHA256.utf8.count+requestIDBytes
+        var sources=Set<Data>()
+        for state in [current,anchor.state,beforeTail] { for policy in state.policies { for span in policy.definition.sources { sources.insert(try kernel.canonical(span)) } } }
+        sourceProofDescriptors=sources.count
+        nextTemporalBoundary=current.policies.filter { !AuthorityStateKernel.terminal($0.state) }.flatMap { policy->[Int64] in
+            var times=policy.definition.expiresAt.map { [$0] } ?? []
+            if policy.state == .scheduled { times.append(policy.definition.effectiveFrom) }
+            return times
+        }.min()
+    }
+    /// Pure-clock advancement preserves policy definitions and the immutable
+    /// anchor. Its checked writer has already encoded the new current state.
+    /// Retain exact byte deltas without reencoding or scanning old snapshots.
+    fileprivate init(pureClockFrom proof:AuthorityValidatedCurrent,update:AuthorityValidatedClock.Update) {
+        current=update.current; anchor=proof.anchor; tail=update.tail; beforeTail=update.beforeTail
+        tailReceiptSHA256=update.tailReceiptSHA256; tailReceiptBytes=update.tailReceiptBytes; tailRequestBytes=0
+        journalBytes=update.journalBytes; verifiedRequestIDs=update.verifiedRequestIDs
+        currentBytes=update.currentBytes
+        let coalesced=update.tail.journalSequence == proof.tail.journalSequence
+        beforeTailBytes=coalesced ? proof.beforeTailBytes:proof.currentBytes
+        requestIDBytes=proof.requestIDBytes+(coalesced ? 0:update.tail.requestID.utf8.count)
+        retainedCanonicalBytes=proof.retainedCanonicalBytes+(currentBytes-proof.currentBytes)+(beforeTailBytes-proof.beforeTailBytes)+(tailReceiptBytes-proof.tailReceiptBytes)+(requestIDBytes-proof.requestIDBytes)
+        sourceProofDescriptors=proof.sourceProofDescriptors; nextTemporalBoundary=proof.nextTemporalBoundary
+    }
+}
+
+struct AuthorityValidatedClockResult {
+    let proof:AuthorityValidatedCurrent
+    /// True only for a policy/revision/epoch transition, not a pure clock tick.
+    let changed:Bool
+}
+
 /// Replays typed control operations, then compares every materialized row. Hash
 /// integrity is local provenance; it is not a cryptographic external authority.
 enum AuthorityStateJournal {
+    private struct ReplayResult {
+        let resolved:AuthorityHistoricalState?
+        let validated:AuthorityValidatedCurrent?
+    }
+    static func validatedCurrent(database:OpaquePointer,progress:AuthorityValidationProgress?=nil)throws->AuthorityValidatedCurrent {
+        guard let result=try validateImpl(database:database,latest:true,buildProof:true,progress:progress).validated else { throw AuthorityStateError.integrity }
+        try progress?()
+        return result
+    }
+    static func advanceTimeValidated(database:OpaquePointer,proof:AuthorityValidatedCurrent,expectedControlSHA256:String,expectedTailReceiptSHA256:String,now:Int64,progress:AuthorityValidationProgress?=nil)throws->AuthorityValidatedClockResult {
+        let update=try AuthorityValidatedClock.advance(database:database,proof:proof,expectedControlSHA256:expectedControlSHA256,expectedTailReceiptSHA256:expectedTailReceiptSHA256,now:now,progress:progress)
+        guard let update else { return AuthorityValidatedClockResult(proof:proof,changed:false) }
+        try progress?()
+        let result:AuthorityValidatedCurrent
+        if update.changed {
+            let anchor=AuthorityHistoricalState(state:update.current,receipt:update.tail,startupReceiptID:proof.anchor.startupReceiptID)
+            result=try AuthorityValidatedCurrent(current:update.current,anchor:anchor,tail:update.tail,beforeTail:update.beforeTail,tailReceiptSHA256:update.tailReceiptSHA256,tailReceiptBytes:update.tailReceiptBytes,tailRequestBytes:0,journalBytes:update.journalBytes,verifiedRequestIDs:update.verifiedRequestIDs)
+        } else { result=AuthorityValidatedCurrent(pureClockFrom:proof,update:update) }
+        try progress?()
+        return AuthorityValidatedClockResult(proof:result,changed:update.changed)
+    }
     static func validate(database:OpaquePointer) throws {
         do { _ = try validateImpl(database:database) } catch { throw AuthorityStateError.integrity }
     }
     static func resolve(database:OpaquePointer,receiptID:String,revision:Int,controlEpoch:Int)throws->AuthorityHistoricalState {
         do {
             try AuthorityStateKernel.identifier(receiptID)
-            guard let result=try validateImpl(database:database,targetReceiptID:receiptID),result.state.revision == revision,result.state.controlEpoch == controlEpoch else { throw AuthorityStateError.integrity }; return result
+            guard let result=try validateImpl(database:database,targetReceiptID:receiptID).resolved,result.state.revision == revision,result.state.controlEpoch == controlEpoch else { throw AuthorityStateError.integrity }; return result
         } catch { throw AuthorityStateError.integrity }
     }
     static func latestImmutable(database:OpaquePointer)throws->AuthorityHistoricalState {
         do {
-            guard let result=try validateImpl(database:database,latest:true) else { throw AuthorityStateError.integrity }
+            guard let result=try validateImpl(database:database,latest:true).resolved else { throw AuthorityStateError.integrity }
             let current=try AuthorityStateKernel.snapshot(database:database)
             guard current.revision == result.state.revision,current.controlEpoch == result.state.controlEpoch else { throw AuthorityStateError.integrity }; return result
         } catch { throw AuthorityStateError.integrity }
     }
-    private static func validateImpl(database:OpaquePointer,targetReceiptID:String?=nil,latest:Bool=false) throws->AuthorityHistoricalState? {
+    private static func validateImpl(database:OpaquePointer,targetReceiptID:String?=nil,latest:Bool=false,buildProof:Bool=false,progress:AuthorityValidationProgress?=nil) throws->ReplayResult {
         let kernel=AuthorityStateKernel.self
+        try progress?()
         try validateSchema(database)
         let current=try kernel.snapshot(database:database)
         try kernel.identifier(current.storeID); try kernel.identifier(current.ownerID)
@@ -38,8 +122,9 @@ enum AuthorityStateJournal {
         guard allocation[0].integer == current.journalSequence,allocation[0].integer <= kernel.maximumOperations,allocation[1].integer >= 0,allocation[1].integer <= kernel.maximumJournalBytes,allocation[2].integer >= 0,allocation[2].integer <= kernel.maximumOperations*320 else { throw AuthorityStateError.integrity }
         let entries=try kernel.rows(database,"SELECT sequence,request_id,request_payload,receipt_payload,receipt_digest FROM authority_operations ORDER BY sequence")
         guard entries.count == current.journalSequence,entries.count <= kernel.maximumOperations else { throw AuthorityStateError.integrity }
-        var requestIDs=Set<Data>(),totalBytes=0,startupReceiptID:String?,resolved:AuthorityHistoricalState?
+        var requestIDs=Set<Data>(),totalBytes=0,startupReceiptID:String?,resolved:AuthorityHistoricalState?,currentAnchor:AuthorityHistoricalState?,tail:AuthorityOperationReceipt?,beforeTail:AuthorityStateSnapshot?,tailBytes=0,tailRequestBytes=0,tailDigest=""
         for row in entries {
+            try progress?()
             guard row.count == 5,let receiptBytes=row[3].bytes,row[4].string == kernel.digest(receiptBytes) else { throw AuthorityStateError.integrity }
             let receipt=try kernel.decode(AuthorityOperationReceipt.self,receiptBytes)
             try kernel.identifier(receipt.requestID)
@@ -54,18 +139,18 @@ enum AuthorityStateJournal {
             case "time":
                 guard receipt.version == "authority-receipt-v1",receipt.origin == "scheduler",receipt.operation == nil,receipt.requestSHA256 == nil,row[2].isNull,receipt.requestID.hasPrefix("authority-time:"),receipt.timeHighWater > replay.timeHighWater else { throw AuthorityStateError.integrity }
                 replay.timeHighWater=receipt.timeHighWater
-                if try kernel.expireAndActivate(&replay) { try kernel.increment(&replay.controlEpoch); try kernel.increment(&replay.revision) }
+                if try kernel.expireAndActivate(&replay,progress:progress) { try kernel.increment(&replay.controlEpoch); try kernel.increment(&replay.revision) }
                 try kernel.increment(&replay.journalSequence)
             case "clockCheckpoint":
                 guard receipt.version == "authority-receipt-v2",receipt.origin == "scheduler",receipt.operation == nil,receipt.requestSHA256 == nil,row[2].isNull,receipt.requestID.hasPrefix("authority-clock:"),receipt.timeHighWater > replay.timeHighWater,receipt.expiredPolicyIDs.isEmpty else { throw AuthorityStateError.integrity }
                 replay.timeHighWater=receipt.timeHighWater
-                guard try !kernel.expireAndActivate(&replay) else { throw AuthorityStateError.integrity }
+                guard try !kernel.expireAndActivate(&replay,progress:progress) else { throw AuthorityStateError.integrity }
                 try kernel.increment(&replay.journalSequence)
             case "mutation":
                 guard receipt.version == "authority-receipt-v1",receipt.origin == AuthorityOrigin.humanHost.rawValue || receipt.origin == AuthorityOrigin.humanCLI.rawValue,let bytes=row[2].bytes,kernel.digest(bytes) == receipt.requestSHA256 else { throw AuthorityStateError.integrity }
                 let request=try kernel.decode(AuthorityOperationRequest.self,bytes)
                 guard episodeIdentifierEqual(request.requestID,receipt.requestID),request.operation == receipt.operation else { throw AuthorityStateError.integrity }
-                replay=try kernel.reduce(replay,request:request,database:database)
+                replay=try kernel.reduce(replay,request:request,database:database,progress:progress)
             default: throw AuthorityStateError.integrity
             }
             let expired=replay.policies.filter { p in p.state == .expired && before.policies.first(where:{episodeIdentifierEqual($0.id,p.id)})?.state != .expired }.map(\.id)
@@ -76,12 +161,23 @@ enum AuthorityStateJournal {
                 guard let startupReceiptID else { throw AuthorityStateError.integrity }
                 resolved=AuthorityHistoricalState(state:replay,receipt:receipt,startupReceiptID:startupReceiptID)
             }
+            if immutableControl && buildProof {
+                guard let startupReceiptID else { throw AuthorityStateError.integrity }
+                currentAnchor=AuthorityHistoricalState(state:replay,receipt:receipt,startupReceiptID:startupReceiptID)
+            }
+            tail=receipt; beforeTail=before; tailBytes=receiptBytes.count; tailRequestBytes=row[2].bytes?.count ?? 0; tailDigest=row[4].string
+            try progress?()
         }
         guard try kernel.canonical(replay) == kernel.canonical(current) else { throw AuthorityStateError.integrity }
         try projections(database,"authority_tasks",key:"id",records:current.tasks.map { ($0.id,try kernel.canonical($0)) })
         try projections(database,"authority_bindings",key:"conversation_id",records:current.bindings.map { ($0.conversationID,try kernel.canonical($0)) })
         try projections(database,"authority_policies",key:"id",records:current.policies.map { ($0.id,try kernel.canonical($0)) })
-        return resolved
+        try progress?()
+        let validated:AuthorityValidatedCurrent?
+        if buildProof,let currentAnchor,let tail,let beforeTail,currentAnchor.state.revision == current.revision,currentAnchor.state.controlEpoch == current.controlEpoch {
+            validated=try AuthorityValidatedCurrent(current:current,anchor:currentAnchor,tail:tail,beforeTail:beforeTail,tailReceiptSHA256:tailDigest,tailReceiptBytes:tailBytes,tailRequestBytes:tailRequestBytes,journalBytes:totalBytes,verifiedRequestIDs:requestIDs)
+        } else { validated=nil }
+        return ReplayResult(resolved:resolved,validated:validated)
     }
     /// Owner-open validation runs before installation. A receipt cannot attest a
     /// schema that adds mutation triggers or changes identifier constraints.

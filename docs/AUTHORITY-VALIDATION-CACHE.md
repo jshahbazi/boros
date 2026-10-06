@@ -1,0 +1,31 @@
+# Funded authority cache and validation sessions
+
+October 5, 2026. This is an internal prerequisite for shared authority gates. It supplies paid current-state evidence and bounded synthetic eligibility callbacks. GUI answering, source browsing and background maintenance still use their existing contracts; task/policy operations remain unexposed. A session receipt is accounting evidence and grants no inference, disclosure, delivery or publication permission.
+
+## Proof and funding
+
+Cold initialization runs the four original-episode-funded validation phases described in [authority bindings](AUTHORITY-BINDINGS.md). One complete canonical replay validates schema, journal, projections, policy source bytes and the latest immutable control anchor. The clock writer then reuses that verified proof. Charges retain the conservative two-pass replay ceiling. A new eligible episode still pays for its accepted binding and source validation before joining a cache entry.
+
+The private, nonserialized proof retains current state, its latest immutable anchor, the tail receipt and preceding state, verified request identities, byte totals and the next temporal boundary. It does not retain every historical state. The journal alone constructs replay evidence. Reuse additionally requires the same owner, same SQLite external `data_version`, same audited connection write generation and a paid binding for the original episode.
+
+Session creation prepays at most 256 attempts as a durable `authorityValidation` work item under that episode's original allowance. The effective count can be lower when remaining byte/metadata headroom is smaller. Each attempted check consumes one private counter before eligibility inspection, including stale, cancelled, failed and throwing checks. There is no per-hit request-ID map or allowance replenishment. An exact creation retry returns the retained original count, charge and consumed counter. A lost, evicted or restarted private handle cannot be reconstructed from the durable work row as fresh permission.
+
+Default limits are four active sessions, 16 MiB of retained canonical proof/binding bytes and 4,096 source-proof descriptors. Lower-only internal limits can refuse initialization. Finished handles retain at most 64 private tombstones; durable charges survive their eviction. Canonical byte limits bound represented evidence, not total Swift heap allocation or physical process memory.
+
+Accounting bootstrap includes ledger and binding inspection needed to reserve, arm and settle work. Per-episode work/snapshot aggregates can scan up to the existing 100,000-work cap. The inherited unsupported-adapter quarantine lookup can also scan the global work inventory without an inspected-row bound. These bootstrap scans are outside the fixed session metadata prepayment; complete setup inspected-row metering remains unfinished and must be closed before live consumer enablement. Warm checks avoid these scans. Resource counters do not measure every SQLite byte, physical I/O or CPU instruction.
+
+## Warm acceptance fence
+
+Each check requires the exact original owner and lease object. Its independent continuous-clock/cancellation fence is captured once during creation; a replacement lease cannot clear Stop. Indexed episode/session lifecycle reads check active state, clock domain, original deadline and armed work without repeating the aggregate ledger scan.
+
+The owner mutex and `BEGIN IMMEDIATE` fence external writes while checking eligibility. Fixed-point control/tail probes inspect digests, types and byte lengths without reading original source payloads or replaying the journal. A trusted clock writer coalesces pure version-2 time observations, preserving immutable receipts and cached source evidence. Pure-time footprint updates use retained byte deltas. Unknown same-connection writes, failed transactions and external version changes invalidate reuse. Ledger-only accounting and append-only invocation chunks have narrowly audited write manifests; ordinary source/event append remains a conservative invalidation.
+
+A policy transition already due before the check requires an additional funded maintenance phase. Its receipt settles after the actual clock transaction; failure retains the charge. A committed transition invalidates the accepted epoch and denies the callback. If time crosses a new policy boundary after the first checkpoint, acceptance refuses before doing unfunded maintenance. A subsequent explicitly funded check must establish fresh eligibility. Immediately before the callback, the acceptance transaction refreshes wall time, checks original Stop/deadline again and performs any prepaid pure-clock advancement. A returned proof is published only after successful commit; callback failure cannot donate a rolled-back proof.
+
+Authority mutation and managed acceptance reject reentry from inside the callback. Callbacks in this component's checks are bounded synthetic counters. Launching a real processor, exposing a source page, accepting a visible chunk or publishing a derivative still requires complete input/dependency proof and the corresponding consumer contract in [authority gates](AUTHORITY-GATES.md).
+
+## Cancellation and remaining work
+
+Cold journal/source traversal checks the original cancellation/deadline fence during replay and source hashing. SQLite VM and bounded busy-lock waits consult the independent fence without reentering the owner. Cold replay still holds the owner mutex; an outside-owner snapshot/init seam and service concurrency remain unfinished.
+
+The isolated cache/session suite covers repeated paid hits, count exhaustion/retry, UTF-8 identities, owner/lease rejection, source replacement/growth and edit/revert races, unknown owner writes, external write fencing, pure-clock equivalence, temporal expiry/activation, late boundaries, callback rollback, reentrant mutation, Stop/deadline/lock interruption, quotas and restart refusal. It reports fixed booleans and captured source hashes. These contracts establish no representative latency, whole-pipeline cache savings or production-readiness result. Current verified counts and the frozen application record are in [STATUS.md](STATUS.md).

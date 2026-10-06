@@ -11,7 +11,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
-    "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityBindingJournal.swift",
+    "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityBindingJournal.swift",
     "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "ContextAssembler.swift",
     "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "BackgroundIndexBudgetChecks.swift",
     "BackgroundIndexLedgerChecks.swift", "MeteredRetrieval.swift", "SemanticIndex.swift",

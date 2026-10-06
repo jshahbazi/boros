@@ -48,6 +48,9 @@ final class EpisodeLease: @unchecked Sendable {
     init(ledger: EpisodeLedger, episodeID: String, clock: EpisodeClockSource = SystemEpisodeClock()) {
         self.ledger = ledger; self.episodeID = episodeID; self.clock = clock
     }
+    /// Owner identity prevents a different store's same-ID lease donating a clock or cancellation capability.
+    func isOwned(by owner: EpisodeLedger) -> Bool { ObjectIdentifier(ledger) == ObjectIdentifier(owner) }
+
     func checkActive() throws -> EpisodeReceipt {
         if let reason = progressCancellationReason() { throw reason }
         let receipt = try ledger.episodeReceipt(id: episodeID, clock: clock.now())

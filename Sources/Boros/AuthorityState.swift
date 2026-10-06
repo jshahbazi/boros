@@ -214,7 +214,8 @@ enum AuthorityStateKernel {
         let after=try reduce(before,request:request,database:database)
         return try record(database,before:before,after:after,request:request,kind:"mutation",origin:authority.origin.rawValue,requestID:request.requestID)
     }
-    static func reduce(_ before:AuthorityStateSnapshot,request:AuthorityOperationRequest,database:OpaquePointer) throws -> AuthorityStateSnapshot {
+    static func reduce(_ before:AuthorityStateSnapshot,request:AuthorityOperationRequest,database:OpaquePointer,progress:AuthorityValidationProgress?=nil) throws -> AuthorityStateSnapshot {
+        try progress?()
         try validateRequest(request); guard request.expectedRevision == before.revision else { throw AuthorityStateError.staleRevision }
         var state=before
         func taskIndex() throws -> Int {
@@ -251,7 +252,7 @@ enum AuthorityStateKernel {
             }
         case .policyPropose,.policySet,.policySupersede:
             guard let id=request.policyID,let definition=request.policy else { throw AuthorityStateError.invalid }
-            try validateDefinition(definition,state:state,database:database)
+            try validateDefinition(definition,state:state,database:database,progress:progress)
             let existing=state.policies.firstIndex(where:{episodeIdentifierEqual($0.id,id)})
             if let i=existing {
                 guard request.operation == .policySet,!terminal(state.policies[i].state),request.expectedPolicyRevision == state.policies[i].revision else { throw AuthorityStateError.conflict }
@@ -272,7 +273,7 @@ enum AuthorityStateKernel {
             guard request.expectedPolicyRevision == state.policies[i].revision else { throw AuthorityStateError.staleRevision }
             guard !terminal(state.policies[i].state) else { throw AuthorityStateError.conflict }
             if request.operation == .policyRevoke { state.policies[i].state = .revoked }
-            else { try validateDefinition(state.policies[i].definition,state:state,database:database); state.policies[i].state=activation(state.policies[i].definition,at:state.timeHighWater) }
+            else { try validateDefinition(state.policies[i].definition,state:state,database:database,progress:progress); state.policies[i].state=activation(state.policies[i].definition,at:state.timeHighWater) }
             try increment(&state.policies[i].revision)
         }
         guard state.tasks.count <= maximumRecords,state.bindings.count <= maximumRecords,state.policies.count <= maximumRecords else { throw AuthorityStateError.limit }
@@ -281,9 +282,10 @@ enum AuthorityStateKernel {
     }
     static func terminal(_ state:AuthorityPolicyState)->Bool { state == .expired || state == .revoked || state == .superseded }
     static func activation(_ definition:AuthorityPolicyDefinition,at:Int64)->AuthorityPolicyState { definition.effectiveFrom > at ? .scheduled : .active }
-    static func expireAndActivate(_ state:inout AuthorityStateSnapshot) throws -> Bool {
+    static func expireAndActivate(_ state:inout AuthorityStateSnapshot,progress:AuthorityValidationProgress?=nil) throws -> Bool {
         var changed=false
         for i in state.policies.indices where !terminal(state.policies[i].state) {
+            try progress?()
             let d=state.policies[i].definition
             if let expiry=d.expiresAt,expiry <= state.timeHighWater { state.policies[i].state = .expired; try increment(&state.policies[i].revision); changed=true }
             else if state.policies[i].state == .scheduled,d.effectiveFrom <= state.timeHighWater { state.policies[i].state = .active; try increment(&state.policies[i].revision); changed=true }
@@ -305,7 +307,8 @@ enum AuthorityStateKernel {
         for id in [request.taskID,request.projectID,request.conversationID,request.policyID].compactMap({$0})+request.supersedesPolicyIDs { try identifier(id) }
         guard Set(request.supersedesPolicyIDs.map { Data($0.utf8) }).count == request.supersedesPolicyIDs.count,request.expectedTaskRevision.map({$0 >= 0}) ?? true,request.expectedPolicyRevision.map({$0 >= 0}) ?? true,(try canonical(request)).count <= 65536 else { throw AuthorityStateError.invalid }
     }
-    static func validateDefinition(_ d:AuthorityPolicyDefinition,state:AuthorityStateSnapshot,database:OpaquePointer) throws {
+    static func validateDefinition(_ d:AuthorityPolicyDefinition,state:AuthorityStateSnapshot,database:OpaquePointer,progress:AuthorityValidationProgress?=nil) throws {
+        try progress?()
         guard !d.rule.isEmpty,d.rule.utf8.count <= 256,!d.rule.utf8.contains(0),d.value.utf8.count <= 8192,d.effectiveFrom >= 0,d.expiresAt.map({$0 > d.effectiveFrom && $0 > state.timeHighWater}) ?? true,d.sources.count <= 16 else { throw AuthorityStateError.invalid }
         switch d.scope.kind {
         case .global: guard d.scope.projectID == nil,d.scope.taskID == nil,!d.untilTaskComplete else { throw AuthorityStateError.invalid }
@@ -313,13 +316,15 @@ enum AuthorityStateKernel {
         case .task: guard let project=d.scope.projectID,let task=d.scope.taskID,let record=state.tasks.first(where:{episodeIdentifierEqual($0.id,task)}),episodeIdentifierEqual(project,record.projectID),record.state == .active || record.state == .suspended else { throw AuthorityStateError.invalid }; try identifier(project); try identifier(task)
         }
         for span in d.sources {
+            try progress?()
             try identifier(span.eventID); try identifier(span.projectID); try identifier(span.conversationID)
             if let project=d.scope.projectID { guard episodeIdentifierEqual(span.projectID,project) else { throw AuthorityStateError.invalid } }
             guard span.offset >= 0,span.byteLength > 0,span.byteLength <= 4096 else { throw AuthorityStateError.invalid }
             let rows=try self.rows(database,"SELECT project_id,conversation_id,payload,digest,byte_count FROM events WHERE id=?",[.text(span.eventID)])
-            guard rows.count == 1,episodeIdentifierEqual(rows[0][0].string,span.projectID),episodeIdentifierEqual(rows[0][1].string,span.conversationID),let source=rows[0][2].bytes,source.count == rows[0][4].integer,String(data:source,encoding:.utf8) != nil,digest(source) == span.sourceSHA256,rows[0][3].string == span.sourceSHA256,span.offset <= source.count,span.byteLength <= source.count-span.offset else { throw AuthorityStateError.invalid }
+            guard rows.count == 1,episodeIdentifierEqual(rows[0][0].string,span.projectID),episodeIdentifierEqual(rows[0][1].string,span.conversationID),let source=rows[0][2].bytes,source.count == rows[0][4].integer,String(data:source,encoding:.utf8) != nil,try digest(source,progress:progress) == span.sourceSHA256,rows[0][3].string == span.sourceSHA256,span.offset <= source.count,span.byteLength <= source.count-span.offset else { throw AuthorityStateError.invalid }
             let excerpt=source.subdata(in:span.offset..<(span.offset+span.byteLength))
             guard String(data:source.prefix(span.offset),encoding:.utf8) != nil,String(data:excerpt,encoding:.utf8) != nil,digest(excerpt) == span.excerptSHA256 else { throw AuthorityStateError.invalid }
+            try progress?()
         }
     }
     @discardableResult
@@ -347,12 +352,18 @@ enum AuthorityStateKernel {
         let bytes=try canonical(state); guard bytes.count <= 4*1024*1024 else { throw AuthorityStateError.limit }
         try execute(database,"INSERT OR REPLACE INTO authority_control(id,payload,digest) VALUES(1,?,?)",[.bytes(bytes),.text(digest(bytes))])
     }
-    static func persist(_ database:OpaquePointer,state:AuthorityStateSnapshot) throws {
+    static func persist(_ database:OpaquePointer,state:AuthorityStateSnapshot,progress:AuthorityValidationProgress?=nil) throws {
+        try progress?()
         try persistControl(database,state:state)
+        try persistProjections(database,state:state,progress:progress)
+    }
+    static func persistProjections(_ database:OpaquePointer,state:AuthorityStateSnapshot,progress:AuthorityValidationProgress?=nil) throws {
+        try progress?()
         for table in ["authority_tasks","authority_bindings","authority_policies"] { try execute(database,"DELETE FROM "+table) }
-        for record in state.tasks { let bytes=try canonical(record); try execute(database,"INSERT INTO authority_tasks(id,payload,digest) VALUES(?,?,?)",[.text(record.id),.bytes(bytes),.text(digest(bytes))]) }
-        for record in state.bindings { let bytes=try canonical(record); try execute(database,"INSERT INTO authority_bindings(conversation_id,payload,digest) VALUES(?,?,?)",[.text(record.conversationID),.bytes(bytes),.text(digest(bytes))]) }
-        for record in state.policies { let bytes=try canonical(record); try execute(database,"INSERT INTO authority_policies(id,payload,digest) VALUES(?,?,?)",[.text(record.id),.bytes(bytes),.text(digest(bytes))]) }
+        for record in state.tasks { try progress?(); let bytes=try canonical(record); try execute(database,"INSERT INTO authority_tasks(id,payload,digest) VALUES(?,?,?)",[.text(record.id),.bytes(bytes),.text(digest(bytes))]) }
+        for record in state.bindings { try progress?(); let bytes=try canonical(record); try execute(database,"INSERT INTO authority_bindings(conversation_id,payload,digest) VALUES(?,?,?)",[.text(record.conversationID),.bytes(bytes),.text(digest(bytes))]) }
+        for record in state.policies { try progress?(); let bytes=try canonical(record); try execute(database,"INSERT INTO authority_policies(id,payload,digest) VALUES(?,?,?)",[.text(record.id),.bytes(bytes),.text(digest(bytes))]) }
+        try progress?()
     }
     static func identifier(_ value:String) throws { guard !value.isEmpty,value.utf8.count <= 256,!value.utf8.contains(0) else { throw AuthorityStateError.invalid } }
     static func increment(_ value:inout Int) throws { guard value >= 0,value < Int.max else { throw AuthorityStateError.limit }; value += 1 }
@@ -362,6 +373,16 @@ enum AuthorityStateKernel {
         do { let value=try JSONDecoder().decode(type,from:bytes); guard try canonical(value) == bytes else { throw AuthorityStateError.integrity }; return value } catch { throw AuthorityStateError.integrity }
     }
     static func digest(_ bytes:Data)->String { SHA256.hash(data:bytes).map { String(format:"%02x",$0) }.joined() }
+    static func digest(_ bytes:Data,progress:AuthorityValidationProgress?)throws->String {
+        guard let progress else { return digest(bytes) }
+        var hash=SHA256(),offset=0
+        while offset < bytes.count {
+            try progress()
+            let end=min(bytes.count,offset+4096)
+            hash.update(data:bytes.subdata(in:offset..<end)); offset=end
+        }
+        try progress(); return hash.finalize().map { String(format:"%02x",$0) }.joined()
+    }
     enum Value { case text(String),bytes(Data),integer(Int),null
         var isNull:Bool { if case .null=self { return true }; return false }
         var bytes:Data? { if case .bytes(let value)=self { return value }; return nil }

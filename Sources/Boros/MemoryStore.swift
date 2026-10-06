@@ -164,6 +164,16 @@ final class MemoryStore: @unchecked Sendable {
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private var activeSQLFence: EpisodeSQLFence?
     private let authorityValidationCheckpoint: ((String) throws -> Void)?
+    private let authorityCacheLimits: AuthorityValidationCacheLimits
+    private let authorityCacheCheckpoint: ((String, OpaquePointer) throws -> Void)?
+    private let authorityCacheWrites = AuthorityCacheWriteObserver()
+    private var authorityCache: AuthorityValidationCacheEntry?
+    private var authoritySessions: [Data: AuthorityValidationSession] = [:]
+    private var authoritySessionOrder: [Data] = []
+    private var authorityBoundaryDepth = 0
+    private var authorityFullReplays = 0
+    private var authoritySessionChecks = 0
+    private var authorityCacheHits = 0
     private var claimedBackgroundReaders = Set<Data>()
     private var completedBackgroundSeals = Set<Data>()
     private var completedBackgroundChunkReads = Set<Data>()
@@ -172,9 +182,13 @@ final class MemoryStore: @unchecked Sendable {
     private var backgroundMaterializedBytes = 0
 
     init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil,
-        authorityValidationCheckpoint: ((String) throws -> Void)? = nil) throws {
+        authorityValidationCheckpoint: ((String) throws -> Void)? = nil,
+        authorityCacheLimits: AuthorityValidationCacheLimits = .defaults,
+        authorityCacheCheckpoint: ((String, OpaquePointer) throws -> Void)? = nil) throws {
         self.directory = directory.standardizedFileURL
         self.authorityValidationCheckpoint = authorityValidationCheckpoint
+        self.authorityCacheLimits = try authorityCacheLimits.validated()
+        self.authorityCacheCheckpoint = authorityCacheCheckpoint
         do {
             try Self.prepareDirectory(self.directory)
             let lockPath = self.directory.appendingPathComponent("owner.lock").path
@@ -290,6 +304,7 @@ final class MemoryStore: @unchecked Sendable {
             try recoverInterruptedInvocations()
             try recoverInterruptedBackgroundWork()
             try secureSidecars()
+            if let database { try authorityCacheWrites.install(on: database) }
         } catch {
             if let database { sqlite3_close(database); self.database = nil }
             if ownerFD >= 0 { close(ownerFD); ownerFD = -1 }
@@ -298,7 +313,7 @@ final class MemoryStore: @unchecked Sendable {
     }
 
     deinit {
-        if let database { sqlite3_close(database) }
+        if let database { sqlite3_set_authorizer(database, nil, nil); sqlite3_close(database) }
         if ownerFD >= 0 { flock(ownerFD, LOCK_UN); close(ownerFD) }
     }
 
@@ -306,6 +321,7 @@ final class MemoryStore: @unchecked Sendable {
     /// activates policy/task mutations until shared control gates are wired.
     func authorityStateSnapshot(now: Int64? = nil) throws -> AuthorityStateSnapshot {
         try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
             guard let database else { throw MemoryError.database("closed owner") }
             if let now {
                 try transaction { try AuthorityStateKernel.advanceTime(database: database, now: now) }
@@ -317,6 +333,7 @@ final class MemoryStore: @unchecked Sendable {
     func applyAuthorityOperation(request: AuthorityOperationRequest, authority: AuthorityContext,
                                  now: Int64) throws -> AuthorityOperationReceipt {
         try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
             guard let database else { throw MemoryError.database("closed owner") }
             try AuthorityStateKernel.validateAuthority(database: database, authority: authority)
             // Expiry survives a rejected mutation. Both commits share the
@@ -335,6 +352,7 @@ final class MemoryStore: @unchecked Sendable {
         authority: AuthorityContext, taskIntent: HumanTaskIntent = .retainOrCreate,
         clock: EpisodeClockSnapshot) throws -> ManagedAcceptance {
         try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
             guard let database else { throw MemoryError.database("closed owner") }
             try AuthorityStateKernel.validateAuthority(database: database, authority: authority)
             try AuthorityStateKernel.identifier(requestID)
@@ -405,6 +423,7 @@ final class MemoryStore: @unchecked Sendable {
         limits: EpisodeLimits, authority: AuthorityContext, taskID: String? = nil,
         clock: EpisodeClockSnapshot) throws -> ManagedAcceptance {
         try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
             guard let database else { throw MemoryError.database("closed owner") }
             try AuthorityStateKernel.validateAuthority(database: database, authority: authority)
             let now = try authorityWallTime(clock)
@@ -463,7 +482,14 @@ final class MemoryStore: @unchecked Sendable {
     /// inspection phase is durably charged before its body runs. No public
     /// lease dispatch funds this validator; accounting stays owner-internal.
     func validateManagedAuthority(episodeID: String, clock: EpisodeClockSnapshot) throws -> AuthorityValidationReceipt {
+        try validateManagedAuthorityCore(episodeID: episodeID, clock: clock).receipt
+    }
+    private func validateManagedAuthorityCore(episodeID: String, clock: EpisodeClockSnapshot,
+        progress: AuthorityValidationProgress? = nil) throws -> (receipt: AuthorityValidationReceipt,
+        proof: AuthorityValidatedCurrent, binding: AuthorityEpisodeBinding, externalVersion: Int) {
         try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
+            let initialGeneration = authorityCacheWrites.generation
             guard let database else { throw MemoryError.database("closed owner") }
             var operations: [String] = [], charged = EpisodeResources.zero
             func phase<T>(_ name: String, _ resources: EpisodeResources, _ body: () throws -> T) throws -> T {
@@ -533,8 +559,8 @@ final class MemoryStore: @unchecked Sendable {
                 }
                 return (bytes, acceptedBytes)
             }
-            // Two complete journal/projection/source passes cover explicit
-            // validation plus the checkpoint's replay. Extra control reads are
+            // Retain the conservative two-pass replay ceiling. The validated
+            // checkpoint now reuses one complete proof; extra control reads are
             // covered separately. SQLite data_version fences the planned sizes
             // against another connection before any original payload is read.
             let passes = try EpisodeResources(rawSourceBytes: metadata.3).adding(EpisodeResources(rawSourceBytes: proofBytes.0))
@@ -550,23 +576,31 @@ final class MemoryStore: @unchecked Sendable {
                 let captured = try self.transaction {
                     guard try self.scalarInteger("PRAGMA data_version") == metadata.0,
                         let binding = try AuthorityBindings.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.staleRevision }
-                    let historical = try AuthorityStateJournal.resolve(database: database, receiptID: binding.controlReceiptID,
-                        revision: binding.authorityRevision, controlEpoch: binding.controlEpoch)
-                    try AuthorityStateKernel.advanceTime(database: database, now: now)
-                    return (historical, binding)
+                    guard authorityCacheWrites.generation == initialGeneration else { throw AuthorityStateError.staleRevision }
+                    if authorityFullReplays < Int.max { authorityFullReplays += 1 }
+                    let proof = try AuthorityStateJournal.validatedCurrent(database: database, progress: progress)
+                    let result = try withAuthorityCacheWrites(.validatedClock) {
+                        try AuthorityStateKernel.advanceTimeValidated(database: database, proof: proof,
+                            expectedControlSHA256: proof.controlSHA256, expectedTailReceiptSHA256: proof.tailReceiptSHA256,
+                            now: now, progress: progress)
+                    }
+                    guard authorityCacheWrites.generation == initialGeneration else { throw AuthorityStateError.staleRevision }
+                    return (proof.anchor, binding, result.proof)
                 }
                 // Expiry remains committed if the accepted binding is stale.
                 return try self.transaction {
                     guard try self.scalarInteger("PRAGMA data_version") == metadata.0,
                         let binding = try AuthorityBindings.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.staleRevision }
                     guard try AuthorityStateKernel.canonical(binding) == AuthorityStateKernel.canonical(captured.1) else { throw AuthorityStateError.staleRevision }
+                    guard authorityCacheWrites.generation == initialGeneration else { throw AuthorityStateError.staleRevision }
                     let state = try AuthorityStateKernel.snapshot(database: database)
                     guard episodeIdentifierEqual(state.storeID, binding.storeID), episodeIdentifierEqual(state.ownerID, binding.ownerID),
                         state.controlEpoch == binding.controlEpoch, state.revision == binding.authorityRevision,
                         try AuthorityBindings.resolutionSHA256(state: state, projectID: binding.projectID, taskID: binding.taskID) == binding.resolutionSHA256,
                         try !state.resolvedPolicies(projectID: binding.projectID, taskID: binding.taskID).blocked else { throw AuthorityStateError.staleRevision }
                     try AuthorityBindings.validateEpisode(database: database, binding: binding, verifySourceBytes: true, historical: captured.0)
-                    return (state, binding)
+                    try progress?()
+                    return (state, binding, captured.2)
                 }
             }
             let live = try episodeReceipt(id: episodeID, clock: clock)
@@ -575,20 +609,290 @@ final class MemoryStore: @unchecked Sendable {
                 if live.state == .budgetExceeded { throw EpisodeBudgetError.exhausted }
                 throw EpisodeBudgetError.inactive
             }
-            return AuthorityValidationReceipt(episodeID: episodeID,
+            let receipt = AuthorityValidationReceipt(episodeID: episodeID,
                 episodeBindingSHA256: AuthorityStateKernel.digest(try AuthorityStateKernel.canonical(validated.1)),
                 controlEpoch: validated.0.controlEpoch, authorityRevision: validated.0.revision, operationIDs: operations, charged: charged)
+            guard authorityCacheWrites.generation == initialGeneration else { throw AuthorityStateError.staleRevision }
+            return (receipt, validated.2, validated.1, metadata.0)
         }
     }
+    /// Internal funded eligibility checks. Complete work/dependency proofs and
+    /// actual consumer dispatch/delivery contracts remain separate prerequisites.
+    func beginAuthorityValidationSession(lease: EpisodeLease, sessionID: String,
+        maximumAttempts: Int = 256) throws -> AuthorityValidationSessionReceipt {
+        try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
+            guard lease.isOwned(by: self) else { throw AuthorityStateError.unauthorized }
+            try AuthorityStateKernel.identifier(sessionID)
+            guard (1...authorityCacheLimits.maximumAttempts).contains(maximumAttempts) else { throw AuthorityStateError.invalid }
+            let key = Data(sessionID.utf8)
+            if let old = authoritySessions[key] {
+                guard episodeIdentifierEqual(old.episodeID, lease.episodeID), old.requestedAttempts == maximumAttempts else { throw EpisodeBudgetError.conflict }
+                return old.receipt
+            }
+            guard authoritySessions.values.filter({ !$0.finished }).count < authorityCacheLimits.maximumSessions,
+                let database else { throw AuthorityStateError.limit }
+            // A lost/evicted/restarted private counter cannot be reconstructed
+            // from a durable charge as fresh permission.
+            guard try query("SELECT id FROM episode_work WHERE id=?", [.text(sessionID)], map: { string($0, 0) }).isEmpty else { throw AuthorityStateError.unauthorized }
+            let fence = try lease.progressGuard()
+            let clock = try lease.clockSnapshot()
+            let entry: AuthorityValidationCacheEntry
+            let cached = authorityCache
+            if let cached, cached.generation == authorityCacheWrites.generation,
+                cached.externalVersion == (try scalarInteger("PRAGMA data_version")),
+                cached.bindings[Data(lease.episodeID.utf8)] != nil {
+                entry = cached
+            } else {
+                let validated = try withAuthorityCacheSQLFence(fence) {
+                    try validateManagedAuthorityCore(episodeID: lease.episodeID, clock: clock) {
+                        try self.authorityCacheCheckpoint?("cold-replay-progress", database)
+                        if let reason = fence.interruption() { throw reason }
+                    }
+                }
+                var bindings: [Data: AuthorityEpisodeBinding] = [:]
+                if let cached, cached.generation == authorityCacheWrites.generation,
+                    cached.externalVersion == validated.externalVersion,
+                    cached.proof.current.controlEpoch == validated.proof.current.controlEpoch,
+                    cached.proof.current.revision == validated.proof.current.revision {
+                    bindings = cached.bindings
+                }
+                bindings[Data(lease.episodeID.utf8)] = validated.binding
+                entry = try AuthorityValidationCacheEntry(proof: validated.proof, externalVersion: validated.externalVersion,
+                    generation: authorityCacheWrites.generation, bindings: bindings)
+                try entry.checkLimits(authorityCacheLimits)
+                guard authorityCacheWrites.canCache else { throw AuthorityStateError.limit }
+                authorityCache = entry
+            }
+            guard let binding = entry.bindings[Data(lease.episodeID.utf8)] else { throw AuthorityStateError.integrity }
+            // Pure clock work is prepaid for every permitted hit. Actual policy
+            // transitions need their own additional funded maintenance phase.
+            let ceiling = min(Self.maximumPayloadBytes, entry.proof.currentBytes + 2 * AuthorityStateKernel.maximumRecords + 64)
+            let rawPerAttempt = 4 * ceiling + entry.proof.tailReceiptBytes + 64
+            let metadataPerAttempt = 64
+            let original = try episodeReceipt(id: lease.episodeID, clock: clock)
+            let remaining = try original.limits.resources.subtracting(original.charged).subtracting(original.held)
+            let count = min(maximumAttempts, remaining.rawSourceBytes / rawPerAttempt,
+                max(0, remaining.metadataRows - 128) / metadataPerAttempt)
+            guard count > 0, remaining.memoryOperations >= 1 else { throw EpisodeBudgetError.exhausted }
+            let resources = EpisodeResources(memoryOperations: 1, rawSourceBytes: rawPerAttempt * count,
+                metadataRows: metadataPerAttempt * count + 128)
+            let bindingSHA = AuthorityStateKernel.digest(try AuthorityStateKernel.canonical(binding))
+            struct Descriptor: Encodable {
+                let version = "authority-validation-session-v1"
+                let episodeID: String
+                let bindingSHA256: String
+                let requestedAttempts: Int
+                let maximumAttempts: Int
+            }
+            let identity = "authority-validation-session-v1"
+            let request = EpisodeWorkRequest(id: sessionID, parentID: nil, kind: .authorityValidation,
+                resources: resources, adapterIdentity: identity,
+                snapshot: try AuthorityStateKernel.canonical(Descriptor(episodeID: lease.episodeID,
+                    bindingSHA256: bindingSHA, requestedAttempts: maximumAttempts, maximumAttempts: count)), inputTokensKnown: true)
+            try withAuthorityCacheWrites(.ledger) {
+                let work = try prepareManagedWork(episodeID: lease.episodeID, request: request,
+                    route: AuthorityLocalRoute(kind: .localMemory, identity: identity), clock: clock)
+                _ = try armEpisodeWorkLocked(episodeID: lease.episodeID, operationID: work.id,
+                    expectedRevision: work.revision, clock: clock, managedValidation: true)
+            }
+            guard entry.generation == authorityCacheWrites.generation else { throw AuthorityStateError.staleRevision }
+            let session = AuthorityValidationSession(id: sessionID, episodeID: lease.episodeID,
+                maximumAttempts: count, requestedAttempts: maximumAttempts, lease: lease, fence: fence,
+                bindingSHA256: bindingSHA, generation: entry.generation, resources: resources)
+            authoritySessions[key] = session; authoritySessionOrder.append(key)
+            trimAuthoritySessionTombstones()
+            return session.receipt
+        }
+    }
+
+    func authorityValidationSessionReceipt(sessionID: String) throws -> AuthorityValidationSessionReceipt {
+        try locked {
+            guard let session = authoritySessions[Data(sessionID.utf8)] else { throw AuthorityStateError.missing }
+            return session.receipt
+        }
+    }
+
+    func withAuthorityValidationSession<T>(sessionID: String, lease: EpisodeLease,
+        _ body: () throws -> T) throws -> T {
+        try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
+            guard let session = authoritySessions[Data(sessionID.utf8)], !session.finished else { throw AuthorityStateError.unauthorized }
+            guard session.attemptsUsed < session.maximumAttempts else { throw EpisodeBudgetError.exhausted }
+            session.attemptsUsed += 1
+            if authoritySessionChecks < Int.max { authoritySessionChecks += 1 }
+            guard lease.isOwned(by: self), ObjectIdentifier(lease) == session.leaseIdentity,
+                episodeIdentifierEqual(lease.episodeID, session.episodeID) else { throw AuthorityStateError.unauthorized }
+            guard let database, let entry = authorityCache,
+                entry.generation == session.generation, entry.generation == authorityCacheWrites.generation,
+                entry.bindings[Data(session.episodeID.utf8)] != nil else { throw AuthorityStateError.staleRevision }
+            if let reason = session.fence.interruption() { throw reason }
+            try self.authorityCacheCheckpoint?("before-session-fence", database)
+            if let reason = session.fence.interruption() { throw reason }
+            let now = try authorityWallTime(lease.clockSnapshot())
+            let due = entry.proof.nextTemporalBoundary.map { now >= $0 } ?? false
+            // Clock changes commit before eligibility rejection or delivery.
+            func advance() throws -> AuthorityValidatedClockResult {
+                try withAuthorityCacheSQLFence(session.fence) {
+                    try transaction {
+                        try checkAuthoritySessionWitness(entry, database: database)
+                        try checkAuthoritySessionLifecycle(session, lease: lease)
+                        return try withAuthorityCacheWrites(.validatedClock) {
+                            try AuthorityStateKernel.advanceTimeValidated(database: database, proof: entry.proof,
+                                expectedControlSHA256: entry.proof.controlSHA256,
+                                expectedTailReceiptSHA256: entry.proof.tailReceiptSHA256, now: now) {
+                                if let reason = session.fence.interruption() { throw reason }
+                            }
+                        }
+                    }
+                }
+            }
+            let advanced: AuthorityValidatedClockResult
+            if due {
+                // Reserve before BEGIN IMMEDIATE and settle after the actual
+                // maintenance transaction. Failure retains the funded charge.
+                let rows = entry.proof.current.tasks.count + entry.proof.current.bindings.count + entry.proof.current.policies.count
+                let resources = EpisodeResources(memoryOperations: 1, rawSourceBytes: 8 * Self.maximumPayloadBytes,
+                    metadataRows: 2 * rows + 64)
+                advanced = try withAuthorityCacheSQLFence(session.fence) {
+                    try authorityValidationPhase(episodeID: session.episodeID, name: "cached-temporal-maintenance",
+                        resources: resources, clock: lease.clockSnapshot(), advance).0
+                }
+            } else { advanced = try advance() }
+            entry.proof = advanced.proof
+            do { try entry.checkLimits(authorityCacheLimits) }
+            catch { authorityCache = nil; authorityCacheWrites.invalidate(); throw error }
+            if advanced.changed {
+                authorityCache = nil; authorityCacheWrites.invalidate()
+                try self.authorityCacheCheckpoint?("session-stale", database)
+                throw AuthorityStateError.staleRevision
+            }
+            try self.authorityCacheCheckpoint?("pure-clock-advance", database)
+            let accepted = try withAuthorityCacheSQLFence(session.fence) {
+                try transaction {
+                    try checkAuthoritySessionWitness(entry, database: database)
+                    try checkAuthoritySessionLifecycle(session, lease: lease)
+                    let proof = entry.proof
+                    guard let binding = entry.bindings[Data(session.episodeID.utf8)],
+                        binding.controlEpoch == proof.current.controlEpoch, binding.authorityRevision == proof.current.revision,
+                        episodeIdentifierEqual(binding.controlReceiptID, proof.anchor.receipt.requestID),
+                        episodeIdentifierEqual(binding.startupReceiptID, proof.anchor.startupReceiptID) else { throw AuthorityStateError.staleRevision }
+                    try self.authorityCacheCheckpoint?("before-session-acceptance", database)
+                    try checkAuthoritySessionWitness(entry, database: database)
+                    if let reason = session.fence.interruption() { throw reason }
+                    // Time can cross a policy boundary between the committed
+                    // clock checkpoint and this acceptance fence. That newly
+                    // due transition has no prepaid maintenance allowance;
+                    // refuse acceptance so a separately funded check can run.
+                    let acceptanceTime = try authorityWallTime(lease.clockSnapshot())
+                    guard proof.nextTemporalBoundary.map({ acceptanceTime < $0 }) ?? true else {
+                        throw AuthorityStateError.staleRevision
+                    }
+                    let refreshed = try withAuthorityCacheWrites(.validatedClock) {
+                        try AuthorityStateKernel.advanceTimeValidated(database: database, proof: proof,
+                            expectedControlSHA256: proof.controlSHA256,
+                            expectedTailReceiptSHA256: proof.tailReceiptSHA256, now: acceptanceTime) {
+                            if let reason = session.fence.interruption() { throw reason }
+                        }
+                    }
+                    guard !refreshed.changed else { throw AuthorityStateError.staleRevision }
+                    try entry.checkLimits(authorityCacheLimits, candidate: refreshed.proof)
+                    authorityBoundaryDepth += 1
+                    defer { authorityBoundaryDepth -= 1 }
+                    if authorityCacheHits < Int.max { authorityCacheHits += 1 }
+                    return (try body(), refreshed.proof)
+                }
+            }
+            // A thrown callback or failed COMMIT cannot publish a rolled-back
+            // clock proof as the next owner cache witness.
+            entry.proof = accepted.1
+            return accepted.0
+        }
+    }
+
+    func finishAuthorityValidationSession(sessionID: String, lease: EpisodeLease) throws {
+        try locked {
+            guard authorityBoundaryDepth == 0 else { throw AuthorityValidationCacheError.reentrant }
+            guard let session = authoritySessions[Data(sessionID.utf8)], lease.isOwned(by: self),
+                episodeIdentifierEqual(lease.episodeID, session.episodeID) else { throw AuthorityStateError.unauthorized }
+            if session.finished { return }
+            _ = try settleEpisodeWork(episodeID: session.episodeID, operationID: session.id,
+                settlement: EpisodeWorkSettlement(receiptID: UUID().uuidString.lowercased(), outcome: .completed,
+                    observed: nil, evidence: nil), clock: lease.clockSnapshot())
+            session.finished = true
+            if !authoritySessions.values.contains(where: { !$0.finished && episodeIdentifierEqual($0.episodeID, session.episodeID) }) {
+                authorityCache?.bindings.removeValue(forKey: Data(session.episodeID.utf8))
+            }
+            trimAuthoritySessionTombstones()
+        }
+    }
+
+    func authorityValidationCacheDiagnostics() -> AuthorityValidationCacheDiagnostics {
+        mutex.lock(); defer { mutex.unlock() }
+        return AuthorityValidationCacheDiagnostics(fullReplays: authorityFullReplays, sessionChecks: authoritySessionChecks,
+            cacheHits: authorityCacheHits, invalidations: authorityCacheWrites.invalidations,
+            sourcePayloadStatements: authorityCacheWrites.sourcePayloadStatements)
+    }
+
+    private func checkAuthoritySessionWitness(_ entry: AuthorityValidationCacheEntry, database: OpaquePointer) throws {
+        guard authorityCacheWrites.canCache, entry.generation == authorityCacheWrites.generation,
+            try scalarInteger("PRAGMA data_version") == entry.externalVersion else {
+            authorityCache = nil; authorityCacheWrites.invalidate()
+            throw AuthorityStateError.staleRevision
+        }
+    }
+    private func checkAuthoritySessionLifecycle(_ session: AuthorityValidationSession, lease: EpisodeLease) throws {
+        guard let database else { throw AuthorityStateError.integrity }
+        let clock = try lease.clockSnapshot(); try validateEpisodeClock(clock)
+        let row = try AuthorityStateKernel.rows(database,
+            "SELECT state,clock_domain,deadline_ticks,last_ticks FROM episodes WHERE id=?", [.text(session.episodeID)])
+        guard row.count == 1 else { throw AuthorityStateError.integrity }
+        if row[0][0].string == EpisodeState.deadlineExceeded.rawValue { throw EpisodeBudgetError.deadlineExceeded }
+        if row[0][0].string == EpisodeState.budgetExceeded.rawValue { throw EpisodeBudgetError.exhausted }
+        guard row[0][0].string == EpisodeState.active.rawValue else { throw EpisodeBudgetError.inactive }
+        guard row[0][2].integer > 0, row[0][3].integer > 0,
+            episodeIdentifierEqual(row[0][1].string, clock.domain), clock.continuousNanoseconds >= UInt64(row[0][3].integer) else { throw EpisodeBudgetError.clockUnavailable }
+        guard clock.continuousNanoseconds < UInt64(row[0][2].integer) else { throw EpisodeBudgetError.deadlineExceeded }
+        let work = try AuthorityStateKernel.rows(database, "SELECT state,episode_id FROM episode_work WHERE id=?", [.text(session.id)])
+        guard work.count == 1, work[0][0].string == EpisodeWorkState.dispatchArmed.rawValue,
+            episodeIdentifierEqual(work[0][1].string, session.episodeID) else { throw EpisodeBudgetError.inactive }
+        try withAuthorityCacheWrites(.ledger) {
+            try execute("UPDATE episodes SET last_ticks=? WHERE id=?", [.integer(Int(clock.continuousNanoseconds)), .text(session.episodeID)])
+        }
+    }
+    private func withAuthorityCacheSQLFence<T>(_ fence: EpisodeSQLFence, _ body: () throws -> T) throws -> T {
+        guard let database else { throw AuthorityStateError.integrity }
+        let previous = activeSQLFence; activeSQLFence = fence
+        sqlite3_busy_handler(database, { pointer, attempts in
+            guard let pointer, attempts < 5000 else { return 0 }
+            let fence = Unmanaged<EpisodeSQLFence>.fromOpaque(pointer).takeUnretainedValue()
+            guard fence.interruption() == nil else { return 0 }
+            usleep(1000)
+            return 1
+        }, Unmanaged.passUnretained(fence).toOpaque())
+        defer { sqlite3_busy_timeout(database, 5000); activeSQLFence = previous }
+        return try fence.perform(on: database, restoring: previous, body)
+    }
+    private func trimAuthoritySessionTombstones() {
+        var finished = authoritySessionOrder.filter { authoritySessions[$0]?.finished == true }
+        while finished.count > 64 {
+            let key = finished.removeFirst(); authoritySessions.removeValue(forKey: key)
+            authoritySessionOrder.removeAll { $0 == key }
+        }
+    }
+
     private func authorityValidationPhase<T>(episodeID: String, name: String, resources: EpisodeResources,
         clock: EpisodeClockSnapshot, _ body: () throws -> T) throws -> (T, EpisodeWorkRecord) {
         let identity = "authority-validation-v1:" + name
         let request = EpisodeWorkRequest(id: UUID().uuidString.lowercased(), parentID: nil, kind: .authorityValidation,
             resources: resources, adapterIdentity: identity, snapshot: nil, inputTokensKnown: true)
-        let work = try prepareManagedWork(episodeID: episodeID, request: request,
-            route: AuthorityLocalRoute(kind: .localMemory, identity: identity), clock: clock)
-        _ = try armEpisodeWorkLocked(episodeID: episodeID, operationID: work.id,
-            expectedRevision: work.revision, clock: clock, managedValidation: true)
+        let work = try withAuthorityCacheWrites(.ledger) {
+            let work = try prepareManagedWork(episodeID: episodeID, request: request,
+                route: AuthorityLocalRoute(kind: .localMemory, identity: identity), clock: clock)
+            _ = try armEpisodeWorkLocked(episodeID: episodeID, operationID: work.id,
+                expectedRevision: work.revision, clock: clock, managedValidation: true)
+            return work
+        }
         do {
             try authorityValidationCheckpoint?(name)
             let result = try body()
@@ -903,7 +1207,7 @@ final class MemoryStore: @unchecked Sendable {
     /// grows contiguously, and identifies exactly one nonempty UTF-8 chunk.
     /// An identical retry is safe even after finalization; new late chunks fail.
     func appendInvocationChunk(invocationID: String, sequence: Int, text: String) throws -> InvocationChunkReceipt {
-        try locked {
+        try authorityChunkLocked {
             try validateIdentifier(invocationID, name: "invocation ID")
             guard (0..<Self.maximumStreamChunks).contains(sequence) else { throw MemoryError.invalid("stream chunk sequence is outside the supported limit") }
             let payload = try validatePayload(text)
@@ -1317,10 +1621,26 @@ final class MemoryStore: @unchecked Sendable {
         guard let pointer = sqlite3_column_blob(statement, column) else { return Data() }
         return Data(bytes: pointer, count: Int(sqlite3_column_bytes(statement, column)))
     }
+    private func withAuthorityCacheWrites<T>(_ manifest: AuthorityCacheWriteObserver.Manifest,
+        _ body: () throws -> T) rethrows -> T {
+        let previous = authorityCacheWrites.manifest
+        authorityCacheWrites.manifest = manifest
+        defer { authorityCacheWrites.manifest = previous }
+        return try body()
+    }
+    private func authorityLedgerLocked<T>(_ body: () throws -> T) throws -> T {
+        try locked { try withAuthorityCacheWrites(.ledger, body) }
+    }
+    private func authorityLedgerTransaction<T>(_ body: () throws -> T) throws -> T {
+        try withAuthorityCacheWrites(.ledger) { try transaction(body) }
+    }
+    private func authorityChunkLocked<T>(_ body: () throws -> T) throws -> T {
+        try locked { try withAuthorityCacheWrites(.chunks, body) }
+    }
     private func transaction<T>(_ body: () throws -> T) throws -> T {
         try execute("BEGIN IMMEDIATE")
         do { let result = try body(); try execute("COMMIT"); return result }
-        catch { try? execute("ROLLBACK"); throw error }
+        catch { try? execute("ROLLBACK"); authorityCacheWrites.invalidate(); throw error }
     }
     private func locked<T>(_ body: () throws -> T) throws -> T {
         mutex.lock(); defer { mutex.unlock() }
@@ -1708,7 +2028,7 @@ extension MemoryStore: EpisodeLedger {
     }
     private func reserveEpisodeWorkCore(episodeID: String, request: EpisodeWorkRequest, clock: EpisodeClockSnapshot,
         authorityBinding: AuthorityWorkBinding?) throws -> EpisodeWorkRecord {
-        try locked {
+        try authorityLedgerLocked {
             let clock = try episodeRuntimeClock(clock)
             try validateEpisodeClock(clock)
             for id in [episodeID, request.id] { try validateIdentifier(id, name: "episode work identifier") }
@@ -1823,7 +2143,7 @@ extension MemoryStore: EpisodeLedger {
     private func armEpisodeWorkLocked(episodeID: String, operationID: String, expectedRevision: Int, clock: EpisodeClockSnapshot, managedValidation: Bool = false) throws -> EpisodeWorkRecord {
         let clock = try episodeRuntimeClock(clock)
         var failure: EpisodeBudgetError?
-        try transaction {
+        try authorityLedgerTransaction {
             guard let episode = try findEpisode(episodeID), let work = try findEpisodeWork(operationID), episodeIdentifierEqual(work.episodeID, episodeID) else { throw MemoryError.missing("episode work") }
             guard let database else { throw MemoryError.database("closed owner") }
             if try AuthorityBindingJournal.managedWork(database: database, id: operationID) != nil {
@@ -1872,7 +2192,7 @@ extension MemoryStore: EpisodeLedger {
     }
 
     func settleEpisodeWork(episodeID: String, operationID: String, settlement: EpisodeWorkSettlement, clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord {
-        try locked {
+        try authorityLedgerLocked {
             let clock = try episodeRuntimeClock(clock)
             try validateEpisodeClock(clock)
             for id in [episodeID, operationID, settlement.receiptID] { try validateIdentifier(id, name: "episode receipt identifier") }
@@ -1959,7 +2279,7 @@ extension MemoryStore: EpisodeLedger {
         }
     }
     func finishEpisode(episodeID: String, reason: EpisodeState, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt {
-        try locked {
+        try authorityLedgerLocked {
             let clock = try episodeRuntimeClock(clock)
             try validateIdentifier(episodeID, name: "episode ID"); try validateEpisodeClock(clock)
             guard reason != .active else { throw EpisodeBudgetError.invalid }
@@ -1975,7 +2295,7 @@ extension MemoryStore: EpisodeLedger {
         }
     }
     func episodeReceipt(id: String, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt {
-        try locked {
+        try authorityLedgerLocked {
             let clock = try episodeRuntimeClock(clock)
             try validateIdentifier(id, name: "episode ID"); try validateEpisodeClock(clock)
             try transaction {
