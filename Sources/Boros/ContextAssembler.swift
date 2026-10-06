@@ -148,12 +148,16 @@ struct ContextSnapshot {
         if let componentAuditJSON { value["components"] = try JSONSerialization.jsonObject(with: componentAuditJSON) }
         if let selectionWorkID { value["selection_work_id"] = selectionWorkID }
         var bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
-        if bytes.count > 32768, var retrieval = value["retrieval"] as? [String: Any], retrieval.removeValue(forKey: "selection_trace") != nil {
-            retrieval["selection_trace_omitted"] = "metadata_limit"
-            value["retrieval"] = retrieval
-            bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        if bytes.count > 32768, var retrieval = value["retrieval"] as? [String: Any] {
+            for key in ["selection_trace", "exchange_expansion"] where bytes.count > 32768 {
+                guard retrieval.removeValue(forKey: key) != nil else { continue }
+                retrieval[key + "_omitted"] = "metadata_limit"
+                value["retrieval"] = retrieval
+                bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+            }
             if bytes.count > 32768 {
                 retrieval.removeValue(forKey: "selection_trace_omitted")
+                retrieval.removeValue(forKey: "exchange_expansion_omitted")
                 value["retrieval"] = retrieval
                 bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
             }
@@ -441,6 +445,7 @@ enum ContextAssembler {
         maximumEvidenceBytes: Int = 12000,
         historicalMatching: LexicalMatchMode = .allTerms,
         historicalHits: [MemoryHit]? = nil,
+        expandFollowingAssistant: Bool = false,
         episodeLease: EpisodeLease? = nil,
         operationIsNested: Bool = false
     ) throws -> ContextSnapshot {
@@ -488,18 +493,26 @@ enum ContextAssembler {
             var evidence: [MemoryHit] = []
             var evidenceText = ""
             var lexicalReport: MeteredLexicalReport?
+            var exchangeAudit: [String: Any]?
             if maximumEvidenceBytes > 0, historicalHits != nil || historicalQuery?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
                 let excluded = ExactSourceIDs(selected.map(\.id) + [excludingEventID].compactMap { $0 })
-                let hits: [MemoryHit]
+                var hits: [MemoryHit]
+                let expansionFrontier: Int? = expandFollowingAssistant ? try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1) { try store.sourceFrontier(projectID: projectID) } : nil
                 if let historicalHits { hits = historicalHits }
                 else if let episodeLease {
                     let report = try MeteredRetrieval.lexicalSearch(store: store, query: historicalQuery ?? "", projectID: projectID,
-                        limit: 16, matching: historicalMatching, excludingSourceIDs: excluded, lease: episodeLease, nested: true)
+                        limit: 16, matching: historicalMatching, throughSequence: expansionFrontier, excludingSourceIDs: excluded, lease: episodeLease, nested: true)
                     try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
                     lexicalReport = report; hits = report.hits
                 } else {
                     hits = try store.search(query: historicalQuery ?? "", projectID: projectID, limit: 16,
-                        matching: historicalMatching, excludingSourceIDs: excluded)
+                        matching: historicalMatching, throughSequence: expansionFrontier, excludingSourceIDs: excluded)
+                }
+                if let expansionFrontier {
+                    let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+                        primaryHits: hits, sourceFrontier: expansionFrontier, excludingSourceIDs: excluded,
+                        episodeLease: episodeLease, operationIsNested: true)
+                    hits = expanded.hits; exchangeAudit = expanded.audit
                 }
                 for hit in hits where !excluded.contains(hit.eventID) {
                     // Supplied semantic/raw results cannot turn a stale or foreign
@@ -549,6 +562,11 @@ enum ContextAssembler {
                 if !lexicalReport.candidateWindowComplete || lexicalReport.candidateWindowFull {
                     snapshot.retrievalNotice = "Archive recall inspected a bounded lexical candidate window; additional evidence may remain."
                 }
+            }
+            if let exchangeAudit {
+                var audit = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                audit["exchange_expansion"] = exchangeAudit
+                snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
             }
             return snapshot
         }

@@ -144,6 +144,8 @@ enum RetrievalStrategyChecks {
             checks["strategy_recent_only_terminal_lease_cannot_renew_preparation"] = error is EpisodeBudgetError
                 && untouched.charged == terminal.charged && untouched.held == terminal.held
         }
+        checks.merge(HistoricalQueryChecks.run()) { _, latest in latest }
+        checks.merge(try anchorSelectionChecks()) { _, latest in latest }
         checks.merge(try directTraceChecks()) { _, latest in latest }
         return checks
     }
@@ -393,9 +395,59 @@ enum RetrievalStrategyChecks {
         baselineCore.removeValue(forKey: "retrieval"); trimmedCore.removeValue(forKey: "retrieval")
         checks["strategy_trace_overflow_preserves_original_selection_body_and_core_admission_audit"] = try canonical(baselineCore) == canonical(trimmedCore)
             && expanded.selectionDigest() == selected.selectionDigest() && expanded.serializedMessages() == selected.serializedMessages()
+        expandedRetrieval["exchange_expansion"] = ["synthetic_padding": String(repeating: "y", count: 33000)]
+        expanded.retrievalAuditJSON = try canonical(expandedRetrieval)
+        let exchangeTrimmed = try object(expanded.deliveryAudit())
+        let exchangeRetrieval = exchangeTrimmed["retrieval"] as? [String: Any] ?? [:]
+        var exchangeCore = exchangeTrimmed; exchangeCore.removeValue(forKey: "retrieval")
+        checks["strategy_exchange_trace_overflow_preserves_core_with_explicit_omission"] = try exchangeRetrieval["exchange_expansion"] == nil
+            && exchangeRetrieval["exchange_expansion_omitted"] as? String == "metadata_limit"
+            && canonical(exchangeCore) == canonical(baselineCore)
         let traceBytes = try canonical(selectedTrace)
         checks["strategy_trace_contains_metadata_without_query_or_source_text"] = traceBytes.range(of: Data(prompt.utf8)) == nil
             && traceBytes.range(of: Data(small.text.utf8)) == nil && traceBytes.range(of: Data(recentSource.text.utf8)) == nil
+        return checks
+    }
+    private static func anchorSelectionChecks() throws -> [String: Bool] {
+        let directory = try fixtureDirectory(prefix: "boros-anchor-selection-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory), project = "synthetic-anchor-selection"
+        let chat = try store.createConversation(projectID: project, title: "Synthetic current")
+        let archive = try store.createConversation(projectID: project, title: "Synthetic archive")
+        let first = try append(store, archive.id, "anchor-first-human", "rivet lattice requested configuration")
+        let reply = try append(store, archive.id, "anchor-first-assistant", "The archived setting is copper.", role: .assistant)
+        let second = try append(store, archive.id, "anchor-second-human", "cobalt thimble requested configuration")
+        let secondReply = try append(store, archive.id, "anchor-second-assistant", "The other archived setting is spruce.", role: .assistant, status: .partial)
+        let prompt = "Quote exactly first nonempty line trim whitespace of reply to \"rivet lattice\" and \"cobalt thimble\" return JSON answer citations"
+        let clock = Clock(), episodeID = UUID().uuidString, currentID = "anchor-current"
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "anchor-current-turn",
+            humanEventID: currentID, episodeID: episodeID, text: prompt, limits: EpisodeLimits(), clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
+        let recent = try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
+            prompt: prompt, system: "Synthetic host", excludingEventID: currentID, episodeLease: lease)
+        let before = try lease.checkActive()
+        let selected = try ChatContextPreparation.prepareEvidence(recent: recent, store: store, conversationID: chat.id,
+            projectID: project, prompt: prompt, excludingEventID: currentID, episodeLease: lease)
+        let after = try lease.checkActive(), audit = try object(selected.retrievalAuditJSON!)
+        let expanded = audit["exchange_expansion"] as? [String: Any] ?? [:]
+        let ids = ExactSourceIDs(selected.evidence.map(\.eventID))
+        let checks: [String: Bool] = [
+            "strategy_quoted_anchors_recover_both_original_replies_through_shared_selection": ids.count == 4
+                && [first, reply, second, secondReply].allSatisfy { ids.contains($0.id) },
+            "strategy_adjacent_reply_retains_exact_bytes_role_status_and_range": selected.evidence.contains {
+                $0.eventID == secondReply.id && $0.role == .assistant && $0.status == .partial && $0.excerptOffset == 0
+                    && $0.digest == secondReply.digest && $0.excerpt.utf8.elementsEqual(secondReply.text.utf8)
+            },
+            "strategy_anchor_and_neighbor_work_charged_to_original_episode": after.id == episodeID
+                && after.charged.memoryOperations == before.charged.memoryOperations + 1
+                && after.charged.rawSourceBytes > before.charged.rawSourceBytes && after.charged.metadataRows > before.charged.metadataRows,
+            "strategy_adjacent_selection_audit_reports_two_bounded_additions": expanded["version"] as? String == "following-assistant-prefix-v2"
+                && expanded["added_neighbor_count"] as? Int == 2 && expanded["dropped_primary_count"] as? Int == 0,
+            "strategy_quoted_query_trace_binds_selected_originals": try validTrace(selected,
+                query: "rivet cobalt lattice thimble quote exactly first nonempty", indices: [10, 13, 11, 14, 0, 1, 2, 3],
+                originals: [first, reply, second, secondReply])
+        ]
+        _ = try lease.finish(reason: .cancelled)
         return checks
     }
     private static func hit(_ source: MemoryEvent) -> MemoryHit {
@@ -419,7 +471,7 @@ enum RetrievalStrategyChecks {
     private static func validTrace(_ snapshot: ContextSnapshot, query: String, indices: [Int], originals: [MemoryEvent]) throws -> Bool {
         let value = try trace(snapshot)
         guard value["version"] as? String == "historical-selection-trace-v1",
-              value["lexical_query_version"] as? String == "prefix-eight-nonfiller-v1",
+              value["lexical_query_version"] as? String == HistoricalQueryFormulation.version,
               value["lexical_query_sha256"] as? String == ContextSnapshot.digest(Data(query.utf8)),
               value["lexical_term_count"] as? Int == indices.count, value["lexical_selected_token_indices"] as? [Int] == indices,
               let count = value["candidate_count"] as? Int, let candidates = value["candidates"] as? [[String: Any]],

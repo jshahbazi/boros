@@ -1256,10 +1256,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let other = try store.append(conversationID: otherChat.id, role: .human,
             text: "The heliostat retry delay is ninety seconds.", status: .complete,
             turnID: UUID().uuidString, eventID: UUID().uuidString)
+        var firstFollowing: MemoryEvent?
         for index in 0..<32 {
-            _ = try store.append(conversationID: chat.id, role: .assistant,
+            let following = try store.append(conversationID: chat.id, role: .assistant,
                 text: "Synthetic unrelated work log \(index): " + String(repeating: "x", count: 1024), status: .complete,
                 turnID: UUID().uuidString, eventID: UUID().uuidString)
+            if index == 0 { firstFollowing = following }
         }
         let prompt = "What did we decide about heliostat retry delays?"
         let previousChat = activeChat
@@ -1299,7 +1301,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let fillerQuestion = try prepare("Please could you tell me what it was that we decided about the heliostat retry delays?")
         checks["send_stopword_heavy_question_recalls_source"] = fillerQuestion.evidence.contains { $0.eventID == old.id }
         let operatorQuestion = try prepare("heliostat\" OR *")
-        checks["send_search_operators_remain_data"] = operatorQuestion.evidence.map(\.eventID) == [old.id]
+        checks["send_search_operators_remain_data"] = operatorQuestion.evidence.map(\.eventID) == [old.id, firstFollowing!.id]
+            && HistoricalQueryFormulation.formulate("heliostat\" OR *").query == "heliostat"
             && operatorQuestion.messages.last?.content == "heliostat\" OR *"
         checks["manual_search_still_requires_all_terms"] = try store.search(query: "heliostat absentneedle", projectID: projectID).isEmpty
         let longPrompt = prompt + " " + (0..<80).map { "topic\($0)" }.joined(separator: " ") + " " + String(repeating: "z", count: 4097)
@@ -1313,7 +1316,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let repeatedPrompt = String(repeating: "heliostat ", count: 80)
         let repeatedSnapshot = try prepare(repeatedPrompt)
         checks["send_repeated_query_terms_are_bounded"] = repeatedSnapshot.messages.last?.content == repeatedPrompt
-            && repeatedSnapshot.evidence.map(\.eventID) == [old.id]
+            && repeatedSnapshot.evidence.map(\.eventID) == [old.id, firstFollowing!.id]
+            && HistoricalQueryFormulation.formulate(repeatedPrompt).query == "heliostat"
         return checks
     }
 
@@ -2149,7 +2153,7 @@ private enum BonsaiPlayground {
         if let code = AnswerEvaluationCommand.run(arguments: CommandLine.arguments) { exit(code) }
         if CommandLine.arguments.contains("--retrieval-strategy-self-test") {
             do {
-                let checks = try RetrievalStrategyChecks.run()
+                let checks = try RetrievalStrategyChecks.run().merging(ExchangeExpansionChecks.run()) { _, latest in latest }
                 print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
                 exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"retrieval_strategy_self_test\":false}"); exit(1) }

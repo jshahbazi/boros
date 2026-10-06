@@ -457,7 +457,13 @@ enum ComponentPreparationChecks {
                         checks[prefix + "_token_reduced_recent_source_eligible"] = prepared.snapshot.recentSourceIDs == ["fixture-pipeline-recent-6"]
                             && prepared.snapshot.evidence.map(\.eventID) == [droppedSourceID]
                             && prepared.snapshot.selectionAudit?.recentTokenExcludedCount == 6
-                            && prepared.snapshot.selectionAudit?.evidenceTokenExcludedCount == 5
+                            && prepared.snapshot.selectionAudit?.evidenceTokenExcludedCount == 6
+                        let retrieval = try prepared.snapshot.retrievalAuditJSON.map { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? nil
+                        let expansion = retrieval?["exchange_expansion"] as? [String: Any]
+                        let trace = retrieval?["selection_trace"] as? [String: Any]
+                        checks[prefix + "_following_source_was_counted_then_removed_under_same_caps"] = expansion?["added_neighbor_count"] as? Int == 1
+                            && trace?["candidate_count"] as? Int == 7 && prepared.snapshot.evidence.count == 1
+                            && !prepared.snapshot.evidence.contains { $0.eventID == "fixture-pipeline-recent-1" }
                         checks[prefix + "_geometric_underfilled_caps_declared"] = proof.recent.tokens == 4000 && proof.evidence.tokens == 5000
                             && proof.wholePrompt.tokens == 9100
                     case .envelope:

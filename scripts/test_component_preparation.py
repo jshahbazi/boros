@@ -171,7 +171,7 @@ def main():
             checks["component_preparation_fixture_observed_recent_geometric_counts"] = all(
                 value in OBSERVED["recent_counts"] for value in (28000, 12000, 4000, 8000))
             checks["component_preparation_fixture_observed_evidence_geometric_counts"] = all(
-                value in OBSERVED["evidence_counts"] for value in (30000, 15000, 5000, 12000))
+                value in OBSERVED["evidence_counts"] for value in (35000, 15000, 5000, 12000))
             checks["component_preparation_fixture_observed_whole_recount"] = all(
                 value in OBSERVED["full_counts"] for value in (100, 9100, 4100, 20100))
         failed = [name for name, passed in checks.items() if passed is not True]

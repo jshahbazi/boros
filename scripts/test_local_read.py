@@ -40,7 +40,7 @@ def main():
         binary = scratch / "local-read-checks"
         sources = [ROOT / "Sources/Boros" / name for name in (
             "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift",
-            "MeteredRetrieval.swift", "ContextAssembler.swift", "SemanticIndex.swift", "BackgroundIndexWorker.swift", "ChatContextPreparation.swift", "ContextRetrievalStrategy.swift",
+            "MeteredRetrieval.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "SemanticIndex.swift", "BackgroundIndexWorker.swift", "ChatContextPreparation.swift", "ContextRetrievalStrategy.swift",
             "LocalReadCoordinator.swift", "LocalReadChecks.swift", "ReadCoverageChecks.swift")]
         subprocess.run(["/usr/bin/swiftc", "-swift-version", "5", "-I", str(ROOT / "Sources/CSQLite"),
                         "-framework", "NaturalLanguage", "-o", str(binary), *map(str, sources), str(harness)], check=True)

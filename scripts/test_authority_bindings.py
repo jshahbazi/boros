@@ -15,7 +15,7 @@ SOURCES = (
     "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift",
     "AuthorityBindingJournal.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingChecks.swift", "BackgroundIndexBudget.swift",
     "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift",
-    "ContextSourceFraming.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
+    "ContextSourceFraming.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
     "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift",
 )
 HARNESS = r'''

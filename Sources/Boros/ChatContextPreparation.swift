@@ -26,7 +26,7 @@ enum ChatContextPreparation {
             guard let semanticIndex else {
                 var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                     prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                    historicalQuery: lexical, historicalMatching: .anyTerm, episodeLease: episodeLease, operationIsNested: true)
+                    historicalQuery: lexical, historicalMatching: .anyTerm, expandFollowingAssistant: true, episodeLease: episodeLease, operationIsNested: true)
                 try appendAudit(to: &snapshot, fields: ["mode": "lexical", "semantic_available": false])
                 if snapshot.retrievalNotice == nil { snapshot.retrievalNotice = "Archive recall used lexical search; semantic recall is unavailable." }
                 return snapshot
@@ -51,7 +51,7 @@ enum ChatContextPreparation {
                 // Raw lexical fallback is revalidated by the same assembler.
                 var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                     prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                    historicalQuery: lexical, historicalMatching: .anyTerm, episodeLease: episodeLease, operationIsNested: true)
+                    historicalQuery: lexical, historicalMatching: .anyTerm, expandFollowingAssistant: true, episodeLease: episodeLease, operationIsNested: true)
                 try appendAudit(to: &snapshot, fields: ["mode": "lexical_fallback",
                     "semantic_available": false, "failure": "semantic_search_failed"])
                 if snapshot.retrievalNotice == nil { snapshot.retrievalNotice = "Semantic recall failed; archive recall used lexical search." }
@@ -60,9 +60,13 @@ enum ChatContextPreparation {
             try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease,
                 resourceLimited: report.manifest.meteredLexicalCoverage?.continuation != nil
                     || report.manifest.meteredLiteralCoverage?.incompleteReason == "raw_source_budget")
+            let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+                primaryHits: report.hits, sourceFrontier: report.manifest.sourceFrontier,
+                excludingSourceIDs: ExactSourceIDs(recent.recentSourceIDs + [excludingEventID]),
+                episodeLease: episodeLease, operationIsNested: true)
             var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                 prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                historicalHits: report.hits, episodeLease: episodeLease, operationIsNested: true)
+                historicalHits: expanded.hits, episodeLease: episodeLease, operationIsNested: true)
             snapshot.retrievalManifestID = report.manifestID
             snapshot.retrievalManifestJSON = try report.serializedManifest()
             let coverage = report.manifest.coverage
@@ -88,7 +92,8 @@ enum ChatContextPreparation {
                 audit["candidate_window_complete"] = lexicalCoverage.candidateWindowComplete
                 audit["raw_continuation_available"] = lexicalCoverage.continuation != nil
             }
-            snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
+            audit["exchange_expansion"] = expanded.audit
+            try appendAudit(to: &snapshot, fields: audit)
             if report.manifest.queryDisposition != "supported" {
                 snapshot.retrievalNotice = "This request used lexical archive recall; semantic recall does not support its text."
             } else if !coverage.complete || report.manifest.vectorContinuation != nil || report.manifest.meteredLexicalCoverage?.candidateWindowComplete == false || report.manifest.meteredLexicalCoverage?.candidateWindowFull == true {
@@ -114,28 +119,34 @@ enum ChatContextPreparation {
             if retrievalStrategy == .recentOnly {
                 return try recentOnlySnapshot(recent)
             }
-            let formulation = formulateHistoricalQuery(prompt)
+            let formulation = HistoricalQueryFormulation.formulate(prompt)
             let lexical = formulation.query
             let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
             func lexicalSnapshot(fallback: Bool) throws -> ContextSnapshot {
                 let hits: [MemoryHit]
                 var raw: MeteredLexicalReport?
+                var frontier = 0
                 if let lexical {
                     if let episodeLease {
                         let report = try MeteredRetrieval.lexicalSearch(store: store, query: lexical, projectID: projectID,
                             limit: ContextAssembler.componentMaximumEvidenceSpans, matching: .anyTerm,
                             excludingSourceIDs: excluded, lease: episodeLease, nested: true)
                         try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
-                        raw = report; hits = report.hits
+                        raw = report; hits = report.hits; frontier = report.sourceFrontier
                     } else {
+                        frontier = try store.sourceFrontier(projectID: projectID)
                         hits = try store.search(query: lexical, projectID: projectID, limit: ContextAssembler.componentMaximumEvidenceSpans,
-                            matching: .anyTerm, excludingSourceIDs: excluded)
+                            matching: .anyTerm, throughSequence: frontier, excludingSourceIDs: excluded)
                     }
                 } else { hits = [] }
+                let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+                    primaryHits: hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
+                    episodeLease: episodeLease, operationIsNested: true)
                 var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
-                    projectID: projectID, excludingEventID: excludingEventID, historicalHits: hits,
+                    projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
                     episodeLease: episodeLease, operationIsNested: true)
                 var fields: [String: Any] = ["mode": fallback ? "lexical_fallback" : "lexical", "semantic_available": false]
+                fields["exchange_expansion"] = expanded.audit
                 if fallback { fields["failure"] = "semantic_search_failed" }
                 if let raw {
                     fields["raw_work_version"] = "raw_work_v1"; fields["source_frontier"] = raw.sourceFrontier
@@ -168,8 +179,11 @@ enum ChatContextPreparation {
             try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease,
                 resourceLimited: report.manifest.meteredLexicalCoverage?.continuation != nil
                     || report.manifest.meteredLiteralCoverage?.incompleteReason == "raw_source_budget")
+            let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+                primaryHits: report.hits, sourceFrontier: report.manifest.sourceFrontier, excludingSourceIDs: excluded,
+                episodeLease: episodeLease, operationIsNested: true)
             var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
-                projectID: projectID, excludingEventID: excludingEventID, historicalHits: report.hits,
+                projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
                 episodeLease: episodeLease, operationIsNested: true)
             result.retrievalManifestID = report.manifestID
             result.retrievalManifestJSON = try report.serializedManifest()
@@ -193,6 +207,7 @@ enum ChatContextPreparation {
                 audit["inspected_candidates"] = raw.inspectedCandidates; audit["candidate_window_full"] = raw.candidateWindowFull
                 audit["candidate_window_complete"] = raw.candidateWindowComplete; audit["raw_continuation_available"] = raw.continuation != nil
             }
+            audit["exchange_expansion"] = expanded.audit
             try appendAudit(to: &result, fields: audit)
             try appendQueryTrace(to: &result, formulation: formulation)
             if report.manifest.queryDisposition != "supported" {
@@ -220,16 +235,12 @@ enum ChatContextPreparation {
         snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
     }
 
-    private struct QueryFormulation {
-        let query: String?
-        let selectedTokenIndices: [Int]
-    }
-
-    private static func appendQueryTrace(to snapshot: inout ContextSnapshot, formulation: QueryFormulation) throws {
+    private static func appendQueryTrace(to snapshot: inout ContextSnapshot, formulation: HistoricalQueryFormulation.Result) throws {
         var audit = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         var trace = audit["selection_trace"] as? [String: Any] ?? [:]
         trace["version"] = "historical-selection-trace-v1"
-        trace["lexical_query_version"] = "prefix-eight-nonfiller-v1"
+        trace["lexical_query_version"] = HistoricalQueryFormulation.version
+        trace["quoted_anchor_count"] = formulation.quotedAnchorCount
         trace["lexical_query_sha256"] = ContextSnapshot.digest(Data((formulation.query ?? "").utf8))
         trace["lexical_term_count"] = formulation.selectedTokenIndices.count
         trace["lexical_selected_token_indices"] = formulation.selectedTokenIndices
@@ -240,37 +251,6 @@ enum ChatContextPreparation {
     /// Keep at most eight unique non-filler terms, within the store's query
     /// limits. Operators and punctuation remain data; no raw FTS is accepted.
     /// Oversized terms are skipped so a valid long draft remains sendable.
-    private static func historicalQuery(_ prompt: String) -> String? { formulateHistoricalQuery(prompt).query }
+    private static func historicalQuery(_ prompt: String) -> String? { HistoricalQueryFormulation.formulate(prompt).query }
 
-    private static func formulateHistoricalQuery(_ prompt: String) -> QueryFormulation {
-        var selected: [String] = []
-        var indices: [Int] = []
-        var ordinal = 0
-        var seen: Set<String> = []
-        var bytes = 0
-        for raw in prompt.components(separatedBy: CharacterSet.alphanumerics.inverted) where !raw.isEmpty {
-            let position = ordinal; ordinal += 1
-            let term = raw.lowercased()
-            guard !stopwords.contains(term), !seen.contains(term), term.utf8.count <= 128 else { continue }
-            let nextBytes = bytes + term.utf8.count + (selected.isEmpty ? 0 : 1)
-            guard nextBytes <= 1024 else { continue }
-            selected.append(term)
-            indices.append(position)
-            seen.insert(term)
-            bytes = nextBytes
-            if selected.count == 8 { break }
-        }
-        return QueryFormulation(query: selected.isEmpty ? nil : selected.joined(separator: " "), selectedTokenIndices: indices)
-    }
-
-    private static let stopwords: Set<String> = [
-        "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can", "could",
-        "did", "do", "does", "doing", "for", "from", "had", "has", "have", "having", "he", "her",
-        "here", "hers", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its", "just",
-        "me", "more", "most", "my", "no", "not", "of", "on", "or", "our", "ours", "please",
-        "s", "say", "she", "should", "so", "some", "t", "tell", "than", "that", "the", "their",
-        "theirs", "them", "then", "there", "these", "they", "this", "those", "through", "to",
-        "too", "us", "was", "we", "were", "what", "when", "where", "which", "who", "why",
-        "will", "with", "would", "you", "your", "yours", "about"
-    ]
 }

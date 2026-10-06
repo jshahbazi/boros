@@ -22,7 +22,7 @@ SOURCES = (
     "AuthorityValidationCache.swift", "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift",
     "EpisodeAccountingJournal.swift", "EpisodeAccountingChecks.swift",
     "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift",
-    "QwenTextRendering.swift", "ContextSourceFraming.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
+    "QwenTextRendering.swift", "ContextSourceFraming.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
 )
 HARNESS = r'''
 import Foundation

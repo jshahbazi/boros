@@ -1143,6 +1143,24 @@ final class MemoryStore: @unchecked Sendable {
         }
     }
 
+    /// One immediate publication in the same conversation. Human boundaries
+    /// and excluded sources remain visible to the caller; this never skips
+    /// forward to locate an assistant or assumes an event-ID naming scheme.
+    func followingSourceReference(anchor: MemorySourceReference, throughSequence: Int) throws -> MemorySourceReference? {
+        try locked {
+            guard anchor.sequence > 0, throughSequence >= anchor.sequence,
+                  try sourceReference(eventID: anchor.eventID, projectID: anchor.projectID) == anchor else {
+                throw MemoryError.conflict("neighbor anchor metadata changed")
+            }
+            let next = try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count FROM events WHERE conversation_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT 1",
+                [.text(anchor.conversationID), .integer(anchor.sequence), .integer(throughSequence)], map: sourceReference).first
+            guard next == nil || episodeIdentifierEqual(next?.projectID, anchor.projectID) else {
+                throw MemoryError.database("neighbor source scope mismatch")
+            }
+            return next
+        }
+    }
+
     /// Metadata-only FTS candidates; callers reserve full-source work before loading any payload.
     /// Compatibility for callers that already supply Swift-set identity.
     func lexicalCandidateReferences(query: String, projectID: String, limit: Int = 8, matching: LexicalMatchMode = .allTerms, throughSequence: Int? = nil, excludingEventIDs: Set<String> = []) throws -> [MemorySourceReference] {

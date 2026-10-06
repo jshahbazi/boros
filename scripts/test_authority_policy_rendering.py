@@ -16,7 +16,7 @@ SOURCES = (
     "AuthorityBindings.swift", "AuthorityBindingJournal.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift",
     "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityPolicyRenderingChecks.swift",
     "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift",
-    "QwenTextRendering.swift", "ContextSourceFraming.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
+    "QwenTextRendering.swift", "ContextSourceFraming.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
 )
 HARNESS = r'''
 import Foundation

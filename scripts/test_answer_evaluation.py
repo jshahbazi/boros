@@ -27,15 +27,22 @@ e = importlib.util.module_from_spec(spec); spec.loader.exec_module(e)
 
 class Contracts(unittest.TestCase):
     def test_selection_trace_remains_structured_and_content_free(self):
-        trace = {"version": "historical-selection-trace-v1", "lexical_query_version": "prefix-eight-nonfiller-v1",
+        trace = {"version": "historical-selection-trace-v1", "lexical_query_version": "quoted-anchor-round-robin-v1", "quoted_anchor_count": 1,
                  "lexical_query_sha256": e.digest(b"synthetic query"), "lexical_term_count": 2,
                  "lexical_selected_token_indices": [1, 3], "candidate_count": 1, "trace_truncated": False,
                  "candidates": [{"event_id": "synthetic-public-source", "rank": 0, "offset": 0, "byte_length": 12}],
                  "assembly": [{"event_id": "synthetic-public-source", "rank": 0, "disposition": "included"}]}
-        data = {"retrieval": {"selection_trace": trace, "query_disposition": "codeLike"},
+        expansion = {"version": "following-assistant-prefix-v2", "source_frontier": 9, "primary_count": 1,
+                     "retained_primary_count": 1, "dropped_primary_count": 0, "added_neighbor_count": 1,
+                     "prefix_truncated_count": 0, "promoted_primary_count": 1, "decisions": [{"anchor_event_id": "synthetic-public-source",
+                         "neighbor_event_id": "synthetic-public-source", "disposition": "included_prefix",
+                         "excerpt_bytes": 12, "prefix_truncated": False},
+                         {"anchor_event_id": "synthetic-public-source", "disposition": "promoted_primary"}]}
+        data = {"retrieval": {"selection_trace": trace, "exchange_expansion": expansion, "query_disposition": "codeLike"},
                 "unexpected source text": "synthetic private conversation sentinel"}
         sanitized = e.content_free_metadata(data, frozenset({"synthetic-public-source"}))
         self.assertEqual(sanitized["retrieval"]["selection_trace"], trace)
+        self.assertEqual(sanitized["retrieval"]["exchange_expansion"], expansion)
         self.assertEqual(sanitized["retrieval"]["query_disposition"], "codeLike")
         encoded = json.dumps(sanitized)
         self.assertNotIn("synthetic private conversation sentinel", encoded)
