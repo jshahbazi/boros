@@ -117,7 +117,7 @@ enum BackupError: LocalizedError {
 }
 
 /// Archives contain a verified SQLite online snapshot, an optional independent
-/// point capture of nonsensitive settings.json, and an inventory manifest.
+/// point capture of private settings.json, and an inventory manifest.
 /// The explicit archive destination must not exist. All directories and files
 /// created here are private. Neither create nor restore replaces an item.
 enum BackupArchive {

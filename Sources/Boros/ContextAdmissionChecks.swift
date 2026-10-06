@@ -97,6 +97,28 @@ enum ContextAdmissionChecks {
         let loaded = LocalSettings.load(in: directory)
         checks["token_setting_migration_preserves_existing_selection"] = loaded.conversationID == "synthetic-existing-chat"
             && loaded.endpointModel == "synthetic-model" && loaded.endpointTokenBudget == nil
+        checks["instructions_migration_preserves_historical_default"] = loaded.systemInstructions == nil
+        var saved = loaded
+        let instructions = "  Synthetic café e\u{301}\r\nUse exact sources.\t\u{0}\n  "
+        saved.systemInstructions = instructions
+        try saved.save(in: directory)
+        let savedBytes = try Data(contentsOf: directory.appendingPathComponent("settings.json"))
+        checks["saved_instructions_preserve_exact_utf8"] = LocalSettings.load(in: directory).systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+        checks["saved_instructions_file_private"] = (try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("settings.json").path)[.posixPermissions] as? NSNumber)?.intValue == 0o600
+        saved.systemInstructions = String(repeating: "x", count: LocalSettings.maximumInstructionBytes + 1)
+        do { try saved.save(in: directory); checks["oversized_instructions_refused_without_replacing_settings"] = false }
+        catch { checks["oversized_instructions_refused_without_replacing_settings"] = try Data(contentsOf: directory.appendingPathComponent("settings.json")) == savedBytes }
+        saved.systemInstructions = "Synthetic bounded instructions"
+        saved.endpointModel = String(repeating: "x", count: LocalSettings.maximumEncodedBytes)
+        do { try saved.save(in: directory); checks["oversized_encoded_settings_refused_without_replacement"] = false }
+        catch { checks["oversized_encoded_settings_refused_without_replacement"] = try Data(contentsOf: directory.appendingPathComponent("settings.json")) == savedBytes }
+        saved = loaded; saved.systemInstructions = String(repeating: "\u{0}", count: LocalSettings.maximumInstructionBytes)
+        try saved.save(in: directory)
+        checks["maximal_json_escaping_remains_backuppable"] = try Data(contentsOf: directory.appendingPathComponent("settings.json")).count <= LocalSettings.maximumEncodedBytes
+            && LocalSettings.load(in: directory).systemInstructions.map { Data($0.utf8) } == Data(saved.systemInstructions!.utf8)
+        saved.systemInstructions = ""
+        try saved.save(in: directory)
+        checks["empty_saved_instructions_survive_reload"] = LocalSettings.load(in: directory).systemInstructions?.isEmpty == true
         checks.merge(try recentCandidateChecks(store: store, semantic: semantic)) { _, new in new }
         checks.merge(try meteredContextChecks(store: store)) { _, new in new }
         checks.merge(try meteredLiteralChecks(store: store)) { _, new in new }

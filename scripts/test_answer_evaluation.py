@@ -225,7 +225,9 @@ class NativeContracts(unittest.TestCase):
         cls.directory = Path(cls.temporary.name).resolve()
         fixture_spec = importlib.util.spec_from_file_location("answer_preparation_fixture", ROOT / "scripts/test_component_preparation.py")
         cls.fixture = importlib.util.module_from_spec(fixture_spec); fixture_spec.loader.exec_module(cls.fixture)
-        cls.observed = {"answers": 0, "prior_overlay_leaked": False}
+        cls.saved_instructions = "  Synthetic restored café e\u0301\r\nCite exact sources.\n  "
+        cls.observed = {"answers": 0, "prior_overlay_leaked": False, "saved_instruction_answers": 0}
+        saved_instructions = cls.saved_instructions
         observed, fixture = cls.observed, cls.fixture
         class Handler(fixture.Handler):
             def do_POST(self):
@@ -238,6 +240,9 @@ class NativeContracts(unittest.TestCase):
                             "usage": {"prompt_tokens": count, "completion_tokens": 1, "total_tokens": count + 1}})
                         return
                     observed["answers"] += 1
+                    messages = body.get("messages", [])
+                    if messages and messages[0].get("role") == "system" and messages[0].get("content", "").startswith(saved_instructions + "\n\n"):
+                        observed["saved_instruction_answers"] += 1
                     observed["prior_overlay_leaked"] |= any("controlledwronganswersentinel" in message.get("content", "") for message in body.get("messages", []))
                     chunks = [{"model": fixture.MODEL, "choices": [{"delta": {"content": "controlledwronganswersentinel"}, "finish_reason": None}]},
                               {"model": fixture.MODEL, "choices": [{"delta": {}, "finish_reason": "stop"}],
@@ -287,6 +292,9 @@ class NativeContracts(unittest.TestCase):
         checks = e.strict_json(process.stdout)
         self.assertTrue(process.returncode == 0 and isinstance(checks, dict) and bool(checks))
         self.assertTrue(all(type(value) is bool and value for value in checks.values()))
+        self.assertTrue(checks.get("gui_shared_saved_instructions_restored_at_launch") is True)
+        self.assertTrue(self.observed["saved_instruction_answers"] == 2)
+        self.assertTrue(self.saved_instructions.encode() not in process.stdout + process.stderr)
 
     def test_native_refuses_existing_output_unknown_fields_nondev_and_store(self):
         preserved = e.digest((self.output / "report.json").read_bytes())

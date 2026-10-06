@@ -1,6 +1,6 @@
 # Boros status and roadmap
 
-Updated October 5, 2026. Branch: `codex/boros-foundation`.
+Updated October 6, 2026. Branch: `codex/boros-foundation`.
 
 This is the planning index for Boros: available features, implementation gaps, recorded evidence, remaining design, and dependencies between next steps. Detailed contracts remain in the linked documents. TraceChat is the historical name of the original design and review.
 
@@ -8,19 +8,19 @@ Start with [next work](#6-dependency-ordered-next-work) and [open decisions](#8-
 
 ## 1. Current position
 
-Boros provides a native macOS chat application, durable accepted text, bounded recent context and historical evidence, source search and paging, local model integration, resource accounting, semantic maintenance, backup/restore, and public-chat ingestion. Reliable answering across long histories, representative performance, and total economics remain unproven.
+Boros provides a native macOS chat application, durable accepted text, bounded recent context and historical evidence, source search and paging, local model integration, resource accounting, semantic maintenance, backup/restore, and public-chat ingestion. The System editor now supports explicit saved instructions across restart. Reliable answering across long histories, representative performance, and total economics remain unproven.
 
 The design goal is evidence-backed continuity within bounded context and resource allowances. The summary tree is optional and must earn its place through comparison with the source-retrieval baseline. See [the product decision](../tracechat-plan.md#1-product-decision).
 
 | Snapshot | Status |
 |---|---|
-| Latest verified code wave | Funded bounded standing-policy preparation with complete selected records/source references and durable render charges; schema 9 retained; complete consumer proofs and live gates remain unfinished |
+| Latest verified code wave | Explicit saved System instructions restored on startup and verified in ordinary counted Send; private atomic preferences and backup preservation; schema 9 retained; scoped instruction integration and live managed gates remain unfinished |
 | Latest preceding evidence documentation | `9ea5c90`: traced failures and controlled long-chat results |
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
-| Latest recorded application verification | 3,094 checks passed against the optimized matching-source app; 105 focused policy/owner/process checks, 32 controlled native public-source checks and 245 backup/process checks passed; suite counts overlap |
+| Latest recorded application verification | 3,109 checks passed against the optimized matching-source app, including 100 UI, 150 context/settings, 229 backup and controlled real-Send answering checks; suite counts overlap |
 | Latest imported-chat result | Lexical, hybrid, and exact-page paths each recovered 12/12 selected answerable probes in warm and process-restart profiles |
 | Answering model | Configured Qwen completed the original pilot and all 24 DevGPT attempts on October 5; original failures retained, new run operationally complete |
-| Running GUI/build freshness | `.build/boros-policy-render-confirmed/Boros.app` rebuilt from the frozen Swift inputs; automated UI contracts passed. Controlled synthetic GUI success and streaming Stop were recorded at the preceding GUI checkpoint. The user's existing GUI process and final visual release walkthrough remain unverified |
+| Running GUI/build freshness | `.build/boros-instructions-final/Boros.app` rebuilt from matching frozen inputs; automated UI checks and controlled ordinary GUI Send/Stop passed with restored instructions. The user's existing GUI process and final visual release walkthrough remain unverified |
 | Shared answering work | Integrated and verified across ordinary GUI Send, explicit strategies and the public driver; paired live Qwen diagnostic completed |
 | Release state | Development application with local ad hoc signing; no production-readiness claim |
 
@@ -45,7 +45,7 @@ The design goal is evidence-backed continuity within bounded context and resourc
 |---|---|---|---|
 | Native chat interface | Available | AppKit transcript/editor, conversation picker, new chats, drafts, keyboard controls, undo/redo, streaming and Stop | Final visual recheck pending; automated UI evidence recorded separately |
 | Conversation continuity | Available | Stored conversations and drafts reopen after restart | GUI uses the `default` project; full project/task management UI unfinished |
-| Instruction/generation settings | Available | Editable instructions/settings and profile-specific controls | Does not implement scoped standing-policy lifecycle |
+| Instruction/generation settings | Available | Editable instructions/settings, explicit Save instructions with restart restoration, and profile-specific controls | Saved System text applies to future requests across chats/profiles in the local store; scoped standing-policy lifecycle remains unfinished |
 | Selected local HTTP model | Available | Configured Qwen through mlx-serve; structured role messages and explicit errors | Answering needs a running server; exact admission restricted to the verified combination below |
 | HTTP transport | Available | Loopback destinations, redirect refusal, bounded SSE, cancellation and incomplete-result handling | Client cancellation cannot establish immediate server compute cancellation; remote processing unavailable |
 | Credentials | Available | Optional API credentials in macOS Keychain | Excluded from history and archives |
@@ -161,6 +161,7 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 
 | Surface | Recorded result | Evidence boundary |
 |---|---|---|
+| Saved System instructions | 3,109 application checks passed; 100 UI, 150 context/settings and 229 backup checks include migration, exact UTF-8, clearing, bounds and failed-save preservation; real Send endpoint received restored instructions on success and Stop | Frozen 123 Sources/scripts/Tests files; actual counted request linkage and private backup restoration; no scoped instruction or model-following claim |
 | Bounded prepaid terminal cleanup | 3,012 application checks; 75 cleanup/process checks, 245 backup/process checks, nine genuine schema-8 writer checks and six full-schema freeze checks passed | Frozen 102-file Sources/scripts verification capture; bounded transaction work and durable failed-attempt charges; no representative performance or managed live-consumer claim |
 | Funded standing-policy preparation | 3,094 application checks, including 82 renderer/owner contracts; 105 focused checks include 23 genuine SIGKILL/two-restart checks | Frozen 105-file Sources/scripts capture; no token, complete input-proof, rebuild-anchor or live-consumer permission claim |
 | Indexed episode accounting (historical schema-8 checkpoint) | **2,932 application checks passed**; 141 focused accounting/process checks, 217 backup/process checks, seven genuine schema-7 writer checks and five full-schema checks; strict deep signature verification | Frozen 98-file Sources/scripts capture; atomic writes, complete reconstruction, confidence fencing and constant VM costs in tested inventories; terminal cleanup was unfinished at that checkpoint; schema 9 now implements it; live consumers remain unfinished |
@@ -181,7 +182,7 @@ The answering wave was rebuilt and tested on October 5, 2026. Older results reta
 | Historical live Qwen smoke | Two public arithmetic turns passed at `b006b6a` | Connectivity, admission, capture/accounting; no long-history quality evidence |
 | Frozen retrieval v4 | 224/224 eligible probes covered by lexical helper | Narrow synthetic development corpus, pinned old source, nil semantic index and no answerer |
 
-Latest verification record: `.build/evaluation/policy-render-wave-verification-20261005.json`. Verified bundle: `.build/boros-policy-render-confirmed/Boros.app`. Preceding cleanup record: `.build/evaluation/terminal-cleanup-wave-verification-20261005.json`. Preceding accounting record: `.build/evaluation/episode-accounting-wave-verification-20261005.json`. Preceding cache record: `.build/evaluation/authority-cache-wave-verification-20261005.json`. Preceding binding record: `.build/evaluation/authority-bindings-wave-verification-20261005.json`. Preceding clock record: `.build/evaluation/clock-checkpoint-wave-verification-20261005.json`. Preceding authority record: `.build/evaluation/authority-state-wave-verification-20261005.json`. Preceding framing record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
+Latest verification record: `.build/evaluation/saved-instructions-verification-20261006.json`. Verified bundle: `.build/boros-instructions-final/Boros.app`. Preceding policy record: `.build/evaluation/policy-render-wave-verification-20261005.json`. Preceding cleanup record: `.build/evaluation/terminal-cleanup-wave-verification-20261005.json`. Preceding accounting record: `.build/evaluation/episode-accounting-wave-verification-20261005.json`. Preceding cache record: `.build/evaluation/authority-cache-wave-verification-20261005.json`. Preceding binding record: `.build/evaluation/authority-bindings-wave-verification-20261005.json`. Preceding clock record: `.build/evaluation/clock-checkpoint-wave-verification-20261005.json`. Preceding authority record: `.build/evaluation/authority-state-wave-verification-20261005.json`. Preceding framing record: `.build/evaluation/recent-framing-wave-verification-20261005.json`. Previous developer verification: `.build/evaluation/devgpt-wave-verification-20261005.json`. Prior answering record: `.build/evaluation/answer-wave-verification-20261005.json`. Earlier retrieval log: `.build/evaluation/retrieval-fixes-clean-checks-final-20261005.log`. These are ignored local artifacts. Detailed older records are preserved in [the historical schema-5 status](STATUS-SCHEMA5-20261005.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and component documents.
 
 ### Durable authority-state foundation
 
@@ -214,6 +215,14 @@ The internal cache retains one paid current-state proof and immutable anchor, wi
 The frozen 94-file capture passed **2,779 application checks**, including **105 cache/session contracts**, strict deep signature verification, **32 controlled native public checks** (27 overlapping) and **225 / 113 / 193 episode, memory and backup process checks** (overlapping). The cache checks cover 256 paid hits, stale writes, external source replacement/growth/edit-revert, clock equivalence, temporal and late-boundary denial, failed maintenance receipts, callback rollback, reentry, Stop/deadline/busy-lock interruption, quotas and restart refusal. These establish bounded warm eligibility checks, not production latency or whole-pipeline cost savings.
 
 **Historical prerequisite after schema 8, now closed by schema 9:** ordinary setup uses validated indexed projections. Terminal cleanup now uses the separately prepaid, bounded contract below. Cold replay still holds the owner mutex. Complete actual input/dependency proof, counted policy integration, background bindings and consumer acceptance/delivery remain unfinished. See [cache/session contract](AUTHORITY-VALIDATION-CACHE.md).
+
+### Saved System instructions
+
+Show settings → System → Save instructions retains exact text for future ordinary requests in every chat/profile in the local store. Old settings keep the historical default; an explicit empty value removes custom instructions while the host's history framing remains. Unrelated preference saves retain the last explicitly saved value. Failed writes and oversized input leave the previous saved preference intact. The save ceilings are 128 KiB UTF-8 text and 1 MiB complete encoded settings, matching the archive file limit. Private staging receives `0600` permissions before atomic replacement.
+
+This closes the editor's restart-persistence gap. Scoped project/task instruction commands remain unfinished. Their next usable milestone must connect saved scoped instructions to ordinary answering, including request preparation, dispatch, visible output and cancellation; another standalone preparation artifact does not establish that integration.
+
+The matching optimized app passed **3,109 checks**, including **100 UI**, **150 context/settings** and **229 backup** checks. The controlled answering runner also passed its real GUI Send/Stop test: startup restored a saved exact instruction value, both durable counted request bodies matched the complete system text, and the endpoint received it on both actual answer requests. This proves transport integration; model obedience and scoped instruction enforcement remain unestablished. The **123-file Sources/scripts/Tests** capture matched the final source. Strict deep signature verification passed. Evidence: `.build/instructions-final-checks.jsonl` and `.build/evaluation/saved-instructions-verification-20261006.json`.
 
 ### Funded standing-policy preparation
 

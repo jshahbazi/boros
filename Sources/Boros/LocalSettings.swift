@@ -1,8 +1,10 @@
 import Foundation
+import Darwin
 import Security
 import LocalAuthentication
 
-/// Nonsensitive preferences only. Prompts, answers, and credentials have separate owners.
+/// Private UI preferences, including explicitly saved instructions. Accepted
+/// requests/answers belong to the application store; credentials use Keychain.
 struct LocalSettings: Codable {
     var conversationID: String?
     var endpointURL = "http://localhost:11234/v1/"
@@ -10,17 +12,32 @@ struct LocalSettings: Codable {
     var profile = ModelProfile.customLocal.rawValue
     // Optional so existing settings JSON retains its conversation selection.
     var endpointTokenBudget: Int?
+    // Missing keeps the historical default; empty deliberately clears it.
+    var systemInstructions: String?
+    static let maximumInstructionBytes = 131072
+    static let maximumEncodedBytes = 1048576
+    enum Failure: Error { case instructionsTooLarge, settingsTooLarge }
 
     static func load(in directory: URL) -> LocalSettings {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("settings.json")),
+              data.count <= maximumEncodedBytes,
               let settings = try? JSONDecoder().decode(LocalSettings.self, from: data) else { return LocalSettings() }
+        guard (settings.systemInstructions?.utf8.count ?? 0) <= maximumInstructionBytes else { return LocalSettings() }
         return settings
     }
 
     func save(in directory: URL) throws {
+        guard (systemInstructions?.utf8.count ?? 0) <= Self.maximumInstructionBytes else { throw Failure.instructionsTooLarge }
+        let bytes = try JSONEncoder().encode(self)
+        guard bytes.count <= Self.maximumEncodedBytes else { throw Failure.settingsTooLarge }
         let destination = directory.appendingPathComponent("settings.json")
-        try JSONEncoder().encode(self).write(to: destination, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        let staging = directory.appendingPathComponent(".settings-" + UUID().uuidString + ".tmp")
+        defer { try? FileManager.default.removeItem(at: staging) }
+        try bytes.write(to: staging, options: .withoutOverwriting)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.path)
+        // Set permissions before publication. No fallible step follows rename:
+        // a reported failure cannot replace the previously saved preference.
+        guard rename(staging.path, destination.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
     }
 }
 

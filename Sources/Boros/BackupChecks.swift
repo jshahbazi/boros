@@ -37,13 +37,18 @@ enum BackupChecks {
             humanEventID: empty.id, assistantEventID: "empty-assistant", providerIdentity: "native:synthetic", requestBody: body)
         try owner!.saveDraft(conversationID: first.id, text: "synthetic unsent draft café")
         try owner!.saveSetting(key: "synthetic-config", value: "synthetic preserved setting")
-        let fileSettings = Data("{\"endpointURL\":\"http://localhost:11234/v1/\",\"endpointModel\":\"synthetic-backup-model\",\"profile\":\"custom-local\"}".utf8)
+        let initialInstructions = " \tSynthetic saved instructions\r\nretain exact e\u{301} and café\0tail\n "
+        let fileSettings = try JSONSerialization.data(withJSONObject: ["endpointURL": "http://localhost:11234/v1/",
+            "endpointModel": "synthetic-backup-model", "profile": "custom-local", "systemInstructions": initialInstructions], options: [.sortedKeys])
         try privateWrite(fileSettings, at: directory.appendingPathComponent("settings.json"))
         try privateWrite(Data("derived synthetic vectors".utf8), at: directory.appendingPathComponent("semantic.sqlite3"))
         try privateWrite(Data("fake synthetic model data".utf8), at: directory.appendingPathComponent("model.gguf"))
 
         let archive = scratch.appendingPathComponent("archive", isDirectory: true)
-        let independentlyUpdatedSettings = Data("{\"endpointURL\":\"http://localhost:11234/v1/\",\"endpointModel\":\"synthetic-backup-model\",\"profile\":\"custom-local\",\"endpointTokenBudget\":64}".utf8)
+        let updatedInstructions = initialInstructions + "Synthetic independent settings update\n"
+        let independentlyUpdatedSettings = try JSONSerialization.data(withJSONObject: ["endpointURL": "http://localhost:11234/v1/",
+            "endpointModel": "synthetic-backup-model", "profile": "custom-local", "endpointTokenBudget": 64,
+            "systemInstructions": updatedInstructions], options: [.sortedKeys])
         var snapshotCallbacks = 0
         let manifest = try BackupArchive.create(from: owner!, at: archive, cancellation: {
             snapshotCallbacks += 1
@@ -75,6 +80,11 @@ enum BackupChecks {
         checks["restore_complete_exact_history_and_utf8_pages"] = try sources.first { $0.id == human.id }?.text == payload && paged(restoredOwner!, human.id) == Data(payload.utf8)
         checks["restore_draft_database_settings_and_file_settings"] = try restoredOwner!.loadDraft(conversationID: first.id) == "synthetic unsent draft café" && restoredOwner!.loadSetting(key: "synthetic-config") == "synthetic preserved setting" && Data(contentsOf: restored.appendingPathComponent("settings.json")) == independentlyUpdatedSettings
         checks["backup_independent_settings_point_capture_boundary"] = try restoredOwner!.loadDraft(conversationID: first.id) != owner!.loadDraft(conversationID: first.id) && Data(contentsOf: restored.appendingPathComponent("settings.json")) == independentlyUpdatedSettings
+        let restoredSettingsBytes = try Data(contentsOf: restored.appendingPathComponent("settings.json"))
+        let restoredSettingsObject = try JSONSerialization.jsonObject(with: restoredSettingsBytes) as? [String: Any]
+        checks["backup_restores_saved_instructions_exact_utf8"] = try restoredSettingsBytes == independentlyUpdatedSettings
+            && Data(contentsOf: archive.appendingPathComponent("settings.json")) == restoredSettingsBytes
+            && (restoredSettingsObject?["systemInstructions"] as? String).map { Data($0.utf8) } == Data(updatedInstructions.utf8)
         let complete = try restoredOwner!.invocation(id: "complete-attempt")!
         checks["restore_exact_request_admission_usage_journal"] = complete.requestBody == body && complete.admissionJSON == admission && complete.usageJSON == usage && complete.finalStatus == .complete && complete.chunkCount == 1
         let partial = try restoredOwner!.invocation(id: "interrupted-attempt")!

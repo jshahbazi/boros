@@ -35,6 +35,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var responseView: NSTextView!
     private let status = NSTextField(labelWithString: "Ready. Follow-ups include this conversation.")
     private let systemEditor = SystemPromptEditor(text: "Be helpful, concise, and accurate.")
+    private let saveInstructions = NSButton(title: "Save instructions", target: nil, action: nil)
     private let modelField = NSTextField(string: "")
     private let modelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     private let conversationSelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -241,7 +242,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         panel.detachesHiddenViews = true
         panel.alignment = .leading
         panel.spacing = 8
-        let systemRow = row([label("System"), systemEditor])
+        saveInstructions.target = self; saveInstructions.action = #selector(saveSystemInstructions)
+        saveInstructions.toolTip = "Keep these instructions after restart, for future requests in all chats in this local store. Clear the field and save to remove custom instructions."
+        let systemRow = row([label("System"), systemEditor, saveInstructions])
         panel.addArrangedSubview(systemRow)
         systemRow.widthAnchor.constraint(equalTo: panel.widthAnchor).isActive = true
         temperature.target = self; temperature.action = #selector(updateTemperature)
@@ -286,7 +289,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
             field.lineBreakMode = .byTruncatingMiddle
         }
-        settingsControls = [modelField, runtimeField, seedField, temperature,
+        settingsControls = [saveInstructions, modelField, runtimeField, seedField, temperature,
                             context, maximumOutput, thinking, thinkingBudget, samplingPreset, modelBrowse, runtimeBrowse]
         endpointField.delegate = self
         servedModelField.delegate = self
@@ -460,6 +463,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             initializeSemanticIndex(memory: memory)
             scheduleSemanticMaintenance()
             preferences = LocalSettings.load(in: memory.directory)
+            systemEditor.string = preferences.systemInstructions ?? GenerationSettings().system
             selectedProfile = ModelProfile(rawValue: preferences.profile) ?? .customLocal
             storedChats = try memory.listConversations(projectID: projectID)
             activeChat = storedChats.first(where: { $0.id == preferences.conversationID }) ?? storedChats.first
@@ -685,6 +689,21 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             savePreferences()
             if memoryHealthy { status.stringValue = "API settings saved. Credentials use macOS Keychain." }
         } catch { status.stringValue = "API settings could not be saved. Use a loopback HTTP address and an available Keychain." }
+    }
+
+    @objc private func saveSystemInstructions() {
+        guard !generating, memoryHealthy, let store else { return }
+        var candidate = preferences
+        candidate.systemInstructions = systemEditor.string
+        do {
+            try candidate.save(in: store.directory)
+            preferences = candidate
+            status.stringValue = "Instructions saved for future requests in all chats here."
+        } catch LocalSettings.Failure.instructionsTooLarge {
+            status.stringValue = "Instructions exceed the 128 KiB save limit. Shorten them before saving."
+        } catch {
+            status.stringValue = "Instructions could not be saved. Check the local data folder."
+        }
     }
 
     private func chooseFile(for field: NSTextField) {
@@ -1367,6 +1386,50 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         ]
     }
 
+    private func savedInstructionChecks(store: MemoryStore) throws -> [String: Bool] {
+        let originalPreferences = preferences, originalText = systemEditor.string
+        let destination = store.directory.appendingPathComponent("settings.json")
+        let originalBytes = try Data(contentsOf: destination)
+        defer {
+            preferences = originalPreferences; systemEditor.string = originalText
+            try? FileManager.default.removeItem(at: destination)
+            try? originalBytes.write(to: destination, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+        }
+        var checks: [String: Bool] = [:]
+        let instructions = "  Synthetic saved café e\u{301}\r\nCite exact sources.\n  "
+        systemEditor.string = instructions
+        saveSystemInstructions()
+        let persisted = LocalSettings.load(in: store.directory)
+        checks["gui_explicit_instruction_save_preserves_exact_utf8"] = persisted.systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+        systemEditor.string = "Synthetic unsaved replacement"
+        savePreferences()
+        checks["gui_unrelated_preference_save_keeps_saved_instructions"] = LocalSettings.load(in: store.directory).systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+        setGenerating(true)
+        saveSystemInstructions()
+        checks["gui_generation_disables_instruction_save"] = !saveInstructions.isEnabled
+            && LocalSettings.load(in: store.directory).systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+        setGenerating(false)
+        let savedBytes = try Data(contentsOf: destination)
+        try FileManager.default.removeItem(at: destination)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+        saveSystemInstructions()
+        checks["gui_failed_instruction_save_preserves_preferences"] = preferences.systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+            && status.stringValue == "Instructions could not be saved. Check the local data folder." && memoryHealthy
+        try FileManager.default.removeItem(at: destination)
+        try savedBytes.write(to: destination, options: .atomic)
+        savePreferences()
+        checks["gui_failed_instruction_save_cannot_leak_into_autosave"] = LocalSettings.load(in: store.directory).systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+        systemEditor.string = String(repeating: "x", count: LocalSettings.maximumInstructionBytes + 1)
+        saveSystemInstructions()
+        checks["gui_oversized_instruction_save_keeps_previous_text"] = LocalSettings.load(in: store.directory).systemInstructions.map { Data($0.utf8) } == Data(instructions.utf8)
+            && status.stringValue.contains("128 KiB")
+        systemEditor.string = ""
+        saveSystemInstructions()
+        checks["gui_clear_and_save_removes_custom_instructions"] = LocalSettings.load(in: store.directory).systemInstructions?.isEmpty == true
+        return checks
+    }
+
     private final class FinalizationClockForChecks: EpisodeClockSource {
         var ticks: UInt64 = 1_000_000
         func now() throws -> EpisodeClockSnapshot {
@@ -1465,6 +1528,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     func sharedAnswerIntegrationChecks(baseURL: String, completion: @escaping ([String: Bool]) -> Void) {
         guard let store else { completion(["gui_shared_fixture_store": false]); return }
         var checks: [String: Bool] = [:]
+        let savedInstructions = preferences.systemInstructions
+        checks["gui_shared_saved_instructions_restored_at_launch"] = savedInstructions != nil
+            && Data(systemEditor.string.utf8) == savedInstructions.map { Data($0.utf8) }
         var deliveredCount = 0
         var firstDeltaDurable = true
         var stopFenced = false
@@ -1512,6 +1578,14 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     checks[prefix + "_terminal_ui_ready_after_transport_drain"] = !generating && !runner.isRunning && send.isEnabled
                         && pendingSharedAttempt == nil && pendingEpisode == nil
                     let assistant = (try? store.events(conversationID: chat.id))?.first { $0.id == result.identifiers.assistantEventID }
+                    if let invocation = try? store.invocation(id: result.identifiers.invocationID),
+                       let body = try? JSONSerialization.jsonObject(with: invocation.requestBody) as? [String: Any],
+                       let messages = body["messages"] as? [[String: String]], let system = messages.first?["content"],
+                       let savedInstructions {
+                        checks[prefix + "_saved_instructions_in_actual_counted_request"] = messages.first?["role"] == "system"
+                            && Data(system.utf8) == Data(ContextAssembler.mandatoryMessages(prompt: "", system: savedInstructions)[0].content.utf8)
+                            && result.preparation?.admission.componentProof != nil
+                    } else { checks[prefix + "_saved_instructions_in_actual_counted_request"] = false }
                     checks[prefix + "_durable_text_matches_visible_transcript"] = assistant?.text.isEmpty == false
                         && responseView.string.contains(assistant!.text) && assistant?.status == result.captureStatus
                     checks[prefix + "_operational_outcome"] = result.episode?.state == (cancel ? .cancelled : .completed)
@@ -1636,6 +1710,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let priorChatID = activeChat?.id
         if let store, let activeChat {
             do {
+                checks.merge(try savedInstructionChecks(store: store)) { _, new in new }
                 let turn = UUID().uuidString
                 let human = try store.append(conversationID: activeChat.id, role: .human, text: "Synthetic exact history 17", status: .complete, turnID: turn, eventID: UUID().uuidString)
                 let partial = try store.append(conversationID: activeChat.id, role: .assistant, text: "Synthetic partial answer", status: .partial, turnID: turn, eventID: UUID().uuidString)
@@ -2240,6 +2315,15 @@ private enum BonsaiPlayground {
         if CommandLine.arguments.contains("--smoke-test") || CommandLine.arguments.contains("--greeting-test") { SmokeTest.run() }
         if let index = CommandLine.arguments.firstIndex(of: "--ui-shared-answer-integration-test"), index + 1 < CommandLine.arguments.count {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-ui-shared-" + UUID().uuidString, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                var settings = LocalSettings()
+                settings.systemInstructions = "  Synthetic restored café e\u{301}\r\nCite exact sources.\n  "
+                try settings.save(in: directory)
+            } catch {
+                try? FileManager.default.removeItem(at: directory)
+                print("{\"gui_shared_instruction_fixture\":false}"); exit(1)
+            }
             setenv("BOROS_DATA_DIR", directory.path, 1)
             let app = NSApplication.shared
             app.setActivationPolicy(.prohibited)

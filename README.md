@@ -45,6 +45,8 @@ python3 scripts/test_developer_answer_evaluation.py
 
 Use New Chat to start another retained conversation, the chat picker to reopen one, and Search Memory to inspect source events. The initial UI uses the `default` project. Chats and drafts are saved under `~/Library/Application Support/Boros`; `BOROS_DATA_DIR` selects an isolated store for development.
 
+To keep instructions after restart, open Show settings, edit System, and click Save instructions. The saved text applies to future requests in all chats in that local store, across model profiles. Clear the field and save to remove custom instructions. Unsaved edits apply to requests in the current window; changing another setting does not save them. The save limit is 128 KiB of UTF-8. Saved instructions are private text in `settings.json` and are included in backups. Scoped project/task preferences remain unfinished.
+
 For long public histories, [the chat importer](docs/CHAT-IMPORT.md) loads BEAM, DevGPT, ShareGPT, or role-message JSON into a new private test store. It preserves exact source text and roles, verifies complete readback before publication, and can open the imported chat for normal follow-up questions.
 
 With the answering model stopped, [the offline imported-chat runner](docs/IMPORTED-CHAT-EVALUATION.md) compares recent-only, lexical, hybrid, and exact-page source recovery in disposable stores. It reports source coverage, read-episode resources, semantic holes and timing without printing chat text or generating answers.
