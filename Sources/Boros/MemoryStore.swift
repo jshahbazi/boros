@@ -1221,7 +1221,9 @@ final class MemoryStore: @unchecked Sendable {
             if let throughSequence { bindings.append(.integer(throughSequence)) }
             if !excludingEventIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingEventIDs.sorted()), as: UTF8.self))) }
             bindings.append(.integer(limit))
-            return try self.query("SELECT e.sequence,e.id,e.conversation_id,e.project_id,e.role,e.status,e.created_at,e.digest,e.byte_count,e.source_time_json FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upper + exclusion + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?", bindings, map: sourceReference)
+            // Keep FTS as the outer loop. An ordinary JOIN can choose the project
+            // index first and evaluate the same FTS match once per scoped event.
+            return try self.query("SELECT e.sequence,e.id,e.conversation_id,e.project_id,e.role,e.status,e.created_at,e.digest,e.byte_count,e.source_time_json FROM event_fts CROSS JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upper + exclusion + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?", bindings, map: sourceReference)
         }
     }
     func loadCandidate(reference: MemorySourceReference) throws -> MemoryEvent {
@@ -1475,7 +1477,9 @@ final class MemoryStore: @unchecked Sendable {
             let expression = terms.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: matching == .allTerms ? " AND " : " OR ")
             let upperBound = throughSequence == nil ? "" : " AND e.sequence<=?"
             let exclusions = excludingEventIDs.isEmpty ? "" : " AND e.id NOT IN (SELECT value FROM json_each(?))"
-            let sql = "SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload,e.source_time_json FROM event_fts JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upperBound + exclusions + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?"
+            // See lexicalCandidateReferences: CROSS JOIN prevents repeated FTS
+            // evaluation under the project-index loop without changing ranking.
+            let sql = "SELECT e.id,e.conversation_id,e.project_id,e.role,e.status,e.turn_id,e.created_at,e.digest,e.byte_count,e.payload,e.source_time_json FROM event_fts CROSS JOIN events e ON e.sequence=event_fts.rowid WHERE event_fts MATCH ? AND e.project_id=?" + upperBound + exclusions + " ORDER BY bm25(event_fts),e.sequence DESC LIMIT ?"
             var bindings: [Value] = [.text(expression), .text(projectID)]
             if let throughSequence { bindings.append(.integer(throughSequence)) }
             if !excludingEventIDs.isEmpty { bindings.append(.text(String(decoding: try JSONEncoder().encode(excludingEventIDs.sorted()), as: UTF8.self))) }
