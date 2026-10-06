@@ -108,7 +108,7 @@ enum ChatContextPreparation {
     static func prepareEvidence(recent: ContextSnapshot, store: MemoryStore, conversationID: String,
         projectID: String, prompt: String, excludingEventID: String,
         semanticIndex: SemanticIndex? = nil, retrievalStrategy: ContextRetrievalStrategy = .hybrid,
-        episodeLease: EpisodeLease? = nil) throws -> ContextSnapshot {
+        episodeLease: EpisodeLease? = nil, lexicalQueryUTF8Range: Range<Int>? = nil) throws -> ContextSnapshot {
         _ = try episodeLease?.checkActive(projectID: projectID)
         return try MeteredRetrieval.operation(lease: episodeLease) {
             _ = try recent.componentAssignments()
@@ -116,10 +116,11 @@ enum ChatContextPreparation {
                   episodeIdentifierEqual(binding.projectID, projectID), episodeIdentifierEqual(binding.conversationID, conversationID),
                   episodeIdentifierEqual(binding.acceptedHumanEventID, excludingEventID),
                   episodeIdentifierEqual(recent.messages.last?.content, prompt), recent.evidence.isEmpty else { throw ContextError.sourceMismatch }
+            let lexicalInput = try HistoricalQueryFormulation.input(prompt, utf8Range: lexicalQueryUTF8Range)
             if retrievalStrategy == .recentOnly {
                 return try recentOnlySnapshot(recent)
             }
-            let formulation = HistoricalQueryFormulation.formulate(prompt)
+            let formulation = HistoricalQueryFormulation.formulate(lexicalInput)
             let lexical = formulation.query
             let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
             func lexicalSnapshot(fallback: Bool) throws -> ContextSnapshot {
@@ -155,7 +156,7 @@ enum ChatContextPreparation {
                     fields["continuation_available"] = raw.continuation != nil
                 }
                 try appendAudit(to: &result, fields: fields)
-                try appendQueryTrace(to: &result, formulation: formulation)
+                try appendQueryTrace(to: &result, formulation: formulation, prompt: prompt, input: lexicalInput, range: lexicalQueryUTF8Range)
                 result.retrievalNotice = fallback ? "Semantic recall failed; archive recall used lexical search."
                     : "Archive recall used lexical search; semantic recall is unavailable."
                 if let raw, !raw.candidateWindowComplete || raw.candidateWindowFull {
@@ -209,7 +210,7 @@ enum ChatContextPreparation {
             }
             audit["exchange_expansion"] = expanded.audit
             try appendAudit(to: &result, fields: audit)
-            try appendQueryTrace(to: &result, formulation: formulation)
+            try appendQueryTrace(to: &result, formulation: formulation, prompt: prompt, input: lexicalInput, range: lexicalQueryUTF8Range)
             if report.manifest.queryDisposition != "supported" {
                 result.retrievalNotice = "This request used lexical archive recall; semantic recall does not support its text."
             } else if !coverage.complete || report.manifest.vectorContinuation != nil || report.manifest.meteredLexicalCoverage?.candidateWindowComplete == false || report.manifest.meteredLexicalCoverage?.candidateWindowFull == true {
@@ -235,7 +236,8 @@ enum ChatContextPreparation {
         snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
     }
 
-    private static func appendQueryTrace(to snapshot: inout ContextSnapshot, formulation: HistoricalQueryFormulation.Result) throws {
+    private static func appendQueryTrace(to snapshot: inout ContextSnapshot, formulation: HistoricalQueryFormulation.Result,
+        prompt: String, input: String, range: Range<Int>?) throws {
         var audit = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         var trace = audit["selection_trace"] as? [String: Any] ?? [:]
         trace["version"] = "historical-selection-trace-v1"
@@ -244,6 +246,13 @@ enum ChatContextPreparation {
         trace["lexical_query_sha256"] = ContextSnapshot.digest(Data((formulation.query ?? "").utf8))
         trace["lexical_term_count"] = formulation.selectedTokenIndices.count
         trace["lexical_selected_token_indices"] = formulation.selectedTokenIndices
+        if let range {
+            trace["lexical_input_version"] = "accepted-prompt-utf8-range-v1"
+            trace["accepted_prompt_sha256"] = ContextSnapshot.digest(Data(prompt.utf8))
+            trace["lexical_input_sha256"] = ContextSnapshot.digest(Data(input.utf8))
+            trace["lexical_input_offset"] = range.lowerBound
+            trace["lexical_input_bytes"] = range.count
+        }
         audit["selection_trace"] = trace
         snapshot.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: audit, options: [.sortedKeys])
     }

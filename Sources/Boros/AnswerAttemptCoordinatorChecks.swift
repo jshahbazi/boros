@@ -9,7 +9,7 @@ enum AnswerAttemptCoordinatorChecks {
     }
 
     private enum Case: String, CaseIterable {
-        case success, wrongAnswer, unknownUsage, partialFailure, emptyAnswer, duplicateCallbacks
+        case success, lexicalRange, wrongAnswer, unknownUsage, partialFailure, emptyAnswer, duplicateCallbacks
         case cancelBeforeStart, cancelPreparing, cancelBeforeDispatch, cancelAfterDispatch, cancelAfterChunk
         case delayedCancel, concurrentAcceptanceStop, hostSaveFailure
         case deadlineBeforeStart, deadlineAfterDispatch, captureFailure, adapterViolation, sanitizedFailure
@@ -84,7 +84,13 @@ enum AnswerAttemptCoordinatorChecks {
             chat = try store.createConversation(projectID: "synthetic-answer-coordinator", title: "Public answer lifecycle fixture")
             _ = try store.append(conversationID: chat.id, role: .human, text: "Public prior source café κ.",
                 status: .complete, turnID: "synthetic-prior-turn", eventID: "synthetic-prior-event")
-            prompt = "Give the public synthetic fixture answer."
+            prompt = kind == .lexicalRange ? "Question Date: 2023/05/23 (Tue) 11:23\nQuestion: Recall cobaltfixture café κ."
+                : "Give the public synthetic fixture answer."
+            if kind == .lexicalRange {
+                let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic archived query evidence")
+                _ = try store.append(conversationID: archive.id, role: .human, text: "cobaltfixture exact archived source",
+                    status: .complete, turnID: "range-archive-turn", eventID: "range-archive-event")
+            }
             settings.profile = kind == .wrongProfile ? .bonsai : .customLocal
             settings.endpointURL = kind == .invalidEndpoint ? "https://example.invalid/v1" : baseURL
             settings.endpointModel = Qwen38TextAdapter.modelID
@@ -100,7 +106,10 @@ enum AnswerAttemptCoordinatorChecks {
         func start() {
             let operation = AnswerAttemptCoordinator(store: store, conversationID: chat.id,
                 projectID: kind == .wrongScope ? "synthetic-other-scope" : chat.projectID, prompt: prompt,
-                settings: settings, retrievalStrategy: .recentOnly, clock: clock, runner: runner,
+                settings: settings, retrievalStrategy: kind == .lexicalRange ? .hybrid : .recentOnly,
+                lexicalQueryUTF8Range: kind == .lexicalRange
+                    ? (prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count)..<prompt.utf8.count : nil,
+                clock: clock, runner: runner,
                 onStage: { [self] stage, preparation in
                     if stage == .preparing && kind == .cancelPreparing { coordinator?.cancel() }
                     if stage == .answering {
@@ -203,9 +212,21 @@ enum AnswerAttemptCoordinatorChecks {
                     if runner.starts > 0 {
                         checks[prefix + "_stale_settings_discarded_and_exact_body"] = runner.bodyMatches && runner.containsAcceptedPrompt
                     }
+                    if kind == .lexicalRange {
+                        let audit = try JSONSerialization.jsonObject(with: preparation.contextAudit) as! [String: Any]
+                        let retrieval = audit["retrieval"] as! [String: Any]
+                        let trace = retrieval["selection_trace"] as! [String: Any]
+                        checks[prefix + "_exact_accepted_query_range_and_full_prompt_provenance"] =
+                            trace["lexical_input_sha256"] as? String == EndpointRequest.digest(Data("Recall cobaltfixture café κ.".utf8))
+                            && trace["accepted_prompt_sha256"] as? String == EndpointRequest.digest(Data(prompt.utf8))
+                            && trace["lexical_input_bytes"] as? Int == "Recall cobaltfixture café κ.".utf8.count
+                            && trace["lexical_input_offset"] as? Int == prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count
+                        checks[prefix + "_historical_needle_delivered_without_metadata_terms"] =
+                            (audit["historical_sources"] as? [[String: Any]])?.contains { $0["event_id"] as? String == "range-archive-event" } == true
+                    }
                 }
                 switch kind {
-                case .success, .wrongAnswer, .duplicateCallbacks, .doubleStart:
+                case .success, .lexicalRange, .wrongAnswer, .duplicateCallbacks, .doubleStart:
                     checks[prefix + "_operational_success_independent_of_score"] = report.episode?.state == .completed
                         && report.captureStatus == .complete && report.generation.failure == nil && report.captureHealthy
                     checks[prefix + "_observed_answer_usage_settled"] = report.episode?.held.outputTokens == 0

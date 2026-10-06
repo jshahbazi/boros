@@ -14,6 +14,14 @@ enum HistoricalQueryChecks {
         let capped = query((0..<12).map { "\"anchor\($0)\"" }.joined(separator: " "))
         let nearByteCap = query((0..<8).map { String(repeating: String(Unicode.Scalar(97 + $0)!), count: 128) }.joined(separator: " ") + " short")
         let cases = [plain, anchor, paired, escaped, curly, unmatched, long, tooLongTerm, capped, nearByteCap]
+        let prefix = "Question Date: 2023/05/23 (Tue) 11:23\nQuestion: "
+        let natural = "Recall cobalt lattice café κ copper spruce mercury quartz"
+        let accepted = prefix + natural, range = prefix.utf8.count..<((prefix + natural).utf8.count)
+        func refused(_ span: Range<Int>) -> Bool {
+            do { _ = try HistoricalQueryFormulation.input(accepted, utf8Range: span); return false } catch { return true }
+        }
+        let derived = try? HistoricalQueryFormulation.input(accepted, utf8Range: range)
+        let scalar = "κ".utf8.count
         return [
             "query_plain_prefix_and_foundation_unicode_ordinals_preserved": plain.query == "alpha café e\u{301} 日本語 snake case 42 omega"
                 && plain.selectedTokenIndices == [4, 6, 7, 8, 9, 10, 11, 12] && plain.quotedAnchorCount == 0,
@@ -38,7 +46,16 @@ enum HistoricalQueryChecks {
             } && nearByteCap.selectedTokenIndices == [0, 1, 2, 3, 4, 5, 6, 8],
             "query_no_literal_terms_returns_nil": query("the and please").query == nil,
             "query_duplicate_anchor_terms_do_not_waste_slots": query("\"alpha alpha beta\" \"ALPHA gamma delta\"").query == "alpha gamma beta delta",
-            "query_quote_operators_are_plain_terms": query("Find \"OR NEAR(foo) NOT bar *\"").query == "near foo bar find"
+            "query_quote_operators_are_plain_terms": query("Find \"OR NEAR(foo) NOT bar *\"").query == "near foo bar find",
+             "query_explicit_range_uses_exact_natural_text": derived == natural
+                && query(derived ?? "").query == query(natural).query && query(accepted).query != query(natural).query,
+             "query_no_range_retains_full_accepted_text": (try? HistoricalQueryFormulation.input(accepted, utf8Range: nil)) == accepted,
+             "query_negative_empty_and_overflow_ranges_refused": refused(-1..<1) && refused(0..<0)
+                && refused(0..<(accepted.utf8.count + 1)),
+             "query_non_scalar_utf8_boundaries_refused": (try? HistoricalQueryFormulation.input("κx", utf8Range: 1..<scalar)) == nil
+                && (try? HistoricalQueryFormulation.input("κx", utf8Range: 0..<1)) == nil,
+             "query_unicode_and_nul_bytes_are_preserved": (try? HistoricalQueryFormulation.input("headκ\0e\u{301}tail",
+                utf8Range: 4..<(4 + "κ\0e\u{301}".utf8.count))) == "κ\0e\u{301}"
         ]
     }
 }

@@ -83,6 +83,11 @@ enum AnswerEvaluationCommand {
             guard let time = question_time else { return prompt }
             return "Question Date: " + time.originalValue + "\nQuestion: " + prompt
         }
+        var lexicalQueryUTF8Range: Range<Int>? {
+            guard question_time != nil else { return nil }
+            let end = effectivePrompt.utf8.count
+            return (end - prompt.utf8.count)..<end
+        }
     }
     private struct Configuration: Decodable {
         let endpoint: String
@@ -368,6 +373,7 @@ enum AnswerEvaluationCommand {
                 conversationID: conversations[key(attempt.project_id, attempt.conversation_key)]!,
                 projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
                 settings: document.configuration.settings, semanticIndex: semantic, retrievalStrategy: attempt.strategy,
+                lexicalQueryUTF8Range: attempt.lexicalQueryUTF8Range,
                 onText: { _ in }, onComplete: { completion, text in
                     do {
                         var item = attemptMetadata(attempt, ordinal: ordinal)
@@ -931,6 +937,8 @@ extension AnswerEvaluationCommand {
             "longmem_v4_paired_dates_decode": document.events.count == 2 && document.attempts.count == 2,
             "longmem_v4_question_date_separate": document.attempts[0].prompt == attempt["prompt"] as? String
                 && document.attempts[0].effectivePrompt == "Question Date: " + questionTime.originalValue + "\nQuestion: " + document.attempts[0].prompt,
+            "longmem_v4_lexical_range_is_exact_original_question": try HistoricalQueryFormulation.input(document.attempts[0].effectivePrompt,
+                utf8Range: document.attempts[0].lexicalQueryUTF8Range) == document.attempts[0].prompt,
             "longmem_v4_timezone_remains_unknown": document.events[0].source_time?.timezone == "unspecified",
             "longmem_v4_production_disjoint": longMemoryCorpusProjectionSHA256.count == 7
                 && longMemoryCorpusProjectionSHA256.isDisjoint(with: InputPins.production.ordinary)

@@ -17,6 +17,21 @@ enum HistoricalQueryFormulation {
         let end: Int
     }
 
+    enum InputError: Error { case invalidRange }
+    /// A host-selected span must remain exact accepted text. Invalid byte or
+    /// scalar boundaries fail rather than replacing the accepted query.
+    static func input(_ prompt: String, utf8Range: Range<Int>?) throws -> String {
+        guard let range = utf8Range else { return prompt }
+        let bytes = Data(prompt.utf8)
+        guard range.lowerBound >= 0, range.upperBound <= bytes.count, !range.isEmpty,
+              String(data: bytes.prefix(range.lowerBound), encoding: .utf8) != nil,
+              let text = String(data: bytes.subdata(in: range), encoding: .utf8),
+              String(data: bytes.suffix(from: range.upperBound), encoding: .utf8) != nil else {
+            throw InputError.invalidRange
+        }
+        return text
+    }
+
     static func formulate(_ prompt: String) -> Result {
         // Offsets are Unicode-scalar ordinals, independent of grapheme or UTF-16
         // normalization. CharacterSet matches the previous component tokenizer.
