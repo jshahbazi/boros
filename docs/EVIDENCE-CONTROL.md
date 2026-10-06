@@ -1,0 +1,58 @@
+# Sufficient-evidence answering control
+
+Status: implemented and executed development control, October 6, 2026. This supplements the paired [developer-history diagnostic](DEVELOPER-ANSWER-EVALUATION.md). It does not change its inputs, rubrics, denominators or retained reports.
+
+## Purpose
+
+The range-aware retrieval repeat delivered every required span, but five hybrid tasks still failed. Run the same nine answerable questions with curated complete original exchanges to measure reproduction and citation when the host has supplied the annotated evidence. Absence probes require their corpus context and are excluded from this separate control.
+
+Each pack contains the complete original human anchor and its actual following assistant message. A cross-message pack contains both pairs in original chronological order. The human anchor identifies the requested reply; the complete assistant message preserves its first nonempty line and the surrounding source. The pack rationale and all source/projection/oracle hashes are frozen before provider work. Expected answers and rubrics remain on the Python scorer side.
+
+| Original history | Historical pack | Cross-message pack | Later-source pack |
+|---|---:|---:|---:|
+| h00 | 2 events / 2,189 bytes | 4 events / 4,105 bytes | 2 events / 1,133 bytes |
+| h01 | 2 events / 2,013 bytes | 4 events / 2,379 bytes | 2 events / 2,095 bytes |
+| h02 | 2 events / 2,048 bytes | 4 events / 3,690 bytes | 2 events / 458 bytes |
+
+Retain original IDs, full text, role, capture status, scope and ordering. Store each pack in its own disposable store. Do not reconstruct gold lines or add rubric fields to the native input. Imported generation completeness and original timestamps retain the developer diagnostic's limitations.
+
+## Execution contract
+
+The native input uses version 2 with nine exact oracle-free projection pins. Existing version-1 paired input pins remain immutable and reject these packs. Each control document has one `recent_only` attempt with replicate zero and the original question. The host uses the existing acceptance, restored-store, preparation, count/admission, v3 original-input receipt, dispatch, durable streaming and finalization path.
+
+Generation settings, host instructions and episode/component caps match the developer diagnostic, including the 2,048-token output reserve. The Python configuration digest is `62381f748b563189b34b9c97f637c3ee234aef7095ce64096ecf6411ece850cf`. Foundation's canonical representation uses `0` for Python's `0.0`; its separately enforced digest is `73729124226e2a729d052ea49d6f03ecced31b2b93e3beea63064ab046fa0013`. These are distinct serializations of the same frozen values.
+
+Before disposal, validate the actual invocation, request/preparation linkage, version-3 source/body/count receipt and original source ranges. Verify the entire declared pack, including human anchors and all assistant bytes. Merely delivering the gold line does not satisfy this contract. No invocation or no valid receipt leaves the conditional result unavailable. A valid receipt with reduced pack content records `witness_pack_not_delivered`.
+
+## Scoring and limits
+
+Retain all nine declared attempts, including setup, admission, transport, capture and reduction failures. Apply the original exact-answer/citation rubric after terminalization. Report overall control success separately from success conditional on operational completion, complete pack delivery and validated source/body/count provenance. Missing conditional evidence is unknown, rather than a model failure or a successful feasibility result.
+
+Retain the original rubric task score separately. A correct answer with an incomplete or unvalidated pack cannot count as a verified control success. Overall verified control success uses all nine declared attempts; conditional success uses only eligible attempts.
+
+Source text, questions, answers and expected values remain absent from reports. Retain counts, hashes, fixed failure codes, delivered source ranges, component counts, observed provider identity and charged/held/unknown resources. Compile from an immutable captured implementation. Each report uses a new destination; no retries replace failures.
+
+Witness validation and scorer inspection are post-terminal diagnostic work outside the episode's runtime charges. Record their timings separately. Runtime resource counters do not establish total experiment cost or physical I/O.
+
+This control measures curated reproduction and citation on reused development questions. It does not establish independent-author coverage, natural-question recall, representative quality or general over-cap feasibility. A control that fits the recent component demonstrates only that declared pack's measured delivery. A broader feasibility oracle still needs funded whole-render measurement for witnesses that exceed component allocations, without issuing an admission grant.
+
+## Commands
+
+```sh
+python3 scripts/test_evidence_controls.py
+python3 scripts/evaluate_evidence_controls.py \
+  --source .build/public-sources/devgpt-20230727-pr.json \
+  --output .build/evaluation/devgpt-evidence-control-20261006.json
+```
+
+Run the live command only after native input/provenance contracts, controlled transport checks and the matching-source application suite pass. Use a new output destination for each execution.
+
+## Recorded execution
+
+The matching optimized app passed **3,214 checks** with a frozen **131-file** source capture and strict deep signature verification. The suite includes 23 answering checks and 19 evidence-control checks, covering input pins, complete/reduced delivery, Stop, provenance tampering, failed-attempt denominators and private fixture cleanup. A preliminary wave left its final synthetic fixture at process exit; callback-release sequencing and an explicit cleanup assertion corrected it. The final wave left zero fixture directories.
+
+All **9/9** live Qwen attempts completed. Every complete pack reached the actual counted request and passed version-3 source/body/count revalidation. All nine were conditionally eligible. Both overall verified control success and conditional task success were **5/9**: single quotes passed 5/6, cross-message tasks 0/3. Three cross-message failures were `response_top_level` (parsed JSON root was not an object); the precise root type was not retained. The h02 historical quote failed exact-answer scoring.
+
+The original source, projection/oracle, configuration and system pins match the preceding paired diagnostic. All 90 runner implementation hashes match the verified capture. The declaration was observed before compilation or input creation and matches the final report: SHA-256 `99ae1124ae3bc7b5da6625bf86abd07503b65673395993c7dcd617f684d3779c`.
+
+Report: `.build/evaluation/devgpt-evidence-control-20261006.json`, 307,748 bytes, SHA-256 `7d9352a85048b9a5e2e7fef0ce2efa5904660c409127ab4519daebc70295676c`. Verification: `.build/evaluation/evidence-control-final-verification-20261006.json`; app: `.build/boros-evidence-control-final/Boros.app`. Runtime stores and answer IPC were discarded. These reused one-replicate development questions establish evidence-present failures on the curated packs. Response-format reliability and independently frozen natural-question testing remain next; representative quality and general over-cap feasibility remain open.

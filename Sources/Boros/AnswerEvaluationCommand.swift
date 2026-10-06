@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import Darwin
 import CSQLite
 
@@ -17,6 +18,23 @@ enum AnswerEvaluationCommand {
         "9d2a765385191a91562e52312ad906338aba99c7cf46aa144497e7b7047fff41",
         "0ac2f9963c690db4365792fbd2f0f82dfc0929baf15df535caa41f29bef9bd38"
     ]
+    /// Separately frozen full-exchange witness projections. Version one never
+    /// accepts these packs or supplies witness selection to retrieval arms.
+    static let witnessCorpusProjectionSHA256: Set<String> = [
+        "ae74877c63469436c0e8e17c16f9f4098eeee06e34f5a52f68ddaf8ae0f32aee",
+        "5dd12260c9eaedf39965285cdb1d0cd821bde4d8a3ce53d67546854dc06b950a",
+        "f9846f813421e252690662e0e0f2c937d129b2d92725c4f8d0557448b2aee207",
+        "6f3c01af22d0069091fffb571686fb2acea7ed25475fe1dcf3fdd94808f3567d",
+        "01918c47e143c6c21288dc3302fc2d36cb3a98064625aa2b659eb8d23f39953d",
+        "5c6002a0f86505e7c9b3d0aaef421c450bea49febf6ee3822c7d3f88662ad67f",
+        "f3c2b62c221401c941fedd72aa288cd22868c3a259136bf45965b3670a49e787",
+        "7a324ac5081b76309a2ba1667fd38a234ad55011382f6afe5cc335f4f7db96c4",
+        "5ee1706bcc661fa306758e546a24c0c894f616ca5d07972ddb5e5f4ba0a7d0e1"
+    ]
+    // Foundation's canonical numeric zero is 0; the Python source pin retains
+    // 0.0. Both representations describe the same frozen configuration.
+    static let witnessConfigurationSHA256 = "73729124226e2a729d052ea49d6f03ecced31b2b93e3beea63064ab046fa0013"
+    static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
     private struct Event: Decodable {
         let id: String
@@ -90,7 +108,14 @@ enum AnswerEvaluationCommand {
         }
     }
 
-    private static func decode(_ bytes: Data) throws -> Document {
+    private struct InputPins {
+        let ordinary: Set<String>, witness: Set<String>, witnessConfiguration: String
+        static var production: InputPins {
+            InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
+                witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256)
+        }
+    }
+    private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
         var scanner = UniqueKeyScanner(bytes: Array(bytes)); try scanner.scan()
         guard let root = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               Set(root.keys) == ["version", "split", "history_id", "events", "attempts", "configuration"],
@@ -104,10 +129,17 @@ enum AnswerEvaluationCommand {
         publicProjection.removeValue(forKey: "configuration")
         let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
             options: [.sortedKeys, .withoutEscapingSlashes]))
-        guard projectionDigest == publicCorpusProjectionSHA256 ||
-            developerCorpusProjectionSHA256.contains(projectionDigest) else { throw Failure.invalid }
+        guard let mode = root["version"] as? NSNumber, CFGetTypeID(mode) != CFBooleanGetTypeID(),
+              mode.doubleValue == Double(mode.intValue), mode.intValue == 1 || mode.intValue == 2 else { throw Failure.invalid }
+        if mode.intValue == 1 {
+            guard pins.ordinary.contains(projectionDigest) else { throw Failure.invalid }
+        } else {
+            guard pins.witness.contains(projectionDigest),
+                  digest(try JSONSerialization.data(withJSONObject: configuration, options: [.sortedKeys, .withoutEscapingSlashes]))
+                    == pins.witnessConfiguration else { throw Failure.invalid }
+        }
         let value = try JSONDecoder().decode(Document.self, from: bytes)
-        guard value.version == 1, value.split == "development", identifier(value.history_id),
+        guard value.split == "development", identifier(value.history_id),
               !value.events.isEmpty, value.events.count <= 100_000,
               !value.attempts.isEmpty, value.attempts.count <= 1000,
               Set(value.events.map(\.id)).count == value.events.count else { throw Failure.invalid }
@@ -123,6 +155,17 @@ enum AnswerEvaluationCommand {
                   !attempt.prompt.isEmpty, attempt.prompt.utf8.count <= MemoryStore.maximumPayloadBytes,
                   (0...100).contains(attempt.replicate),
                   attemptsSeen.insert("\(attempt.probe_id)|\(attempt.strategy.rawValue)|\(attempt.replicate)").inserted else { throw Failure.invalid }
+        }
+        if value.version == 2 {
+            guard value.attempts.count == 1, let attempt = value.attempts.first,
+                  attempt.strategy == .recentOnly, attempt.replicate == 0,
+                  value.events.count == 2 || value.events.count == 4,
+                  value.events.enumerated().allSatisfy({ index, event in
+                      episodeIdentifierEqual(event.project_id, attempt.project_id)
+                        && episodeIdentifierEqual(event.conversation_key, attempt.conversation_key)
+                        && event.role == (index % 2 == 0 ? "user" : "assistant")
+                        && event.status == .complete && !event.text.isEmpty
+                  }) else { throw Failure.invalid }
         }
         let c = value.configuration
         guard LocalEndpoint.chatURL(c.endpoint) != nil, c.model == Qwen38TextRendering.modelID,
@@ -296,6 +339,10 @@ enum AnswerEvaluationCommand {
                             }
                             item["delivered_ranges"] = ranges
                         }
+                        if self.document.version == 2 {
+                            item["witness_validation"] = validateWitness(document: self.document, completion: completion,
+                                directory: restored, conversationID: self.conversations[key(attempt.project_id, attempt.conversation_key)]!)
+                        }
                         item["background_budget_at_completion"] = try object(owner.backgroundBudgetSnapshot())
                         item["full_host_milliseconds"] = milliseconds(started)
                         try self.publish(item, text: text, ordinal: ordinal)
@@ -339,7 +386,16 @@ enum AnswerEvaluationCommand {
         }
         private func publish(_ item: [String: Any], text: String, ordinal: Int) throws {
             try writePrivate(Data(text.utf8), output.appendingPathComponent(String(format: "answer-%04d.txt", ordinal)))
-            report.append(item)
+            report.append(witnessMetadata(item))
+        }
+        private func witnessMetadata(_ item: [String: Any]) -> [String: Any] {
+            guard document.version == 2 else { return item }
+            var result = item
+            result["witness_mode"] = witnessMode
+            if result["witness_validation"] == nil {
+                result["witness_validation"] = witnessOutcome(events: document.events, failure: "witness_outcome_unavailable")
+            }
+            return result
         }
         private func finish(fatal: String?) {
             do {
@@ -354,13 +410,13 @@ enum AnswerEvaluationCommand {
                     item["episode_state"] = NSNull(); item["invocation_status"] = NSNull()
                     item["answer_bytes"] = NSNull(); item["answer_sha256"] = NSNull()
                     item["delivered_ranges"] = []; item["delivered_recent_source_ids"] = []
-                    report.append(item)
+                    report.append(witnessMetadata(item))
                 }
                 report.sort { ($0["ordinal"] as? Int ?? 0) < ($1["ordinal"] as? Int ?? 0) }
                 guard var configuration = try object(EpisodeLimits()) as? [String: Any] else { throw Failure.invalid }
                 configuration["componentPolicy"] = try object(ContextComponentPolicy.selectedQwen)
                 let c = document.configuration
-                let value: [String: Any] = ["version": 1, "diagnostic": "production-answer-development-v1",
+                var value: [String: Any] = ["version": 1, "diagnostic": "production-answer-development-v1",
                     "split": "development", "history_id": document.history_id, "input_sha256": inputDigest,
                     "public_projection_sha256": projectionDigest,
                     "fatal_failure": fatal as Any? ?? NSNull(), "declared_attempts": document.attempts.count,
@@ -371,6 +427,10 @@ enum AnswerEvaluationCommand {
                         "context_limit": c.context_limit, "safety_tokens": c.safety_tokens,
                         "episode_limits": configuration, "background_limits": try object(BackgroundIndexLimits.development)],
                     "unknowns": ["apple_input_tokens", "local_billed_cost", "first_useful_answer"]]
+                if document.version == 2 {
+                    value["witness_mode"] = witnessMode
+                    value["native_configuration_sha256"] = witnessConfigurationSHA256
+                }
                 try writePrivate(try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), output.appendingPathComponent("report.json"))
                 try FileManager.default.removeItem(at: runtime)
                 FileHandle.standardOutput.write(Data("{\"status\":\"terminalized\",\"attempts\":\(report.count)}\n".utf8))
@@ -380,6 +440,109 @@ enum AnswerEvaluationCommand {
                 fputs("Answer evaluation report publication failed.\n", stderr); Darwin.exit(1)
             }
         }
+    }
+
+    private static func witnessOutcome(events: [Event], delivered: Int? = nil, complete: Bool? = nil,
+        revalidated: Bool? = nil, proofVersion: Int? = nil, failure: String?, validationMilliseconds: Any = NSNull()) -> [String: Any] {
+        ["version": "sufficient-exchange-pack-validation-v1", "declared_source_count": events.count,
+         "declared_source_bytes": events.reduce(0) { $0 + $1.text.utf8.count },
+         "delivered_source_count": delivered as Any? ?? NSNull(), "complete_pack_delivered": complete as Any? ?? NSNull(),
+         "source_body_count_revalidated": revalidated as Any? ?? NSNull(), "input_proof_version": proofVersion as Any? ?? NSNull(),
+         "failure_code": failure as Any? ?? NSNull(), "validation_milliseconds": validationMilliseconds]
+    }
+
+    /// A separate offline integrity result. Failed validation never overwrites
+    /// the operational completion, original debits or private answer IPC.
+    private static func validateWitness(document: Document, completion: AnswerAttemptCompletion,
+        directory: URL, conversationID: String) -> [String: Any] {
+        guard completion.invocationStarted else {
+            return witnessOutcome(events: document.events, failure: "witness_outcome_unavailable")
+        }
+        let validationStarted = continuousSample()
+        do {
+            guard let preparation = completion.preparation, let selectionID = preparation.sourceSelectionWorkID else { throw Failure.invalid }
+            let delivered = try withReadOnlySnapshot(directory: directory) { database in
+                let rows = try AuthorityStateKernel.rows(database,
+                    "SELECT request_body,request_digest,admission_json,episode_id,project_id,conversation_id,human_event_id,episode_work_id FROM invocations WHERE id=?",
+                    [.text(completion.identifiers.invocationID)])
+                guard rows.count == 1, let body = rows[0][0].bytes, let admission = rows[0][2].bytes,
+                      digest(body) == preparation.requestDigest, episodeIdentifierEqual(rows[0][1].string, preparation.requestDigest),
+                      episodeIdentifierEqual(rows[0][3].string, completion.identifiers.episodeID),
+                      episodeIdentifierEqual(rows[0][4].string, project(document.attempts[0].project_id)),
+                      episodeIdentifierEqual(rows[0][5].string, conversationID),
+                      episodeIdentifierEqual(rows[0][6].string, completion.identifiers.humanEventID),
+                      episodeIdentifierEqual(rows[0][7].string, preparation.answerWorkID),
+                      let audit = try JSONSerialization.jsonObject(with: admission) as? [String: Any],
+                      audit["version"] as? Int == 3, let contextText = audit["context"] as? String,
+                      let context = Data(base64Encoded: contextText), context == preparation.contextAudit,
+                      let storedReceipt = audit["receipt"],
+                      let contextObject = try JSONSerialization.jsonObject(with: context) as? [String: Any],
+                      episodeIdentifierEqual(contextObject["selection_work_id"] as? String, selectionID),
+                      episodeIdentifierEqual(contextObject["source_snapshot_sha256"] as? String, preparation.sourceSelectionDigest) else { throw Failure.invalid }
+                guard let bodyObject = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      let messages = bodyObject["messages"] as? [[String: String]], messages.count >= 2 else { throw Failure.invalid }
+                let mandatory = ContextAssembler.mandatoryMessages(prompt: document.attempts[0].prompt,
+                    system: document.configuration.system)
+                guard messages.first?["role"] == mandatory[0].role, messages.last?["role"] == mandatory[1].role,
+                      Data((messages.first?["content"] ?? "").utf8) == Data(mandatory[0].content.utf8),
+                      Data((messages.last?["content"] ?? "").utf8) == Data(mandatory[1].content.utf8) else { throw Failure.invalid }
+                var expectedSettings = document.configuration.settings
+                expectedSettings.messagesOverride = messages
+                guard try EndpointRequest.build(prompt: document.attempts[0].prompt,
+                    settings: expectedSettings, conversation: Conversation()) == body else { throw Failure.invalid }
+                let expectedReceipt = try object(preparation.admission)
+                guard try JSONSerialization.data(withJSONObject: storedReceipt, options: [.sortedKeys, .withoutEscapingSlashes])
+                    == JSONSerialization.data(withJSONObject: expectedReceipt, options: [.sortedKeys, .withoutEscapingSlashes]) else { throw Failure.invalid }
+                try ContextComponentJournal.validate(database: database, invocationID: completion.identifiers.invocationID, verifySourceRanges: true)
+                let selectionRows = try AuthorityStateKernel.rows(database,
+                    "SELECT w.state,w.kind,w.adapter_identity,s.payload FROM episode_work w JOIN episode_request_snapshots s ON s.digest=w.snapshot_digest WHERE w.id=? AND w.episode_id=?",
+                    [.text(selectionID), .text(completion.identifiers.episodeID)])
+                guard selectionRows.count == 1, selectionRows[0][0].string == "completed", selectionRows[0][1].string == "sourceRead",
+                      let selection = selectionRows[0][3].bytes, digest(selection) == preparation.sourceSelectionDigest,
+                      let selected = try JSONSerialization.jsonObject(with: selection) as? [String: Any],
+                      let recentSources = selected["recent_sources"] as? [[String: Any]],
+                      let historicalSources = selected["historical_sources"] as? [[String: Any]], historicalSources.isEmpty,
+                      let recentIDs = selected["recent_source_ids"] as? [String], recentIDs.count == recentSources.count,
+                      ExactSourceIDs(recentIDs).count == recentIDs.count else { throw Failure.invalid }
+                // Validate every original witness source, including ones lost
+                // by a legitimate reduction. Gold IDs never enter this check.
+                for event in document.events {
+                    let source = try AuthorityStateKernel.rows(database,
+                        "SELECT project_id,conversation_id,role,status,digest,byte_count,payload FROM events WHERE id=?", [.text(event.id)])
+                    let bytes = Data(event.text.utf8)
+                    guard source.count == 1, episodeIdentifierEqual(source[0][0].string, project(event.project_id)),
+                          episodeIdentifierEqual(source[0][1].string, conversationID), source[0][2].string == (event.role == "user" ? "human" : "assistant"),
+                          source[0][3].string == event.status.rawValue, source[0][4].string == digest(bytes),
+                          source[0][5].integer == bytes.count, source[0][6].bytes == bytes else { throw Failure.invalid }
+                }
+                let originals = ExactSourceIDs(document.events.map(\.id))
+                guard recentIDs.allSatisfy({ originals.contains($0) }) else { throw Failure.invalid }
+                for (index, source) in recentSources.enumerated() {
+                    guard let id = source["eventID"] as? String, episodeIdentifierEqual(id, recentIDs[index]),
+                          let event = document.events.first(where: { episodeIdentifierEqual($0.id, id) }),
+                          source["digest"] as? String == digest(Data(event.text.utf8)),
+                          source["byteCount"] as? Int == event.text.utf8.count else { throw Failure.invalid }
+                }
+                return recentIDs.count
+            }
+            let complete = delivered == document.events.count
+            return witnessOutcome(events: document.events, delivered: delivered, complete: complete,
+                revalidated: true, proofVersion: 3, failure: complete ? nil : "witness_pack_not_delivered",
+                validationMilliseconds: milliseconds(validationStarted))
+        } catch {
+            return witnessOutcome(events: document.events, revalidated: false, failure: "witness_source_body_count_invalid",
+                validationMilliseconds: milliseconds(validationStarted))
+        }
+    }
+
+    private static func withReadOnlySnapshot<T>(directory: URL, _ body: (OpaquePointer) throws -> T) throws -> T {
+        var raw: OpaquePointer?
+        guard sqlite3_open_v2(directory.appendingPathComponent("memory.sqlite3").path, &raw, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let database = raw else { if let raw { sqlite3_close(raw) }; throw Failure.io }
+        defer { sqlite3_close(database) }
+        guard sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else { throw Failure.io }
+        defer { _ = sqlite3_exec(database, "ROLLBACK", nil, nil, nil) }
+        return try body(database)
     }
 
     private static func attemptMetadata(_ attempt: Attempt, ordinal: Int) -> [String: Any] {
@@ -525,6 +688,224 @@ enum AnswerEvaluationCommand {
                 if byte == 92 { guard offset < bytes.count else { throw Failure.invalid }; offset += 1 }
             }
             throw Failure.invalid
+        }
+    }
+}
+
+// The only synthetic entry builds its own fixed sources. It cannot accept a
+// caller-supplied projection, configuration pin, history or expected answer.
+extension AnswerEvaluationCommand {
+    static func runWitnessChecks(baseURL: String, completion: @escaping ([String: Bool]) -> Void) {
+        guard LocalEndpoint.chatURL(baseURL) != nil else {
+            completion(["witness_fixture_loopback_required": false]); return
+        }
+        do { WitnessCheckSuite(baseURL: baseURL, checks: try witnessDecodeChecks(baseURL: baseURL), completion: completion).next() }
+        catch { completion(["witness_contract_fixture_started": false]) }
+    }
+
+    private static func witnessFixture(baseURL: String, large: Bool = false) -> [String: Any] {
+        let texts = large ? (0..<4).map { "Public synthetic source \($0) " + String(repeating: "x", count: 5000) }
+            : ["Public synthetic decision café e\u{301}.", "Public synthetic assistant decision κ.\r\n"]
+        return ["version": 2, "split": "development", "history_id": "synthetic-witness-evidence-control",
+            "events": texts.enumerated().map { index, text in
+                ["id": "synthetic-witness-source-\(index)", "project_id": "synthetic-witness-project",
+                 "conversation_key": "synthetic-witness-chat", "role": index % 2 == 0 ? "user" : "assistant",
+                 "status": "complete", "text": text]
+            }, "attempts": [["probe_id": "synthetic-witness-probe", "project_id": "synthetic-witness-project",
+                "conversation_key": "synthetic-witness-chat", "prompt": "Identify the public synthetic decision.",
+                "strategy": "recent_only", "replicate": 0]],
+            "configuration": ["endpoint": baseURL, "model": Qwen38TextRendering.modelID,
+                "system": "Use complete public synthetic sources and exact citations.", "temperature": 0,
+                "seed": 42, "thinking": false, "maximum_output": 64, "context_limit": 32768, "safety_tokens": 256]]
+    }
+    private static func witnessFixtureBytes(_ root: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+    private static func witnessFixturePins(_ root: [String: Any], ordinary: Set<String> = []) throws -> InputPins {
+        InputPins(ordinary: ordinary, witness: [try projectionSHA256(witnessFixtureBytes(root))],
+            witnessConfiguration: digest(try witnessFixtureBytes(root["configuration"] as! [String: Any])))
+    }
+    private static func witnessDecodeChecks(baseURL: String) throws -> [String: Bool] {
+        let root = witnessFixture(baseURL: baseURL), bytes = try witnessFixtureBytes(root), pins = try witnessFixturePins(root)
+        var checks: [String: Bool] = [
+            "witness_contract_fixed_complete_pack_accepted": try decode(bytes, pins: pins).events.count == 2,
+            "witness_contract_production_pins_disjoint": witnessCorpusProjectionSHA256.count == 9
+                && witnessCorpusProjectionSHA256.isDisjoint(with: InputPins.production.ordinary),
+            "witness_contract_native_configuration_pin_exact": witnessConfigurationSHA256 == "73729124226e2a729d052ea49d6f03ecced31b2b93e3beea63064ab046fa0013"
+        ]
+        func refused(_ value: [String: Any], using selected: InputPins) -> Bool {
+            do { _ = try decode(witnessFixtureBytes(value), pins: selected); return false } catch { return true }
+        }
+        checks["witness_contract_synthetic_pack_not_production_authority"] = refused(root, using: .production)
+        var source = root; var events = source["events"] as! [[String: Any]]
+        events[0]["text"] = "Changed public synthetic original."; source["events"] = events
+        checks["witness_contract_changed_original_rejected"] = refused(source, using: pins)
+        var prompt = root; var attempts = prompt["attempts"] as! [[String: Any]]
+        attempts[0]["prompt"] = "Changed public synthetic probe."; prompt["attempts"] = attempts
+        checks["witness_contract_changed_probe_rejected"] = refused(prompt, using: pins)
+        for (name, value) in [("maximum_output", 65 as Any), ("system", "Changed synthetic host." as Any),
+                              ("seed", 43 as Any), ("temperature", 0.1 as Any), ("thinking", true as Any),
+                              ("context_limit", 16384 as Any), ("safety_tokens", 257 as Any),
+                              ("endpoint", "http://localhost:11235/v1" as Any), ("model", "synthetic-other-model" as Any)] {
+            var changed = root; var configuration = changed["configuration"] as! [String: Any]
+            configuration[name] = value; changed["configuration"] = configuration
+            checks["witness_contract_configuration_\(name)_change_rejected"] = refused(changed, using: pins)
+        }
+        // Repin only these fixed negative fixtures to exercise the independent
+        // grammar, rather than obtaining rejection solely from the digest.
+        for name in ["boolean_version", "unsupported_version", "hybrid", "replicate", "extra_attempt", "odd_pack", "wrong_role", "partial", "foreign_scope", "oracle"] {
+            var changed = root
+            var rows = changed["events"] as! [[String: Any]], tries = changed["attempts"] as! [[String: Any]]
+            switch name {
+            case "boolean_version": changed["version"] = true
+            case "unsupported_version": changed["version"] = 3
+            case "hybrid": tries[0]["strategy"] = "hybrid"
+            case "replicate": tries[0]["replicate"] = 1
+            case "extra_attempt": var extra = tries[0]; extra["probe_id"] = "synthetic-other-probe"; tries.append(extra)
+            case "odd_pack": rows.removeLast()
+            case "wrong_role": rows[1]["role"] = "user"
+            case "partial": rows[1]["status"] = "partial"
+            case "foreign_scope": rows[1]["project_id"] = "synthetic-other-project"
+            default: changed["expected"] = "Synthetic oracle must never enter native input."
+            }
+            changed["events"] = rows; changed["attempts"] = tries
+            checks["witness_contract_\(name)_rejected"] = refused(changed, using: try witnessFixturePins(changed))
+        }
+        var old = root; old["version"] = 1
+        let oldProjection = try projectionSHA256(witnessFixtureBytes(old))
+        let oldPins = InputPins(ordinary: [oldProjection], witness: pins.witness, witnessConfiguration: pins.witnessConfiguration)
+        checks["witness_contract_version_one_preserved"] = try decode(witnessFixtureBytes(old), pins: oldPins).version == 1
+        var oldConfiguration = old["configuration"] as! [String: Any]; oldConfiguration["maximum_output"] = 65
+        old["configuration"] = oldConfiguration
+        checks["witness_contract_version_one_configuration_allowance_preserved"] = try decode(witnessFixtureBytes(old), pins: oldPins).configuration.maximum_output == 65
+        checks["witness_contract_witness_projection_rejected_by_version_one"] = refused(old, using: pins)
+        let duplicate = Data(("{\"version\":2," + String(decoding: bytes.dropFirst(), as: UTF8.self)).utf8)
+        do { _ = try decode(duplicate, pins: pins); checks["witness_contract_duplicate_keys_rejected"] = false }
+        catch { checks["witness_contract_duplicate_keys_rejected"] = true }
+        return checks
+    }
+
+    private final class WitnessCheckSuite {
+        let baseURL: String, completion: ([String: Bool]) -> Void
+        var checks: [String: Bool], cases = ["complete", "reduced", "stopped"]
+        var current: WitnessCheckAttempt?
+        init(baseURL: String, checks: [String: Bool], completion: @escaping ([String: Bool]) -> Void) {
+            self.baseURL = baseURL; self.checks = checks; self.completion = completion
+        }
+        func next() {
+            guard !cases.isEmpty else { completion(checks); return }
+            let kind = cases.removeFirst()
+            do {
+                let attempt = try WitnessCheckAttempt(baseURL: baseURL, kind: kind) { [self] result in
+                    checks.merge(result) { _, latest in latest }; current = nil
+                    // Let the attempt callback return and release its private
+                    // fixture before the final completion can exit the CLI.
+                    DispatchQueue.main.async { [self] in next() }
+                }
+                current = attempt; attempt.start()
+            } catch { checks["witness_\(kind)_fixture_started"] = false; next() }
+        }
+    }
+    private final class WitnessCheckAttempt {
+        let document: Document, kind: String, directory: URL, store: MemoryStore, conversationID: String
+        let completion: ([String: Bool]) -> Void
+        var coordinator: AnswerAttemptCoordinator?
+        init(baseURL: String, kind: String, completion: @escaping ([String: Bool]) -> Void) throws {
+            self.kind = kind; self.completion = completion
+            let root = witnessFixture(baseURL: baseURL, large: kind == "reduced")
+            document = try decode(witnessFixtureBytes(root), pins: witnessFixturePins(root))
+            guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.io }
+            let path = String(cString: resolved); free(resolved)
+            directory = URL(fileURLWithPath: path, isDirectory: true).appendingPathComponent("boros-witness-check-" + UUID().uuidString)
+            let baseline = try MemoryStore(directory: directory.appendingPathComponent("baseline"))
+            conversationID = try baseline.createConversation(projectID: project(document.attempts[0].project_id), title: "Synthetic witness fixture").id
+            for event in document.events {
+                _ = try baseline.append(conversationID: conversationID, role: event.role == "user" ? .human : .assistant,
+                    text: event.text, status: event.status, turnID: "synthetic-turn:" + event.id, eventID: event.id)
+            }
+            let archive = directory.appendingPathComponent("archive"), restored = directory.appendingPathComponent("restored")
+            _ = try BackupArchive.create(from: baseline, at: archive)
+            _ = try BackupArchive.restore(from: archive, to: restored, authority: .unmanagedNoDeletion)
+            store = try MemoryStore(directory: restored)
+        }
+        deinit { try? FileManager.default.removeItem(at: directory) }
+        func start() {
+            let operation = AnswerAttemptCoordinator(store: store, conversationID: conversationID,
+                projectID: project(document.attempts[0].project_id), prompt: document.attempts[0].prompt,
+                settings: document.configuration.settings, retrievalStrategy: .recentOnly,
+                onStage: { [self] stage, _ in if kind == "stopped" && stage == .answering { coordinator?.cancel() } },
+                onText: { _ in }, onComplete: { [self] result, _ in finish(result) })
+            coordinator = operation
+            do { _ = try operation.accept(); try operation.start() }
+            catch { completion(["witness_\(kind)_coordinator_started": false]) }
+        }
+        private func finish(_ result: AnswerAttemptCompletion) {
+            let prefix = "witness_" + kind + "_", restored = directory.appendingPathComponent("restored")
+            var checks: [String: Bool] = [:]
+            let validated = validateWitness(document: document, completion: result, directory: restored, conversationID: conversationID)
+            checks[prefix + "actual_v3_source_body_count_revalidated"] = validated["source_body_count_revalidated"] as? Bool == true
+                && validated["input_proof_version"] as? Int == 3 && result.invocationStarted
+            checks[prefix + "original_pack_outcome_explicit"] = validated["complete_pack_delivered"] as? Bool == (kind != "reduced")
+                && validated["declared_source_count"] as? Int == document.events.count
+                && validated["declared_source_bytes"] as? Int == document.events.reduce(0, { $0 + $1.text.utf8.count })
+            checks[prefix + "fixed_failure_code"] = kind == "reduced" ? validated["failure_code"] as? String == "witness_pack_not_delivered"
+                : validated["failure_code"] is NSNull
+            checks[prefix + "post_terminal_inspection_timed"] = (validated["validation_milliseconds"] as? Double).map { $0.isFinite && $0 >= 0 } == true
+            checks[prefix + "terminal_capture_preserved"] = result.captureHealthy && result.accountingHealthy
+                && (kind == "stopped" ? result.captureStatus == .cancelled : result.captureStatus == .complete)
+            do {
+                let originalCharge = try store.episodeReceipt(id: result.identifiers.episodeID, clock: SystemEpisodeClock().now()).charged
+                _ = validateWitness(document: document, completion: result, directory: restored, conversationID: conversationID)
+                checks[prefix + "verification_does_not_change_original_debits"] = try store.episodeReceipt(id: result.identifiers.episodeID,
+                    clock: SystemEpisodeClock().now()).charged == originalCharge
+                var changedRoot = witnessFixture(baseURL: document.configuration.endpoint, large: kind == "reduced")
+                var configuration = changedRoot["configuration"] as! [String: Any]; configuration["system"] = "Changed public synthetic host."
+                changedRoot["configuration"] = configuration
+                let changed = try decode(witnessFixtureBytes(changedRoot), pins: witnessFixturePins(changedRoot))
+                let host = validateWitness(document: changed, completion: result, directory: restored, conversationID: conversationID)
+                checks[prefix + "host_mismatch_cannot_claim_proof"] = host["source_body_count_revalidated"] as? Bool == false
+                    && host["complete_pack_delivered"] is NSNull
+                var raw: OpaquePointer?
+                guard sqlite3_open_v2(restored.appendingPathComponent("memory.sqlite3").path, &raw, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+                      let database = raw else { if let raw { sqlite3_close(raw) }; throw Failure.io }
+                defer { sqlite3_close(database) }
+                let invocation = try AuthorityStateKernel.rows(database,
+                    "SELECT request_body,admission_json FROM invocations WHERE id=?", [.text(result.identifiers.invocationID)])
+                guard invocation.count == 1, let body = invocation[0][0].bytes, let admission = invocation[0][1].bytes,
+                      var audit = try JSONSerialization.jsonObject(with: admission) as? [String: Any] else { throw Failure.invalid }
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET request_body=? WHERE id=?",
+                    [.bytes(Data("{}".utf8)), .text(result.identifiers.invocationID)])
+                let wrongBody = validateWitness(document: document, completion: result, directory: restored, conversationID: conversationID)
+                checks[prefix + "actual_body_mismatch_rejected"] = wrongBody["source_body_count_revalidated"] as? Bool == false
+                    && wrongBody["complete_pack_delivered"] is NSNull
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET request_body=? WHERE id=?",
+                    [.bytes(body), .text(result.identifiers.invocationID)])
+                audit["version"] = 2; audit.removeValue(forKey: "inputProofWorkID"); audit.removeValue(forKey: "inputProofSHA256")
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET admission_json=? WHERE id=?",
+                    [.bytes(try witnessFixtureBytes(audit)), .text(result.identifiers.invocationID)])
+                let oldProof = validateWitness(document: document, completion: result, directory: restored, conversationID: conversationID)
+                checks[prefix + "version_two_cannot_claim_complete_proof"] = oldProof["source_body_count_revalidated"] as? Bool == false
+                    && oldProof["complete_pack_delivered"] is NSNull
+                try AuthorityStateKernel.execute(database, "UPDATE invocations SET admission_json=? WHERE id=?",
+                    [.bytes(admission), .text(result.identifiers.invocationID)])
+                // First source is deliberately geometrically omitted in the
+                // reduced fixture. All-original validation must still fail.
+                try AuthorityStateKernel.execute(database, "UPDATE events SET status='partial' WHERE id=?", [.text(document.events[0].id)])
+                let tampered = validateWitness(document: document, completion: result, directory: restored, conversationID: conversationID)
+                checks[prefix + "entire_original_union_tamper_rejected"] = tampered["source_body_count_revalidated"] as? Bool == false
+                    && tampered["complete_pack_delivered"] is NSNull && tampered["failure_code"] as? String == "witness_source_body_count_invalid"
+                try AuthorityStateKernel.execute(database, "UPDATE events SET status='complete' WHERE id=?", [.text(document.events[0].id)])
+                try AuthorityStateKernel.execute(database, "DELETE FROM invocations WHERE id=?", [.text(result.identifiers.invocationID)])
+                let missing = validateWitness(document: document, completion: result, directory: restored, conversationID: conversationID)
+                checks[prefix + "missing_invocation_cannot_claim_proof"] = missing["source_body_count_revalidated"] as? Bool == false
+                    && missing["complete_pack_delivered"] is NSNull
+                let unknown = witnessOutcome(events: document.events, failure: "witness_outcome_unavailable")
+                checks[prefix + "unavailable_preserves_declared_counts"] = unknown["declared_source_count"] as? Int == document.events.count
+                    && unknown["declared_source_bytes"] as? Int == document.events.reduce(0, { $0 + $1.text.utf8.count })
+                    && unknown["complete_pack_delivered"] is NSNull && unknown["source_body_count_revalidated"] is NSNull
+                    && unknown["validation_milliseconds"] is NSNull
+            } catch { checks[prefix + "integrity_fixture_completed"] = false }
+            completion(checks)
         }
     }
 }

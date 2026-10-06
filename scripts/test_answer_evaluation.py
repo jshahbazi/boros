@@ -26,6 +26,20 @@ e = importlib.util.module_from_spec(spec); spec.loader.exec_module(e)
 
 
 class Contracts(unittest.TestCase):
+    def test_witness_validation_metadata_preserves_outcomes_without_source_text(self):
+        validation = {"version": "sufficient-exchange-pack-validation-v1", "declared_source_count": 4,
+                      "declared_source_bytes": 4105, "delivered_source_count": 4,
+                      "complete_pack_delivered": True, "source_body_count_revalidated": True,
+                      "input_proof_version": 3, "failure_code": None}
+        metadata = {"witness_mode": "sufficient-exchange-pack-v1", "witness_validation": validation,
+                    "unexpected witness content": "synthetic private witness sentinel"}
+        sanitized = e.content_free_metadata(metadata)
+        self.assertEqual(sanitized["witness_validation"], validation)
+        self.assertEqual(sanitized["witness_mode"], "sufficient-exchange-pack-v1")
+        encoded = json.dumps(sanitized)
+        self.assertNotIn("synthetic private witness sentinel", encoded)
+        self.assertNotIn("unexpected witness content", encoded)
+
     def test_selection_trace_remains_structured_and_content_free(self):
         trace = {"version": "historical-selection-trace-v1", "lexical_query_version": "quoted-anchor-round-robin-v1", "quoted_anchor_count": 1,
                  "lexical_query_sha256": e.digest(b"synthetic query"), "lexical_term_count": 2,
@@ -314,11 +328,37 @@ class NativeContracts(unittest.TestCase):
         checks = e.strict_json(process.stdout)
         self.assertTrue(process.returncode == 0 and isinstance(checks, dict) and bool(checks))
         self.assertTrue(all(type(value) is bool and value for value in checks.values()))
+
         self.assertTrue(checks.get("gui_shared_saved_instructions_restored_at_launch") is True)
         for outcome in ("success", "stop"):
             self.assertTrue(checks.get(f"gui_shared_{outcome}_durable_v3_original_input_proof_revalidated") is True)
         self.assertTrue(self.observed["saved_instruction_answers"] == 2)
         self.assertTrue(self.saved_instructions.encode() not in process.stdout + process.stderr)
+
+    def test_native_sufficient_evidence_control_contracts(self):
+        temporary_root = Path(tempfile.gettempdir()).resolve()
+        prior_fixtures = set(temporary_root.glob("boros-witness-check-*"))
+        process = subprocess.run([str(NATIVE_BINARY), "--evidence-control-integration-test",
+                                  f"http://127.0.0.1:{self.server.server_port}/v1"],
+                                 capture_output=True, timeout=120,
+                                 env={**os.environ, "BOROS_DATA_DIR": str(self.directory / "witness-runtime")})
+        checks = e.strict_json(process.stdout)
+        self.assertTrue(process.returncode == 0 and isinstance(checks, dict) and bool(checks))
+        self.assertTrue(all(type(value) is bool and value for value in checks.values()))
+        self.assertTrue(set(temporary_root.glob("boros-witness-check-*")) == prior_fixtures)
+
+        required = ("witness_contract_production_pins_disjoint", "witness_contract_boolean_version_rejected",
+                    "witness_contract_witness_projection_rejected_by_version_one",
+                    "witness_contract_version_one_configuration_allowance_preserved",
+                    "witness_complete_actual_v3_source_body_count_revalidated",
+                    "witness_reduced_original_pack_outcome_explicit",
+                    "witness_reduced_entire_original_union_tamper_rejected",
+                    "witness_complete_actual_body_mismatch_rejected",
+                    "witness_complete_version_two_cannot_claim_complete_proof",
+                    "witness_complete_missing_invocation_cannot_claim_proof",
+                    "witness_stopped_actual_v3_source_body_count_revalidated",
+                    "witness_stopped_verification_does_not_change_original_debits")
+        self.assertTrue(all(checks.get(name) is True for name in required))
 
     def test_native_refuses_existing_output_unknown_fields_nondev_and_store(self):
         preserved = e.digest((self.output / "report.json").read_bytes())

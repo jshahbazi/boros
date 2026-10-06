@@ -197,6 +197,8 @@ def compile_driver(scratch: Path):
               ROOT / "scripts/evaluation_fixtures.py", ROOT / "scripts/devgpt_answer_cases.py",
               ROOT / "scripts/evaluate_developer_answers.py", ROOT / "scripts/answer_rubrics.py",
               ROOT / "scripts/test_answer_rubrics.py", ROOT / "scripts/test_developer_answer_evaluation.py"]
+    files += [ROOT / "scripts/devgpt_evidence_controls.py", ROOT / "scripts/evaluate_evidence_controls.py",
+              ROOT / "scripts/test_evidence_controls.py"]
     hashes = {}
     captured = scratch / "captured-source"
     for path in files:
@@ -315,6 +317,9 @@ def run(args):
 # key cannot carry chat content into a published report.
 METADATA_KEYS = set("""
 version diagnostic split history_id input_sha256 fatal_failure declared_attempts completed_attempts baseline
+witness_mode witness_validation declared_source_count declared_source_bytes delivered_source_count
+complete_pack_delivered source_body_count_revalidated input_proof_version failure_code
+validation_milliseconds native_configuration_sha256
 configuration unknowns host_process_failure events source_bytes conversations archive_id database_schema
 archive_sha256 timestamps derived_sidecar_in_checkpoint endpoint model instruction_sha256 temperature seed
 thinking maximum_output context_limit safety_tokens episode_limits background_limits componentPolicy
@@ -372,6 +377,8 @@ recentReductionRounds evidenceReductionRounds source_bytes source_created_utc ca
 """.split())
 SAFE_ENUMS = set("""
 development recent_only hybrid complete partial failed cancelled deadlineExceeded budgetExceeded completed
+sufficient-exchange-pack-v1 sufficient-exchange-pack-validation-v1 witness_outcome_unavailable
+witness_pack_not_delivered witness_source_body_count_invalid
 none preparation answer_or_finalization restore_or_setup acceptance checkpoint_failed attempt_setup_failed
 acceptance_failed index_construction_failed ipc_publication_failed attempt_metadata_failed
 per_hybrid_attempt_before_acceptance ingestion_frozen_in_checkpoint apple_input_tokens local_billed_cost

@@ -41,6 +41,7 @@ python3 scripts/test_imported_chat_evaluation.py
 python3 scripts/test_answer_evaluation.py --binary "$PWD/.build/boros/Boros.app/Contents/MacOS/Boros"
 python3 scripts/test_answer_rubrics.py
 python3 scripts/test_developer_answer_evaluation.py
+python3 scripts/test_evidence_controls.py
 ```
 
 Use New Chat to start another retained conversation, the chat picker to reopen one, and Search Memory to inspect source events. The initial UI uses the `default` project. Chats and drafts are saved under `~/Library/Application Support/Boros`; `BOROS_DATA_DIR` selects an isolated store for development.
@@ -59,13 +60,15 @@ python3 scripts/evaluate_answers.py --output .build/evaluation/public-answer-pil
 
 The output must be new. Validation/held-out data, arbitrary corpus/store paths and oracle fields are refused. The diagnostic does not establish representative quality, semantic correctness of prose, provider feasibility, or the full five-category evaluation gate.
 
-The [public developer-history amendment](docs/DEVELOPER-ANSWER-EVALUATION.md) adds three pinned DevGPT histories and 24 paired attempts, with frozen exact-quote, cross-message, citation and abstention scoring. It requires the exact pinned public source file and uses separate oracle-free native projections. Its source-derived questions, chronology and code-placeholder limits remain explicit; representative reasoning and provider-feasibility evidence are pending.
+The [public developer-history amendment](docs/DEVELOPER-ANSWER-EVALUATION.md) adds three pinned DevGPT histories and 24 paired attempts, with frozen exact-quote, cross-message, citation and abstention scoring. It requires the exact pinned public source file and uses separate oracle-free native projections. Its source-derived questions, chronology and code-placeholder limits remain explicit; representative reasoning and broader provider-feasibility evidence are pending.
+
+The [separate sufficient-evidence control](docs/EVIDENCE-CONTROL.md) supplies nine frozen complete original exchanges to the existing recent-only answering path. It verifies the entire pack and actual source/body/count receipts before reporting conditional reproduction/citation results. All nine packs were delivered and validated; Qwen passed 5/9 tasks. Its curated packs remain separate from paired retrieval inputs; all failures retain their declared denominator.
 
 Accepted messages persist before dispatch; received answer chunks commit before display and interrupted attempts recover with an explicit incomplete status. Ordinary Send includes recent history and scoped lexical/semantic archive excerpts, excluding recent sources before candidate limits. Semantic retrieval uses an installed Apple English sentence encoder; unavailable or unsupported inputs retain lexical retrieval. Coverage gaps are recorded and surfaced. Search Memory provides scoped literal/lexical search and exact source pages.
 
 File → Create Backup produces a verified archive of complete sources and durable journals. File → Restore Backup to New Folder creates a separate restored store. Command-line create/verify/restore is also available; see [backup and restore](docs/BACKUP-RESTORE.md). Credentials and the derived semantic sidecar are excluded; semantic indexing rebuilds under the archived background allowance when a restored store opens. File → Background Indexing Status shows maintenance accounting and why indexing has paused.
 
-Answering and standalone reads share durable episode allowances and deadlines. Selected-Qwen recent context and evidence have independent token caps. Schema 5 adds global background-index limits across projects, retries and rebuilds, with conservative crash/restore accounting. Scoped lexical selection loads one bounded complete candidate at a time; literal scans use metered pages. Raw-work counters describe logical source work rather than physical disk I/O. Apple/native input tokens remain opaque. User-facing policy lifecycle, deletion, summary trees and external actions remain pending, and installed-encoder quality and hybrid answer quality remain unmeasured. See [project status](docs/STATUS.md) and [implementation status](docs/IMPLEMENTATION.md) for verified boundaries.
+Answering and standalone reads share durable episode allowances and deadlines. Selected-Qwen recent context and evidence have independent token caps. Schema 5 adds global background-index limits across projects, retries and rebuilds, with conservative crash/restore accounting. Scoped lexical selection loads one bounded complete candidate at a time; literal scans use metered pages. Raw-work counters describe logical source work rather than physical disk I/O. Apple/native input tokens remain opaque. User-facing policy lifecycle, deletion, summary trees and external actions remain pending. Representative encoder and answering quality remain unproven. See [project status](docs/STATUS.md) and [implementation status](docs/IMPLEMENTATION.md) for verified boundaries.
 
 ## Local verification
 

@@ -40,7 +40,9 @@ This diagnostic establishes that the production measurement path works. Represen
 
 ## Runner and oracle separation
 
-The answer runner receives history events, question, public probe ID, scope/conversation mapping, strategy and generation settings. It receives no gold spans, expected answers, targeted search queries, sufficient-evidence witnesses or grading rubric.
+The version-1 paired answer runner receives history events, question, public probe ID, scope/conversation mapping, strategy and generation settings. It receives no gold spans, expected answers, targeted search queries, sufficient-evidence witnesses or grading rubric.
+
+The separately pinned version-2 [sufficient-evidence control](EVIDENCE-CONTROL.md) intentionally supplies curated complete original exchanges. It retains oracle separation and the shared production lifecycle. Its packs and scores remain separate from paired retrieval inputs and denominators.
 
 The model receives only the production request body. No filesystem, SQL, source-dump, shell, MCP or additional HTTP tool is enabled. Host ingestion supplies the synthetic corpus; shared production preparation is the source-selection path. Focused access/accounting tests must catch accidental historical reads in recent-only and unmetered helper use.
 
@@ -70,7 +72,7 @@ For each attempt, record:
 
 All failures remain in the declared denominators. Partial/noncompleted answers score zero for otherwise scorable factual tasks. Missing usage remains unknown. Apple query/background input tokens remain opaque even when the Qwen prompt count is exact. Local billed cost is unknown. First visible delta does not establish first useful answer.
 
-Actual delivered gold coverage can be scored after completion. It does not establish that sufficient evidence fits the frozen provider budget. A future feasibility oracle must count a sufficient-evidence witness separately and keep that witness unavailable to retrieval.
+Actual delivered gold coverage can be scored after completion. It does not establish that sufficient evidence fits the frozen provider budget. The separate complete-exchange control counts and validates its entire witness through ordinary recent-only preparation; that witness remains unavailable to paired retrieval. General feasibility beyond component allocations still needs a funded whole-render measurement contract without an admission grant.
 
 ## Verification and publication gates
 

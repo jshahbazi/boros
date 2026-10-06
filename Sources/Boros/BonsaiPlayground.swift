@@ -2321,6 +2321,15 @@ private enum BonsaiPlayground {
             if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) { print(String(decoding: data, as: UTF8.self)) }
             exit(checks.values.allSatisfy { $0 } ? 0 : 1)
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--evidence-control-integration-test"), index + 1 < CommandLine.arguments.count {
+            AnswerEvaluationCommand.runWitnessChecks(baseURL: CommandLine.arguments[index + 1]) { checks in
+                if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) {
+                    print(String(decoding: data, as: UTF8.self))
+                }
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            }
+            dispatchMain()
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--component-preparation-integration-test"), index + 1 < CommandLine.arguments.count {
             ComponentPreparationChecks.run(baseURL: CommandLine.arguments[index + 1]) { checks in
                 if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) {
