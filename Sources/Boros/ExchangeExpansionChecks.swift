@@ -221,6 +221,108 @@ enum ExchangeExpansionChecks {
                 && store.episodeReceipt(id: episodeID, clock: clock.now()).charged == terminal.charged
         }
         checks.merge(try exhaustionChecks(store: store, chat: chat, project: project, anchor: anchor, frontier: frontier, clock: clock)) { _, latest in latest }
+        checks.merge(try completionChecks()) { _, latest in latest }
+        return checks
+    }
+
+    private static func completionChecks() throws -> [String: Bool] {
+        let directory = try fixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory), project = "synthetic-primary-completion"
+        let archive = try store.createConversation(projectID: project, title: "Synthetic short sources")
+        let chat = try store.createConversation(projectID: project, title: "Synthetic completion request")
+        let date = EventSourceTime(value: "2023-05-30T10:42", precision: "minute", timezone: "unspecified",
+            sourceSHA256: String(repeating: "b", count: 64), locator: "/synthetic/date", originalValue: "2023/05/30 (Tue) 10:42")
+        let source = try store.append(conversationID: archive.id, role: .assistant, text: "é\u{0}before needle after e\u{301}",
+            status: .partial, turnID: "short-source-turn", eventID: "short-source", sourceTime: date)
+        let exact = try store.append(conversationID: archive.id, role: .human, text: String(repeating: "a", count: 4096),
+            status: .complete, turnID: "exact-page-turn", eventID: "exact-page")
+        let long = try store.append(conversationID: archive.id, role: .human, text: String(repeating: "b", count: 4097),
+            status: .complete, turnID: "long-page-turn", eventID: "long-page")
+        let frontier = try store.sourceFrontier(projectID: project)
+        let future = try store.append(conversationID: archive.id, role: .human, text: "Synthetic future",
+            status: .complete, turnID: "future-turn", eventID: "future-short-source")
+        let foreignChat = try store.createConversation(projectID: "foreign-completion", title: "Synthetic foreign")
+        let foreign = try store.append(conversationID: foreignChat.id, role: .human, text: "Synthetic foreign",
+            status: .complete, turnID: "foreign-turn", eventID: "foreign-short-source")
+        let clock = Clock(), id = UUID().uuidString
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "completion-turn", humanEventID: "completion-request",
+            episodeID: id, text: "Synthetic completion request", limits: EpisodeLimits(), clock: clock.now())
+        let lease = EpisodeLease(ledger: store, episodeID: id, clock: clock)
+        func complete(_ hits: [MemoryHit], excluded: [String] = [], nested: Bool = false) throws -> ExchangeExpansionReport {
+            try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: project, primaryHits: hits,
+                sourceFrontier: frontier, excludingSourceIDs: ExactSourceIDs(excluded), episodeLease: lease, operationIsNested: nested)
+        }
+        let fragment = hit(source, offset: 10, excerpt: "needle")
+        let before = try lease.checkActive(), report = try complete([fragment]), after = try lease.checkActive()
+        let completionAudit = try JSONSerialization.data(withJSONObject: report.audit)
+        var checks: [String: Bool] = [
+            "primary_completion_preserves_complete_original_utf8_nul_scope_date_and_partial_status": report.hits.count == 1
+                && Data(report.hits[0].excerpt.utf8) == Data(source.text.utf8) && report.hits[0].excerptOffset == 0
+                && report.hits[0].totalBytes == source.byteCount && report.hits[0].digest == source.digest
+                && report.hits[0].sourceTime == date && report.hits[0].status == .partial
+                && report.hits[0].conversationID == archive.id && report.hits[0].projectID == project,
+            "primary_completion_prefunds_original_lease_without_model_or_encoder_work": after.id == before.id && after.limits == before.limits
+                && after.charged.rawSourceBytes - before.charged.rawSourceBytes == 3 * (source.byteCount + 1)
+                && after.charged.metadataRows - before.charged.metadataRows == 2
+                && after.charged.memoryOperations - before.charged.memoryOperations == 1
+                && after.charged.modelCalls == before.charged.modelCalls && after.charged.encoderInputBytes == before.charged.encoderInputBytes,
+            "primary_completion_audit_contains_only_identity_counts_and_disposition": report.audit["completed_primary_count"] as? Int == 1
+                && completionAudit.range(of: Data(source.text.utf8)) == nil
+        ]
+        let retainedBefore = try lease.checkActive(), retained = try complete([hit(source)]), retainedAfter = try lease.checkActive()
+        checks["primary_completion_full_source_is_retained_without_payload_read"] = retained.hits[0].excerpt == source.text
+            && retainedAfter.charged.rawSourceBytes == retainedBefore.charged.rawSourceBytes
+        let boundary = try complete([hit(exact, offset: 1, excerpt: "a"), hit(long, offset: 1, excerpt: "b")])
+        checks["primary_completion_exact_page_is_complete_and_larger_source_remains_fragment"] = boundary.hits[0].excerpt.utf8.count == 4096
+            && boundary.hits[0].excerptOffset == 0 && boundary.hits[1].excerpt == "b" && boundary.hits[1].excerptOffset == 1
+        let excludedBefore = try lease.checkActive(), excluded = try complete([fragment], excluded: [source.id]), excludedAfter = try lease.checkActive()
+        checks["primary_completion_exclusion_precedes_metadata_and_payload"] = excluded.hits.isEmpty
+            && excludedBefore.charged.metadataRows == excludedAfter.charged.metadataRows && excludedBefore.charged.rawSourceBytes == excludedAfter.charged.rawSourceBytes
+        for (name, bad, expectedRaw) in [
+            ("corrupt_fragment", hit(source, offset: 10, excerpt: "broken"), 3 * (source.byteCount + 1)),
+            ("split_scalar_empty_fragment", hit(source, offset: 1, excerpt: ""), 3 * (source.byteCount + 1)),
+            ("future_source", hit(future, offset: 0, excerpt: "Synthetic"), 0),
+            ("foreign_source", hit(foreign, offset: 0, excerpt: "Synthetic"), 0)
+        ] {
+            let prior = try lease.checkActive()
+            do { _ = try complete([bad]); checks["primary_completion_refuses_" + name] = false }
+            catch {
+                let current = try lease.checkActive()
+                checks["primary_completion_refuses_" + name] = error is MeteredRetrievalError
+                    && current.charged.rawSourceBytes - prior.charged.rawSourceBytes == expectedRaw
+            }
+        }
+        let forged = MemoryHit(eventID: source.id, conversationID: chat.id, projectID: project, role: source.role, status: source.status,
+            createdAt: source.createdAt, digest: source.digest, totalBytes: source.byteCount, excerptOffset: 10, excerpt: "needle", sourceTime: date)
+        do { _ = try complete([forged]); checks["primary_completion_refuses_forged_conversation"] = false }
+        catch { checks["primary_completion_refuses_forged_conversation"] = error is MeteredRetrievalError }
+        let duplicate = try complete([fragment, fragment])
+        checks["primary_completion_duplicate_fragments_are_each_verified_and_remain_bounded"] = duplicate.hits.count == 2
+            && duplicate.hits.allSatisfy { Data($0.excerpt.utf8) == Data(source.text.utf8) }
+        do { _ = try complete(Array(repeating: fragment, count: 17)); checks["primary_completion_candidate_limit_is_unchanged"] = false }
+        catch { checks["primary_completion_candidate_limit_is_unchanged"] = error is MeteredRetrievalError }
+        let nestedBefore = try lease.checkActive(); _ = try complete([fragment], nested: true); let nestedAfter = try lease.checkActive()
+        checks["primary_completion_nested_operation_does_not_duplicate_operation_charge"] = nestedBefore.charged.memoryOperations == nestedAfter.charged.memoryOperations
+        _ = try lease.finish(reason: .cancelled)
+        do { _ = try complete([fragment]); checks["primary_completion_terminal_lease_refuses_work"] = false }
+        catch { checks["primary_completion_terminal_lease_refuses_work"] = error is EpisodeBudgetError }
+        var limits = EpisodeLimits(); limits.resources.rawSourceBytes = 0
+        let exhaustedID = UUID().uuidString
+        _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "completion-exhausted-turn", humanEventID: "completion-exhausted-request",
+            episodeID: exhaustedID, text: "Synthetic exhausted completion", limits: limits, clock: clock.now())
+        let exhaustedLease = EpisodeLease(ledger: store, episodeID: exhaustedID, clock: clock)
+        let prior = try exhaustedLease.checkActive()
+        do {
+            _ = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: project, primaryHits: [fragment],
+                sourceFrontier: frontier, excludingSourceIDs: ExactSourceIDs([]), episodeLease: exhaustedLease)
+            checks["primary_completion_raw_exhaustion_retains_prior_metadata_and_operation_charges"] = false
+        } catch {
+            let current = try store.episodeReceipt(id: exhaustedID, clock: clock.now())
+            checks["primary_completion_raw_exhaustion_retains_prior_metadata_and_operation_charges"] = (error as? EpisodeBudgetError) == .exhausted
+                && current.charged.rawSourceBytes == prior.charged.rawSourceBytes && current.charged.metadataRows == prior.charged.metadataRows + 2
+                && current.charged.memoryOperations == prior.charged.memoryOperations + 1
+        }
         return checks
     }
 

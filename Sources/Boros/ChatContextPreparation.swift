@@ -140,13 +140,17 @@ enum ChatContextPreparation {
                             matching: .anyTerm, throughSequence: frontier, excludingSourceIDs: excluded)
                     }
                 } else { hits = [] }
-                let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+                let completed = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: projectID,
                     primaryHits: hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
+                    episodeLease: episodeLease, operationIsNested: true)
+                let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+                    primaryHits: completed.hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
                     episodeLease: episodeLease, operationIsNested: true)
                 var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
                     projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
                     episodeLease: episodeLease, operationIsNested: true)
                 var fields: [String: Any] = ["mode": fallback ? "lexical_fallback" : "lexical", "semantic_available": false]
+                fields["primary_completion"] = completed.audit
                 fields["exchange_expansion"] = expanded.audit
                 if fallback { fields["failure"] = "semantic_search_failed" }
                 if let raw {
@@ -180,8 +184,11 @@ enum ChatContextPreparation {
             try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease,
                 resourceLimited: report.manifest.meteredLexicalCoverage?.continuation != nil
                     || report.manifest.meteredLiteralCoverage?.incompleteReason == "raw_source_budget")
-            let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+            let completed = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: projectID,
                 primaryHits: report.hits, sourceFrontier: report.manifest.sourceFrontier, excludingSourceIDs: excluded,
+                episodeLease: episodeLease, operationIsNested: true)
+            let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
+                primaryHits: completed.hits, sourceFrontier: report.manifest.sourceFrontier, excludingSourceIDs: excluded,
                 episodeLease: episodeLease, operationIsNested: true)
             var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
                 projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
@@ -208,6 +215,7 @@ enum ChatContextPreparation {
                 audit["inspected_candidates"] = raw.inspectedCandidates; audit["candidate_window_full"] = raw.candidateWindowFull
                 audit["candidate_window_complete"] = raw.candidateWindowComplete; audit["raw_continuation_available"] = raw.continuation != nil
             }
+            audit["primary_completion"] = completed.audit
             audit["exchange_expansion"] = expanded.audit
             try appendAudit(to: &result, fields: audit)
             try appendQueryTrace(to: &result, formulation: formulation, prompt: prompt, input: lexicalInput, range: lexicalQueryUTF8Range)

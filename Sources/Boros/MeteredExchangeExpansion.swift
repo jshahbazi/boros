@@ -18,6 +18,59 @@ enum MeteredExchangeExpansion {
         let bytes: Data
     }
 
+    /// Complete a matched source only when the entire original fits one page.
+    /// Verify the incoming fragment before replacement so expansion cannot
+    /// conceal corrupt retrieval evidence. This does not widen candidate scope.
+    static func completeShortPrimaries(store: MemoryStore, projectID: String, primaryHits: [MemoryHit],
+        sourceFrontier: Int, excludingSourceIDs: ExactSourceIDs, episodeLease: EpisodeLease? = nil,
+        operationIsNested: Bool = false) throws -> ExchangeExpansionReport {
+        _ = try episodeLease?.checkActive(projectID: projectID)
+        guard sourceFrontier >= 0, primaryHits.count <= maximumCandidates, excludingSourceIDs.count <= 10000,
+              primaryHits.allSatisfy({ episodeIdentifierEqual($0.projectID, projectID) && $0.excerptOffset >= 0
+                  && $0.totalBytes >= 0 && $0.totalBytes <= MemoryStore.maximumPayloadBytes
+                  && $0.excerptOffset <= $0.totalBytes && $0.excerpt.utf8.count <= $0.totalBytes - $0.excerptOffset }) else {
+            throw MeteredRetrievalError.invalid
+        }
+        return try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
+            var hits: [MemoryHit] = [], decisions: [[String: Any]] = []
+            var completed = 0
+            for hit in primaryHits {
+                guard !excludingSourceIDs.contains(hit.eventID) else {
+                    decisions.append(["event_id": hit.eventID, "disposition": "excluded_primary"]); continue
+                }
+                guard let source = try MeteredRetrieval.sourceMetadata(store: store, lease: episodeLease, maximumRows: 1, {
+                    try store.sourceReference(eventID: hit.eventID, projectID: projectID)
+                }), source.sequence <= sourceFrontier, matches(hit, source: source), hit.sourceTime == source.sourceTime else {
+                    throw MeteredRetrievalError.sourceMismatch
+                }
+                guard source.byteCount > 0, source.byteCount <= MemoryStore.maximumPageBytes,
+                      hit.excerptOffset != 0 || hit.excerpt.utf8.count != source.byteCount else {
+                    hits.append(hit)
+                    decisions.append(["event_id": hit.eventID, "disposition": "retained_primary"]); continue
+                }
+                let page = try MeteredRetrieval.read(store: store, source: source, offset: 0, length: source.byteCount,
+                    lease: episodeLease, nested: true, examinedPasses: 3)
+                let bytes = Data(page.text.utf8), end = hit.excerptOffset + hit.excerpt.utf8.count
+                guard page.offset == 0, page.byteCount == source.byteCount, bytes.count == source.byteCount,
+                      String(data: bytes.prefix(hit.excerptOffset), encoding: .utf8) != nil,
+                      bytes.subdata(in: hit.excerptOffset..<end) == Data(hit.excerpt.utf8),
+                      String(data: bytes.suffix(bytes.count - end), encoding: .utf8) != nil else {
+                    throw MeteredRetrievalError.sourceMismatch
+                }
+                hits.append(MemoryHit(eventID: source.eventID, conversationID: source.conversationID, projectID: source.projectID,
+                    role: source.role, status: source.status, createdAt: source.createdAt, digest: source.digest,
+                    totalBytes: source.byteCount, excerptOffset: 0, excerpt: page.text, sourceTime: source.sourceTime))
+                completed += 1
+                decisions.append(["event_id": hit.eventID, "disposition": "completed_short_primary",
+                    "original_excerpt_offset": hit.excerptOffset, "original_excerpt_bytes": hit.excerpt.utf8.count,
+                    "complete_source_bytes": source.byteCount])
+            }
+            return ExchangeExpansionReport(hits: hits, audit: ["version": "complete-short-primaries-v1",
+                "source_frontier": sourceFrontier, "primary_count": primaryHits.count,
+                "retained_primary_count": hits.count, "completed_primary_count": completed, "decisions": decisions])
+        }
+    }
+
     static func expand(store: MemoryStore, projectID: String, primaryHits: [MemoryHit], sourceFrontier: Int,
         excludingSourceIDs: ExactSourceIDs, episodeLease: EpisodeLease? = nil,
         operationIsNested: Bool = false) throws -> ExchangeExpansionReport {
