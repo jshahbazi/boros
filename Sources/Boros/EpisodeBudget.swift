@@ -194,7 +194,7 @@ enum EpisodeState: String, Codable {
     case active, completed, failed, cancelled, interrupted, deadlineExceeded, budgetExceeded
 }
 enum EpisodeWorkKind: String, Codable {
-    case providerDiscovery, tokenizer, calibration, answer, retrieval, sourceRead, queryEmbedding, nativeInference
+    case providerDiscovery, tokenizer, calibration, answer, retrieval, sourceRead, queryEmbedding, nativeInference, authorityValidation
 }
 enum EpisodeWorkState: String, Codable {
     case prepared, dispatchArmed, submitted, completed, failedConfirmed, outcomeUnknown, cancelledBeforeDispatch

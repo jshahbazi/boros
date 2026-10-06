@@ -2154,6 +2154,13 @@ private enum BonsaiPlayground {
                 print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"authority_clock_crash_fixture\":false}"); exit(1) }
         }
+        if CommandLine.arguments.contains("--authority-binding-self-test") {
+            do {
+                let checks = try AuthorityBindingChecks.run()
+                let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"authority_binding_self_test\":false}"); exit(1) }
+        }
         if CommandLine.arguments.contains("--authority-clock-self-test") {
             do {
                 let checks = try AuthorityClockChecks.run()

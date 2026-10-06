@@ -1,13 +1,32 @@
 import Foundation
 import CSQLite
 
+struct AuthorityHistoricalState {
+    let state:AuthorityStateSnapshot
+    let receipt:AuthorityOperationReceipt
+    let startupReceiptID:String
+}
+
 /// Replays typed control operations, then compares every materialized row. Hash
 /// integrity is local provenance; it is not a cryptographic external authority.
 enum AuthorityStateJournal {
     static func validate(database:OpaquePointer) throws {
-        do { try validateImpl(database:database) } catch { throw AuthorityStateError.integrity }
+        do { _ = try validateImpl(database:database) } catch { throw AuthorityStateError.integrity }
     }
-    private static func validateImpl(database:OpaquePointer) throws {
+    static func resolve(database:OpaquePointer,receiptID:String,revision:Int,controlEpoch:Int)throws->AuthorityHistoricalState {
+        do {
+            try AuthorityStateKernel.identifier(receiptID)
+            guard let result=try validateImpl(database:database,targetReceiptID:receiptID),result.state.revision == revision,result.state.controlEpoch == controlEpoch else { throw AuthorityStateError.integrity }; return result
+        } catch { throw AuthorityStateError.integrity }
+    }
+    static func latestImmutable(database:OpaquePointer)throws->AuthorityHistoricalState {
+        do {
+            guard let result=try validateImpl(database:database,latest:true) else { throw AuthorityStateError.integrity }
+            let current=try AuthorityStateKernel.snapshot(database:database)
+            guard current.revision == result.state.revision,current.controlEpoch == result.state.controlEpoch else { throw AuthorityStateError.integrity }; return result
+        } catch { throw AuthorityStateError.integrity }
+    }
+    private static func validateImpl(database:OpaquePointer,targetReceiptID:String?=nil,latest:Bool=false) throws->AuthorityHistoricalState? {
         let kernel=AuthorityStateKernel.self
         try validateSchema(database)
         let current=try kernel.snapshot(database:database)
@@ -15,9 +34,11 @@ enum AuthorityStateJournal {
         guard current.version == "authority-state-v1",current.controlEpoch >= 0,current.revision >= 0,current.journalSequence >= 0,current.timeHighWater >= 0,current.tasks.count <= kernel.maximumRecords,current.bindings.count <= kernel.maximumRecords,current.policies.count <= kernel.maximumRecords else { throw AuthorityStateError.integrity }
         guard try kernel.rows(database,"SELECT id FROM authority_control").count == 1 else { throw AuthorityStateError.integrity }
         var replay=AuthorityStateSnapshot(storeID:current.storeID,ownerID:current.ownerID)
+        let allocation=try kernel.rows(database,"SELECT count(*),coalesce(sum(coalesce(length(request_payload),0)+length(receipt_payload)),0),coalesce(sum(length(CAST(request_id AS BLOB))+length(CAST(receipt_digest AS BLOB))),0) FROM authority_operations")[0]
+        guard allocation[0].integer == current.journalSequence,allocation[0].integer <= kernel.maximumOperations,allocation[1].integer >= 0,allocation[1].integer <= kernel.maximumJournalBytes,allocation[2].integer >= 0,allocation[2].integer <= kernel.maximumOperations*320 else { throw AuthorityStateError.integrity }
         let entries=try kernel.rows(database,"SELECT sequence,request_id,request_payload,receipt_payload,receipt_digest FROM authority_operations ORDER BY sequence")
         guard entries.count == current.journalSequence,entries.count <= kernel.maximumOperations else { throw AuthorityStateError.integrity }
-        var requestIDs=Set<Data>(),totalBytes=0
+        var requestIDs=Set<Data>(),totalBytes=0,startupReceiptID:String?,resolved:AuthorityHistoricalState?
         for row in entries {
             guard row.count == 5,let receiptBytes=row[3].bytes,row[4].string == kernel.digest(receiptBytes) else { throw AuthorityStateError.integrity }
             let receipt=try kernel.decode(AuthorityOperationReceipt.self,receiptBytes)
@@ -49,17 +70,30 @@ enum AuthorityStateJournal {
             }
             let expired=replay.policies.filter { p in p.state == .expired && before.policies.first(where:{episodeIdentifierEqual($0.id,p.id)})?.state != .expired }.map(\.id)
             guard receipt.revision == replay.revision,receipt.controlEpoch == replay.controlEpoch,receipt.timeHighWater == replay.timeHighWater,receipt.stateSHA256 == kernel.digest(try kernel.canonical(replay)),try kernel.canonical(expired) == kernel.canonical(receipt.expiredPolicyIDs) else { throw AuthorityStateError.integrity }
+            if receipt.kind == "startup" { startupReceiptID=receipt.requestID }
+            let immutableControl=receipt.version == "authority-receipt-v1" && (receipt.kind == "startup" || receipt.kind == "mutation" || (receipt.kind == "time" && replay.controlEpoch != before.controlEpoch))
+            if immutableControl && (latest || episodeIdentifierEqual(targetReceiptID,receipt.requestID)) {
+                guard let startupReceiptID else { throw AuthorityStateError.integrity }
+                resolved=AuthorityHistoricalState(state:replay,receipt:receipt,startupReceiptID:startupReceiptID)
+            }
         }
         guard try kernel.canonical(replay) == kernel.canonical(current) else { throw AuthorityStateError.integrity }
         try projections(database,"authority_tasks",key:"id",records:current.tasks.map { ($0.id,try kernel.canonical($0)) })
         try projections(database,"authority_bindings",key:"conversation_id",records:current.bindings.map { ($0.conversationID,try kernel.canonical($0)) })
         try projections(database,"authority_policies",key:"id",records:current.policies.map { ($0.id,try kernel.canonical($0)) })
+        return resolved
     }
     /// Owner-open validation runs before installation. A receipt cannot attest a
     /// schema that adds mutation triggers or changes identifier constraints.
     private static func validateSchema(_ database:OpaquePointer) throws {
         let kernel=AuthorityStateKernel.self
-        let objects=try kernel.rows(database,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE substr(name,1,10)='authority_' OR tbl_name IN ('authority_control','authority_tasks','authority_bindings','authority_policies','authority_operations')")
+        var objects=try kernel.rows(database,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE lower(substr(name,1,10))='authority_' OR tbl_name IN ('authority_control','authority_tasks','authority_bindings','authority_policies','authority_operations')")
+        let schema=try kernel.rows(database,"PRAGMA user_version")[0][0].integer
+        if schema == 7 {
+            try AuthorityBindingJournal.validateSchema(database:database)
+            let bindingNames=Set(AuthorityBindings.tableNames.map { Data($0.utf8) })
+            objects.removeAll { bindingNames.contains(Data($0[1].string.utf8)) }
+        }
         var expected:[Data:[AuthorityStateKernel.Value]]=[:]
         for (name,sql) in zip(kernel.tableNames,kernel.schemaStatements) {
             expected[Data(name.utf8)]=[.text("table"),.text(name),.text(name),.text(sql.replacingOccurrences(of:"IF NOT EXISTS ",with:""))]
@@ -112,6 +146,8 @@ enum AuthorityStateJournal {
         }
     }
     private static func projections(_ database:OpaquePointer,_ table:String,key:String,records:[(String,Data)]) throws {
+        let allocation=try AuthorityStateKernel.rows(database,"SELECT count(*),coalesce(sum(length(payload)),0),coalesce(sum(length(CAST("+key+" AS BLOB))+length(CAST(digest AS BLOB))),0) FROM "+table)[0]
+        guard allocation[0].integer == records.count,allocation[1].integer == records.reduce(0,{$0+$1.1.count}),allocation[2].integer <= records.count*320 else { throw AuthorityStateError.integrity }
         let rows=try AuthorityStateKernel.rows(database,"SELECT "+key+",payload,digest FROM "+table)
         guard rows.count == records.count else { throw AuthorityStateError.integrity }
         var expected:[Data:Data]=[:]

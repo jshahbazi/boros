@@ -163,6 +163,7 @@ final class MemoryStore: @unchecked Sendable {
     private let mutex = NSRecursiveLock()
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private var activeSQLFence: EpisodeSQLFence?
+    private let authorityValidationCheckpoint: ((String) throws -> Void)?
     private var claimedBackgroundReaders = Set<Data>()
     private var completedBackgroundSeals = Set<Data>()
     private var completedBackgroundChunkReads = Set<Data>()
@@ -170,8 +171,10 @@ final class MemoryStore: @unchecked Sendable {
     private var backgroundPayloadPages = 0
     private var backgroundMaterializedBytes = 0
 
-    init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil) throws {
+    init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil,
+        authorityValidationCheckpoint: ((String) throws -> Void)? = nil) throws {
         self.directory = directory.standardizedFileURL
+        self.authorityValidationCheckpoint = authorityValidationCheckpoint
         do {
             try Self.prepareDirectory(self.directory)
             let lockPath = self.directory.appendingPathComponent("owner.lock").path
@@ -190,17 +193,18 @@ final class MemoryStore: @unchecked Sendable {
             try execute("PRAGMA foreign_keys=ON")
             try execute("PRAGMA temp_store=MEMORY")
             let version = try scalarInteger("PRAGMA user_version")
-            guard (0...6).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
-            if version == 5 || version == 6 {
+            guard (0...7).contains(version) else { throw MemoryError.invalid("unsupported database schema version") }
+            if version >= 5 {
                 guard let database else { throw MemoryError.database("closed owner") }
                 try BackgroundIndexJournal.validate(database: database)
             } else {
                 let existingBackground = try query("SELECT name FROM sqlite_master WHERE name IN ('background_index_windows','background_index_work','background_index_active_window','background_index_work_window','background_index_adapter_violation')") { string($0, 0) }
                 guard existingBackground.isEmpty else { throw MemoryError.database("historical schema contains a background inventory") }
             }
-            if version == 6 {
+            if version >= 6 {
                 guard let database else { throw MemoryError.database("closed owner") }
                 try AuthorityStateJournal.validate(database: database)
+                if version == 7 { try AuthorityBindingJournal.validate(database: database) }
             } else {
                 let existingAuthority = try query("SELECT name FROM sqlite_master WHERE name LIKE 'authority_%'") { string($0, 0) }
                 guard existingAuthority.isEmpty else { throw MemoryError.database("historical schema contains an authority inventory") }
@@ -268,9 +272,11 @@ final class MemoryStore: @unchecked Sendable {
                 try createBackgroundIndexSchema()
                 guard let database else { throw MemoryError.database("closed owner") }
                 try AuthorityStateKernel.install(database: database, ownerID: "local-owner:\(geteuid())")
+                try AuthorityBindings.install(database: database)
+                if version < 7 { try AuthorityBindingJournal.classifyLegacy(database: database) }
                 let violations = try query("PRAGMA foreign_key_check") { string($0, 0) }
                 guard violations.isEmpty else { throw MemoryError.database("episode migration foreign-key failure") }
-                try execute("PRAGMA user_version=6")
+                try execute("PRAGMA user_version=7")
                 if version == 3 { try episodeMigrationCheckpoint?("beforeCommit") }
             }
             try execute("PRAGMA foreign_keys=ON")
@@ -320,6 +326,287 @@ final class MemoryStore: @unchecked Sendable {
                 try AuthorityStateKernel.apply(database: database, request: request, authority: authority, now: now)
             }
         }
+    }
+
+    /// Internal constructors only. Legacy adapters cannot dispatch this managed
+    /// work until the shared boundary protocol is wired into every consumer.
+    func acceptManagedHumanRequest(conversationID: String, turnID: String, humanEventID: String,
+        episodeID: String, requestID: String, text: String, limits: EpisodeLimits,
+        authority: AuthorityContext, taskIntent: HumanTaskIntent = .retainOrCreate,
+        clock: EpisodeClockSnapshot) throws -> ManagedAcceptance {
+        try locked {
+            guard let database else { throw MemoryError.database("closed owner") }
+            try AuthorityStateKernel.validateAuthority(database: database, authority: authority)
+            try AuthorityStateKernel.identifier(requestID)
+            let intentSHA = try AuthorityBindings.taskIntentSHA256(taskIntent)
+            let now = try authorityWallTime(clock)
+            try transaction { try AuthorityStateKernel.advanceTime(database: database, now: now) }
+            if let old = try findEpisode(episodeID) {
+                guard let binding = try AuthorityBindingJournal.managedEpisode(database: database, id: episodeID),
+                    episodeIdentifierEqual(binding.requestID, requestID), binding.taskIntentSHA256 == intentSHA,
+                    episodeIdentifierEqual(binding.ownerID, authority.ownerID),
+                    binding.authenticatedOrigin.rawValue == authority.origin.rawValue else { throw AuthorityStateError.conflict }
+                let receipt = try acceptRequestAndBeginEpisodeCore(conversationID: conversationID, turnID: turnID,
+                    humanEventID: humanEventID, episodeID: episodeID, text: text, limits: limits,
+                    clock: clock, managedAuthority: authority, buildBinding: nil)
+                guard episodeIdentifierEqual(old.id, receipt.id) else { throw AuthorityStateError.integrity }
+                return ManagedAcceptance(episode: receipt, binding: binding)
+            }
+            let prior = try query("SELECT id FROM authority_episode_bindings WHERE json_extract(payload,'$.managed.requestID')=? COLLATE BINARY", [.text(requestID)]) { string($0, 0) }
+            guard prior.isEmpty else { throw AuthorityStateError.conflict }
+            let receipt = try acceptRequestAndBeginEpisodeCore(conversationID: conversationID, turnID: turnID,
+                humanEventID: humanEventID, episodeID: episodeID, text: text, limits: limits, clock: clock,
+                managedAuthority: authority) {
+                var state = try AuthorityStateKernel.snapshot(database: database)
+                let project = try self.conversation(conversationID).projectID
+                let selected = state.bindings.first { episodeIdentifierEqual($0.conversationID, conversationID) }
+                var operation: AuthorityOperationRequest?
+                switch taskIntent {
+                case .retainOrCreate:
+                    if selected == nil {
+                        operation = AuthorityOperationRequest(requestID: "authority-accept-task:" + UUID().uuidString.lowercased(),
+                            expectedRevision: state.revision, operation: .taskNew, taskID: UUID().uuidString.lowercased(),
+                            projectID: project, conversationID: conversationID)
+                    }
+                case .new(let id):
+                    operation = AuthorityOperationRequest(requestID: "authority-accept-task:" + UUID().uuidString.lowercased(),
+                        expectedRevision: state.revision, operation: .taskNew, taskID: id, projectID: project, conversationID: conversationID)
+                case .select(let id, let revision):
+                    operation = AuthorityOperationRequest(requestID: "authority-accept-task:" + UUID().uuidString.lowercased(),
+                        expectedRevision: state.revision, operation: .taskSelect, taskID: id, projectID: project,
+                        conversationID: conversationID, expectedTaskRevision: revision)
+                }
+                if let operation {
+                    _ = try AuthorityStateKernel.apply(database: database, request: operation, authority: authority, now: now)
+                    state = try AuthorityStateKernel.snapshot(database: database)
+                }
+                guard let selection = state.bindings.first(where: { episodeIdentifierEqual($0.conversationID, conversationID) }),
+                    let task = state.tasks.first(where: { episodeIdentifierEqual($0.id, selection.taskID) }), task.state == .active,
+                    episodeIdentifierEqual(task.projectID, project), try !state.resolvedPolicies(projectID: project, taskID: task.id).blocked,
+                    let source = try self.sourceReference(eventID: humanEventID, projectID: project) else { throw AuthorityStateError.conflict }
+                let anchor = try AuthorityStateJournal.latestImmutable(database: database)
+                let origin = EpisodeOrigin.chat(conversationID: conversationID, turnID: turnID, humanEventID: humanEventID)
+                return AuthorityEpisodeBinding(episodeID: episodeID, storeID: state.storeID, ownerID: state.ownerID,
+                    startupReceiptID: anchor.startupReceiptID, controlReceiptID: anchor.receipt.requestID,
+                    controlEpoch: state.controlEpoch, authorityRevision: state.revision, projectID: project,
+                    conversationID: conversationID, requestID: requestID,
+                    authenticatedOrigin: authority.origin == .humanHost ? .humanHost : .humanCLI,
+                    taskID: task.id, taskRevision: task.revision,
+                    policyReferences: try AuthorityBindings.policyReferences(state: state, projectID: project, taskID: task.id),
+                    resolutionSHA256: try AuthorityBindings.resolutionSHA256(state: state, projectID: project, taskID: task.id),
+                    originSHA256: try Self.episodeOriginDigest(projectID: project, originJSON: self.episodeJSON(origin)),
+                    acceptedSource: source, taskIntentSHA256: intentSHA)
+            }
+            guard let binding = try AuthorityBindingJournal.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.integrity }
+            return ManagedAcceptance(episode: receipt, binding: binding)
+        }
+    }
+    func acceptManagedLocalRead(episodeID: String, projectID: String, binding: EpisodeLocalReadBinding,
+        limits: EpisodeLimits, authority: AuthorityContext, taskID: String? = nil,
+        clock: EpisodeClockSnapshot) throws -> ManagedAcceptance {
+        try locked {
+            guard let database else { throw MemoryError.database("closed owner") }
+            try AuthorityStateKernel.validateAuthority(database: database, authority: authority)
+            let now = try authorityWallTime(clock)
+            struct TaskScope: Encodable { let version = "authority-local-read-task-scope-v1"; let taskID: String? }
+            let intentSHA = AuthorityStateKernel.digest(try AuthorityStateKernel.canonical(TaskScope(taskID: taskID)))
+            try transaction { try AuthorityStateKernel.advanceTime(database: database, now: now) }
+            if try findEpisode(episodeID) != nil {
+                guard let old = try AuthorityBindings.managedEpisode(database: database, id: episodeID),
+                    old.taskIntentSHA256 == intentSHA, episodeIdentifierEqual(old.ownerID, authority.ownerID),
+                    old.authenticatedOrigin.rawValue == authority.origin.rawValue else { throw AuthorityStateError.conflict }
+                let receipt = try beginLocalReadEpisodeCore(episodeID: episodeID, projectID: projectID, binding: binding,
+                    limits: limits, clock: clock, managedAuthority: nil, buildBinding: nil)
+                return ManagedAcceptance(episode: receipt, binding: old)
+            }
+            let receipt = try beginLocalReadEpisodeCore(episodeID: episodeID, projectID: projectID, binding: binding,
+                limits: limits, clock: clock, managedAuthority: authority) {
+                let state = try AuthorityStateKernel.snapshot(database: database)
+                let task = taskID.flatMap { id in state.tasks.first { episodeIdentifierEqual($0.id, id) } }
+                if taskID != nil {
+                    guard let task, task.state == .active, episodeIdentifierEqual(task.projectID, projectID) else { throw AuthorityStateError.conflict }
+                }
+                guard try !state.resolvedPolicies(projectID: projectID, taskID: taskID).blocked else { throw AuthorityStateError.conflict }
+                let anchor = try AuthorityStateJournal.latestImmutable(database: database)
+                return AuthorityEpisodeBinding(episodeID: episodeID, storeID: state.storeID, ownerID: state.ownerID,
+                    startupReceiptID: anchor.startupReceiptID, controlReceiptID: anchor.receipt.requestID,
+                    controlEpoch: state.controlEpoch, authorityRevision: state.revision, projectID: projectID,
+                    requestID: binding.requestID, authenticatedOrigin: authority.origin == .humanHost ? .humanHost : .humanCLI,
+                    taskID: taskID, taskRevision: task?.revision,
+                    policyReferences: try AuthorityBindings.policyReferences(state: state, projectID: projectID, taskID: taskID),
+                    resolutionSHA256: try AuthorityBindings.resolutionSHA256(state: state, projectID: projectID, taskID: taskID),
+                    originSHA256: try Self.episodeOriginDigest(projectID: projectID, originJSON: self.episodeJSON(EpisodeOrigin.localRead(binding))),
+                    taskIntentSHA256: intentSHA)
+            }
+            guard let result = try AuthorityBindings.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.integrity }
+            return ManagedAcceptance(episode: receipt, binding: result)
+        }
+    }
+    func managedEpisodeBinding(id: String) throws -> AuthorityEpisodeBinding? {
+        try locked { guard let database else { throw MemoryError.database("closed owner") }; return try AuthorityBindingJournal.managedEpisode(database: database, id: id) }
+    }
+    func prepareManagedWork(episodeID: String, request: EpisodeWorkRequest, route: AuthorityLocalRoute,
+        dependencies: [AuthoritySourceDependency] = [], rendererProofSHA256: String? = nil,
+        clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord {
+        try locked {
+            guard let database, let episode = try AuthorityBindingJournal.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.unauthorized }
+            let encoded = EpisodeWorkRequest(id: request.id, parentID: request.parentID, kind: request.kind,
+                resources: request.resources, adapterIdentity: request.adapterIdentity, snapshot: nil, inputTokensKnown: request.inputTokensKnown)
+            let binding = AuthorityWorkBinding(workID: request.id, episodeID: episodeID,
+                episodeBindingSHA256: AuthorityStateKernel.digest(try AuthorityStateKernel.canonical(episode)),
+                requestSHA256: Self.digest(try episodeJSON(encoded)), snapshotSHA256: request.snapshot.map(Self.digest),
+                localRoute: route, rendererProofSHA256: rendererProofSHA256, sourceDependencies: dependencies)
+            return try reserveEpisodeWorkCore(episodeID: episodeID, request: request, clock: clock, authorityBinding: binding)
+        }
+    }
+    /// Conservative full-replay recipe for the dormant managed path. Every
+    /// inspection phase is durably charged before its body runs. No public
+    /// lease dispatch funds this validator; accounting stays owner-internal.
+    func validateManagedAuthority(episodeID: String, clock: EpisodeClockSnapshot) throws -> AuthorityValidationReceipt {
+        try locked {
+            guard let database else { throw MemoryError.database("closed owner") }
+            var operations: [String] = [], charged = EpisodeResources.zero
+            func phase<T>(_ name: String, _ resources: EpisodeResources, _ body: () throws -> T) throws -> T {
+                let result = try self.authorityValidationPhase(episodeID: episodeID, name: name, resources: resources, clock: clock, body)
+                operations.append(result.1.id); charged = try charged.adding(resources)
+                return result.0
+            }
+            // The first bounded recipe covers metadata enumeration and SQLite
+            // schema/control probes, including unknown/corrupted cardinalities.
+            let maximumRows = AuthorityStateKernel.maximumOperations + 3 * AuthorityStateKernel.maximumRecords + 256
+            let metadata = try phase("metadata", EpisodeResources(memoryOperations: 1, metadataRows: maximumRows)) {
+                let version = try self.scalarInteger("PRAGMA data_version")
+                let operations = try AuthorityStateKernel.rows(database, "SELECT count(*),coalesce(sum(length(CAST(request_payload AS BLOB))),0),coalesce(sum(length(CAST(receipt_payload AS BLOB))),0),coalesce(sum(CASE WHEN (request_payload IS NOT NULL AND typeof(request_payload)!='blob') OR typeof(receipt_payload)!='blob' THEN 1 ELSE 0 END),0) FROM authority_operations")[0]
+                guard operations[0].integer <= AuthorityStateKernel.maximumOperations, operations[3].integer == 0 else { throw AuthorityStateError.limit }
+                var bytes = try EpisodeResources(rawSourceBytes: operations[1].integer).adding(EpisodeResources(rawSourceBytes: operations[2].integer)).rawSourceBytes
+                var records = operations[0].integer
+                guard bytes >= 0, bytes <= AuthorityStateKernel.maximumJournalBytes else { throw AuthorityStateError.limit }
+                let control = try AuthorityStateKernel.rows(database, "SELECT length(CAST(payload AS BLOB)),typeof(payload) FROM authority_control WHERE id=1")
+                guard control.count == 1, control[0][0].integer > 0, control[0][0].integer <= MemoryStore.maximumPayloadBytes, control[0][1].string == "blob" else { throw AuthorityStateError.integrity }
+                for table in ["authority_tasks", "authority_bindings", "authority_policies"] {
+                    let row = try AuthorityStateKernel.rows(database, "SELECT count(*),coalesce(sum(length(CAST(payload AS BLOB))),0),coalesce(sum(CASE WHEN typeof(payload)!='blob' THEN 1 ELSE 0 END),0) FROM " + table)[0]
+                    guard row[0].integer <= AuthorityStateKernel.maximumRecords, row[1].integer >= 0,
+                        row[1].integer <= AuthorityStateKernel.maximumJournalBytes, row[2].integer == 0 else { throw AuthorityStateError.limit }
+                    bytes = try EpisodeResources(rawSourceBytes: bytes).adding(EpisodeResources(rawSourceBytes: row[1].integer)).rawSourceBytes
+                    records += row[0].integer
+                }
+                let tail = try AuthorityStateKernel.rows(database, "SELECT length(CAST(receipt_payload AS BLOB)),typeof(receipt_payload) FROM authority_operations ORDER BY sequence DESC LIMIT 1")
+                guard tail.count == 1, tail[0][0].integer > 0, tail[0][0].integer <= MemoryStore.maximumPayloadBytes, tail[0][1].string == "blob" else { throw AuthorityStateError.integrity }
+                return (version, operations[0].integer, operations[1].integer, bytes, control[0][0].integer, records, tail[0][0].integer)
+            }
+            let sourceIDs: [String] = try phase("journal-descriptors",
+                EpisodeResources(memoryOperations: 1, rawSourceBytes: metadata.2, metadataRows: metadata.1)) {
+                return try self.transaction {
+                    guard try self.scalarInteger("PRAGMA data_version") == metadata.0 else { throw AuthorityStateError.staleRevision }
+                    var definitions: [Data: AuthorityPolicyDefinition] = [:], ids: [String] = []
+                    try AuthorityBindings.visit(database: database, sql: "SELECT request_payload FROM authority_operations WHERE request_payload IS NOT NULL ORDER BY sequence") { row in
+                        guard let bytes = row[0].bytes else { throw AuthorityStateError.integrity }
+                        let request = try AuthorityStateKernel.decode(AuthorityOperationRequest.self, bytes)
+                        if let definition = request.policy, let policyID = request.policyID {
+                            guard definition.sources.count <= 16 else { throw AuthorityStateError.limit }
+                            definitions[Data(policyID.utf8)] = definition
+                            ids += definition.sources.map(\.eventID)
+                        } else if request.operation == .policyActivate, let policyID = request.policyID {
+                            guard let definition = definitions[Data(policyID.utf8)] else { throw AuthorityStateError.integrity }
+                            ids += definition.sources.map(\.eventID)
+                        }
+                    }
+                    guard ids.count <= 16 * AuthorityStateKernel.maximumOperations else { throw AuthorityStateError.limit }
+                    return ids
+                }
+            }
+            let proofBytes = try phase("source-metadata",
+                EpisodeResources(memoryOperations: 1, metadataRows: sourceIDs.count + 2)) {
+                var bytes = 0
+                for id in sourceIDs {
+                    let row = try AuthorityStateKernel.rows(database, "SELECT length(CAST(payload AS BLOB)),byte_count,typeof(payload) FROM events WHERE id=?", [.text(id)])
+                    guard row.count == 1, row[0][0].integer == row[0][1].integer, row[0][0].integer >= 0,
+                        row[0][0].integer <= MemoryStore.maximumPayloadBytes, row[0][2].string == "blob" else { throw AuthorityStateError.integrity }
+                    bytes = try EpisodeResources(rawSourceBytes: bytes).adding(EpisodeResources(rawSourceBytes: row[0][0].integer)).rawSourceBytes
+                }
+                guard let binding = try AuthorityBindings.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.unauthorized }
+                var acceptedBytes = 0
+                if let accepted = binding.acceptedSource {
+                    let row = try AuthorityStateKernel.rows(database, "SELECT length(CAST(payload AS BLOB)),byte_count,typeof(payload) FROM events WHERE id=?", [.text(accepted.eventID)])
+                    guard row.count == 1, row[0][0].integer == row[0][1].integer, row[0][0].integer == accepted.byteCount, row[0][2].string == "blob" else { throw AuthorityStateError.integrity }
+                    acceptedBytes = accepted.byteCount
+                }
+                return (bytes, acceptedBytes)
+            }
+            // Two complete journal/projection/source passes cover explicit
+            // validation plus the checkpoint's replay. Extra control reads are
+            // covered separately. SQLite data_version fences the planned sizes
+            // against another connection before any original payload is read.
+            let passes = try EpisodeResources(rawSourceBytes: metadata.3).adding(EpisodeResources(rawSourceBytes: proofBytes.0))
+            var replay = try passes.adding(passes)
+            // Temporal status/revision changes can grow each policy's JSON;
+            // bound that growth and the clock/integer widths before charging.
+            let controlCeiling = min(MemoryStore.maximumPayloadBytes, metadata.4 + 2 * AuthorityStateKernel.maximumRecords + 64)
+            let extraRaw = 4 * controlCeiling + proofBytes.1 + metadata.6
+            let replayRows = 2 * (metadata.5 + sourceIDs.count + metadata.1 + 128) + 8
+            replay = try replay.adding(EpisodeResources(memoryOperations: 1, rawSourceBytes: extraRaw, metadataRows: replayRows))
+            let validated = try phase("replay-and-clock", replay) {
+                let now = try self.authorityWallTime(clock)
+                let captured = try self.transaction {
+                    guard try self.scalarInteger("PRAGMA data_version") == metadata.0,
+                        let binding = try AuthorityBindings.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.staleRevision }
+                    let historical = try AuthorityStateJournal.resolve(database: database, receiptID: binding.controlReceiptID,
+                        revision: binding.authorityRevision, controlEpoch: binding.controlEpoch)
+                    try AuthorityStateKernel.advanceTime(database: database, now: now)
+                    return (historical, binding)
+                }
+                // Expiry remains committed if the accepted binding is stale.
+                return try self.transaction {
+                    guard try self.scalarInteger("PRAGMA data_version") == metadata.0,
+                        let binding = try AuthorityBindings.managedEpisode(database: database, id: episodeID) else { throw AuthorityStateError.staleRevision }
+                    guard try AuthorityStateKernel.canonical(binding) == AuthorityStateKernel.canonical(captured.1) else { throw AuthorityStateError.staleRevision }
+                    let state = try AuthorityStateKernel.snapshot(database: database)
+                    guard episodeIdentifierEqual(state.storeID, binding.storeID), episodeIdentifierEqual(state.ownerID, binding.ownerID),
+                        state.controlEpoch == binding.controlEpoch, state.revision == binding.authorityRevision,
+                        try AuthorityBindings.resolutionSHA256(state: state, projectID: binding.projectID, taskID: binding.taskID) == binding.resolutionSHA256,
+                        try !state.resolvedPolicies(projectID: binding.projectID, taskID: binding.taskID).blocked else { throw AuthorityStateError.staleRevision }
+                    try AuthorityBindings.validateEpisode(database: database, binding: binding, verifySourceBytes: true, historical: captured.0)
+                    return (state, binding)
+                }
+            }
+            let live = try episodeReceipt(id: episodeID, clock: clock)
+            guard live.state == .active else {
+                if live.state == .deadlineExceeded { throw EpisodeBudgetError.deadlineExceeded }
+                if live.state == .budgetExceeded { throw EpisodeBudgetError.exhausted }
+                throw EpisodeBudgetError.inactive
+            }
+            return AuthorityValidationReceipt(episodeID: episodeID,
+                episodeBindingSHA256: AuthorityStateKernel.digest(try AuthorityStateKernel.canonical(validated.1)),
+                controlEpoch: validated.0.controlEpoch, authorityRevision: validated.0.revision, operationIDs: operations, charged: charged)
+        }
+    }
+    private func authorityValidationPhase<T>(episodeID: String, name: String, resources: EpisodeResources,
+        clock: EpisodeClockSnapshot, _ body: () throws -> T) throws -> (T, EpisodeWorkRecord) {
+        let identity = "authority-validation-v1:" + name
+        let request = EpisodeWorkRequest(id: UUID().uuidString.lowercased(), parentID: nil, kind: .authorityValidation,
+            resources: resources, adapterIdentity: identity, snapshot: nil, inputTokensKnown: true)
+        let work = try prepareManagedWork(episodeID: episodeID, request: request,
+            route: AuthorityLocalRoute(kind: .localMemory, identity: identity), clock: clock)
+        _ = try armEpisodeWorkLocked(episodeID: episodeID, operationID: work.id,
+            expectedRevision: work.revision, clock: clock, managedValidation: true)
+        do {
+            try authorityValidationCheckpoint?(name)
+            let result = try body()
+            let settled = try settleEpisodeWork(episodeID: episodeID, operationID: work.id,
+                settlement: EpisodeWorkSettlement(receiptID: UUID().uuidString.lowercased(), outcome: .completed, observed: nil, evidence: nil), clock: clock)
+            return (result, settled)
+        } catch {
+            _ = try? settleEpisodeWork(episodeID: episodeID, operationID: work.id,
+                settlement: EpisodeWorkSettlement(receiptID: UUID().uuidString.lowercased(), outcome: .failedConfirmed, observed: nil, evidence: nil), clock: clock)
+            throw error
+        }
+    }
+
+    private func authorityWallTime(_ clock: EpisodeClockSnapshot) throws -> Int64 {
+        try validateEpisodeClock(clock)
+        let value = (clock.utc.timeIntervalSince1970 * 1000).rounded(.down)
+        guard value.isFinite, value >= 0, value < Double(Int64.max) else { throw AuthorityStateError.invalid }
+        return Int64(value)
     }
 
     func withEpisodeSQLFence<T>(lease: EpisodeLease, _ body: () throws -> T) throws -> T {
@@ -596,6 +883,9 @@ final class MemoryStore: @unchecked Sendable {
                 // This gate checks retained provenance and actual request
                 // bytes without performing an additional raw-source read.
                 try ContextComponentJournal.validate(database: database, invocationID: invocationID, verifySourceRanges: false)
+                if let episodeWorkID, try AuthorityBindingJournal.managedWork(database: database, id: episodeWorkID) != nil {
+                    try AuthorityBindingJournal.insertManagedInvocation(database: database, id: invocationID)
+                } else { try AuthorityBindingJournal.insertLegacyInvocation(database: database, id: invocationID) }
             }
             guard let result = try findInvocation(invocationID) else { throw MemoryError.database("invocation publication failed") }
             return result
@@ -1326,6 +1616,12 @@ extension MemoryStore: EpisodeLedger {
     }
 
     func acceptRequestAndBeginEpisode(conversationID: String, turnID: String, humanEventID: String, episodeID: String, text: String, limits: EpisodeLimits, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt {
+        try acceptRequestAndBeginEpisodeCore(conversationID: conversationID, turnID: turnID, humanEventID: humanEventID,
+            episodeID: episodeID, text: text, limits: limits, clock: clock, managedAuthority: nil, buildBinding: nil)
+    }
+    private func acceptRequestAndBeginEpisodeCore(conversationID: String, turnID: String, humanEventID: String, episodeID: String,
+        text: String, limits: EpisodeLimits, clock: EpisodeClockSnapshot, managedAuthority: AuthorityContext?,
+        buildBinding: (() throws -> AuthorityEpisodeBinding)?) throws -> EpisodeReceipt {
         try locked {
             try validateEpisodeClock(clock); try validateEpisodeLimits(limits)
             for id in [turnID, humanEventID, episodeID] { try validateIdentifier(id, name: "episode identifier") }
@@ -1353,6 +1649,10 @@ extension MemoryStore: EpisodeLedger {
                 for resource in EpisodeResource.allCases {
                     try execute("INSERT INTO episode_resource_totals VALUES (?,?,0,0,?)", [.text(episodeID), .text(resource.rawValue), .integer(limits.resources[resource])])
                 }
+                guard let database else { throw MemoryError.database("closed owner") }
+                if let buildBinding, let managedAuthority {
+                    try AuthorityBindingJournal.insertManagedEpisode(database: database, binding: buildBinding(), authority: managedAuthority)
+                } else { try AuthorityBindingJournal.insertLegacyEpisode(database: database, id: episodeID) }
             }
             guard let result = try findEpisode(episodeID) else { throw MemoryError.database("episode publication failed") }
             return result
@@ -1360,6 +1660,12 @@ extension MemoryStore: EpisodeLedger {
     }
     func beginLocalReadEpisode(episodeID: String, projectID: String, binding: EpisodeLocalReadBinding,
         limits: EpisodeLimits, clock: EpisodeClockSnapshot) throws -> EpisodeReceipt {
+        try beginLocalReadEpisodeCore(episodeID: episodeID, projectID: projectID, binding: binding,
+            limits: limits, clock: clock, managedAuthority: nil, buildBinding: nil)
+    }
+    private func beginLocalReadEpisodeCore(episodeID: String, projectID: String, binding: EpisodeLocalReadBinding,
+        limits: EpisodeLimits, clock: EpisodeClockSnapshot, managedAuthority: AuthorityContext?,
+        buildBinding: (() throws -> AuthorityEpisodeBinding)?) throws -> EpisodeReceipt {
         try locked {
             try validateIdentifier(episodeID, name: "episode ID"); try validateIdentifier(projectID, name: "project ID")
             try validateEpisodeClock(clock); try validateEpisodeLimits(limits); _ = try binding.validated()
@@ -1388,12 +1694,20 @@ extension MemoryStore: EpisodeLedger {
                 for resource in EpisodeResource.allCases {
                     try execute("INSERT INTO episode_resource_totals VALUES (?,?,0,0,?)", [.text(episodeID), .text(resource.rawValue), .integer(limits.resources[resource])])
                 }
+                guard let database else { throw MemoryError.database("closed owner") }
+                if let buildBinding, let managedAuthority {
+                    try AuthorityBindings.insertManagedEpisode(database: database, binding: buildBinding(), authority: managedAuthority)
+                } else { try AuthorityBindings.insertLegacyEpisode(database: database, id: episodeID) }
             }
             guard let receipt = try findEpisode(episodeID) else { throw MemoryError.database("local read episode publication failed") }
             return receipt
         }
     }
     func reserveEpisodeWork(episodeID: String, request: EpisodeWorkRequest, clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord {
+        try reserveEpisodeWorkCore(episodeID: episodeID, request: request, clock: clock, authorityBinding: nil)
+    }
+    private func reserveEpisodeWorkCore(episodeID: String, request: EpisodeWorkRequest, clock: EpisodeClockSnapshot,
+        authorityBinding: AuthorityWorkBinding?) throws -> EpisodeWorkRecord {
         try locked {
             let clock = try episodeRuntimeClock(clock)
             try validateEpisodeClock(clock)
@@ -1406,7 +1720,7 @@ extension MemoryStore: EpisodeLedger {
                 guard request.resources.modelCalls == 1 else { throw EpisodeBudgetError.invalid }
             case .providerDiscovery, .tokenizer:
                 guard request.resources.modelCalls == 0, request.resources.httpAttempts == 1 else { throw EpisodeBudgetError.invalid }
-            case .retrieval, .sourceRead:
+            case .retrieval, .sourceRead, .authorityValidation:
                 guard request.resources.modelCalls == 0 else { throw EpisodeBudgetError.invalid }
             }
             guard !request.adapterIdentity.isEmpty, request.adapterIdentity.utf8.count <= 2048, !request.adapterIdentity.contains("\0") else { throw EpisodeBudgetError.invalid }
@@ -1414,10 +1728,18 @@ extension MemoryStore: EpisodeLedger {
             if let snapshot = request.snapshot { try validateRequestBody(snapshot) }
             guard let originEpisode = try findEpisode(episodeID) else { throw MemoryError.missing("episode") }
             if originEpisode.origin.isLocalRead {
-                guard [.retrieval, .sourceRead, .queryEmbedding].contains(request.kind), request.resources.outputTokens == 0 else { throw EpisodeBudgetError.invalid }
+                guard [.retrieval, .sourceRead, .queryEmbedding, .authorityValidation].contains(request.kind), request.resources.outputTokens == 0 else { throw EpisodeBudgetError.invalid }
             }
+            guard let database else { throw MemoryError.database("closed owner") }
+            let managedEpisode = try AuthorityBindingJournal.managedEpisode(database: database, id: episodeID)
+            guard (managedEpisode == nil) == (authorityBinding == nil) else { throw AuthorityStateError.unauthorized }
+            if request.kind == .authorityValidation { guard authorityBinding != nil else { throw AuthorityStateError.unauthorized } }
             if let existing = try findEpisodeWork(request.id) {
                 guard episodeIdentifierEqual(existing.episodeID, episodeID), existing.request == request else { throw EpisodeBudgetError.conflict }
+                if let authorityBinding {
+                    guard let retained = try AuthorityBindingJournal.managedWork(database: database, id: request.id),
+                        try AuthorityStateKernel.canonical(retained) == AuthorityStateKernel.canonical(authorityBinding) else { throw AuthorityStateError.conflict }
+                }
                 return existing
             }
             var failure: EpisodeBudgetError?
@@ -1468,6 +1790,8 @@ extension MemoryStore: EpisodeLedger {
                 bindings += [.integer(episode.revision), .blob(try episodeJSON(EpisodeResources.zero)), .blob(try episodeJSON(request.resources)), .integer(Int(clock.continuousNanoseconds))]
                 try execute("INSERT INTO episode_work (id,episode_id,parent_id,kind,adapter_identity,request_json,request_digest,snapshot_digest,revision,state,charged_json,held_json,created_ticks) VALUES (?, ?, " + parentSQL + ",?,?,?,?," + snapshotSQL + ",?,'prepared',?,?,?)", bindings)
                 try updateEpisodeTotals(episode, replacing: nil, charged: .zero, held: request.resources)
+                if let authorityBinding { try AuthorityBindingJournal.insertManagedWork(database: database, binding: authorityBinding) }
+                else { try AuthorityBindingJournal.insertLegacyWork(database: database, id: request.id) }
             }
             if let failure { throw failure }
             guard let result = try findEpisodeWork(request.id) else { throw MemoryError.database("episode reservation publication failed") }
@@ -1496,13 +1820,17 @@ extension MemoryStore: EpisodeLedger {
             family.contains(string($0, 0))
         }.contains(true)
     }
-    private func armEpisodeWorkLocked(episodeID: String, operationID: String, expectedRevision: Int, clock: EpisodeClockSnapshot) throws -> EpisodeWorkRecord {
+    private func armEpisodeWorkLocked(episodeID: String, operationID: String, expectedRevision: Int, clock: EpisodeClockSnapshot, managedValidation: Bool = false) throws -> EpisodeWorkRecord {
         let clock = try episodeRuntimeClock(clock)
         var failure: EpisodeBudgetError?
         try transaction {
             guard let episode = try findEpisode(episodeID), let work = try findEpisodeWork(operationID), episodeIdentifierEqual(work.episodeID, episodeID) else { throw MemoryError.missing("episode work") }
+            guard let database else { throw MemoryError.database("closed owner") }
+            if try AuthorityBindingJournal.managedWork(database: database, id: operationID) != nil {
+                guard managedValidation && work.request.kind == .authorityValidation else { throw AuthorityStateError.unauthorized }
+            }
             if episode.origin.isLocalRead {
-                guard [.retrieval, .sourceRead, .queryEmbedding].contains(work.request.kind), work.request.resources.outputTokens == 0 else { throw EpisodeBudgetError.invalid }
+                guard [.retrieval, .sourceRead, .queryEmbedding, .authorityValidation].contains(work.request.kind), work.request.resources.outputTokens == 0 else { throw EpisodeBudgetError.invalid }
             }
             if let problem = try advanceEpisodeClock(episode, clock: clock) { failure = problem; return }
             guard expectedRevision == work.revision, expectedRevision == episode.revision else { failure = .staleRevision; return }
@@ -1737,8 +2065,9 @@ extension MemoryStore: EpisodeLedger {
         }
         guard Set(snapshots).count == snapshots.count else { throw MemoryError.database("duplicate episode archive snapshots") }
         let schemaVersion = try rows("PRAGMA user_version") { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
-        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 else { throw MemoryError.database("unsupported episode archive schema") }
-        if schemaVersion == 6 { try AuthorityStateJournal.validate(database: database) }
+        guard schemaVersion == 3 || schemaVersion == 4 || schemaVersion == 5 || schemaVersion == 6 || schemaVersion == 7 else { throw MemoryError.database("unsupported episode archive schema") }
+        if schemaVersion >= 6 { try AuthorityStateJournal.validate(database: database) }
+        if schemaVersion == 7 { try AuthorityBindingJournal.validate(database: database) }
         struct CheckEpisode { let id: String; let origin: EpisodeOrigin; let limits: EpisodeLimits; let state: EpisodeState; let revision: Int; let created: Int; let deadline: Int; let last: Int }
         let originColumns = schemaVersion >= 4 ? ",origin_json,origin_digest" : ""
         var localReadRequestIDs = Set<Data>()
@@ -1795,14 +2124,14 @@ extension MemoryStore: EpisodeLedger {
                   sqlite3_column_int64(row, 16) >= episode.created,
                   [0,1].contains(sqlite3_column_int(row, 19)), [0,1].contains(sqlite3_column_int(row, 20)) else { throw MemoryError.database("invalid episode archive work linkage") }
             if episode.origin.isLocalRead {
-                guard [.retrieval, .sourceRead, .queryEmbedding].contains(request.kind), request.resources.outputTokens == 0 else { throw MemoryError.database("local read episode archive contains generative work") }
+                guard [.retrieval, .sourceRead, .queryEmbedding, .authorityValidation].contains(request.kind), request.resources.outputTokens == 0 else { throw MemoryError.database("local read episode archive contains generative work") }
             }
             switch request.kind {
             case .calibration, .answer, .nativeInference, .queryEmbedding:
                 guard request.resources.modelCalls == 1 else { throw MemoryError.database("episode archive model call mismatch") }
             case .providerDiscovery, .tokenizer:
                 guard request.resources.modelCalls == 0, request.resources.httpAttempts == 1 else { throw MemoryError.database("episode archive HTTP attempt mismatch") }
-            case .retrieval, .sourceRead:
+            case .retrieval, .sourceRead, .authorityValidation:
                 guard request.resources.modelCalls == 0 else { throw MemoryError.database("episode archive retrieval call mismatch") }
             }
             guard (request.resources.inputTokens == 0 && request.resources.outputTokens == 0) || request.resources.modelCalls > 0 else { throw MemoryError.database("episode archive tokens lack model call") }
