@@ -19,6 +19,12 @@ CONFIGURATION_SHA256 = "62381f748b563189b34b9c97f637c3ee234aef7095ce64096ecf6411
 # Foundation canonical JSON emits the frozen 0.0 temperature as numeric 0.
 # These are separately named representation pins for identical settings.
 NATIVE_CONFIGURATION_SHA256 = "73729124226e2a729d052ea49d6f03ecced31b2b93e3beea63064ab046fa0013"
+FORMAT_INSTRUCTION_AMENDMENT = "json-output-instructions-v1"
+FORMAT_INSTRUCTION_SYSTEM = ("Be helpful, concise, and accurate. Follow the user's requested output format exactly. "
+    "If the user requests JSON, return only valid JSON with the requested top-level structure and fields, "
+    "without Markdown fences or explanatory text.")
+FORMAT_CONFIGURATION_SHA256 = "2b1535b93ea3bbb16035bbe3f744b6e4c980eac9837ea8694925fc5554d37e69"
+FORMAT_NATIVE_CONFIGURATION_SHA256 = "f13e87eb29ce2ecf88746293d3f01d74841394dc0a0aca3d2e9d5747dda53361"
 PROJECTION_SHA256 = (
     "ae74877c63469436c0e8e17c16f9f4098eeee06e34f5a52f68ddaf8ae0f32aee",
     "5dd12260c9eaedf39965285cdb1d0cd821bde4d8a3ce53d67546854dc06b950a",
@@ -57,9 +63,26 @@ def projection(pack):
 
 def validate_configuration(configuration):
     configuration = e.validate_configuration(configuration)
-    if e.digest(canonical_json(configuration)) != CONFIGURATION_SHA256:
+    if e.digest(canonical_json(configuration)) not in (CONFIGURATION_SHA256, FORMAT_CONFIGURATION_SHA256):
         raise e.EvaluationError("evidence control configuration pin mismatch")
     return configuration
+
+
+def selected_configuration(*, format_instructions=False):
+    if type(format_instructions) is not bool:
+        raise e.EvaluationError("invalid evidence control amendment option")
+    configuration = dict(developer.CONFIGURATION)
+    if format_instructions:
+        configuration["system"] = FORMAT_INSTRUCTION_SYSTEM
+    return validate_configuration(configuration)
+
+
+def configuration_pins(configuration):
+    configuration = validate_configuration(configuration)
+    pin = e.digest(canonical_json(configuration))
+    if pin == FORMAT_CONFIGURATION_SHA256:
+        return pin, FORMAT_NATIVE_CONFIGURATION_SHA256, FORMAT_INSTRUCTION_AMENDMENT
+    return pin, NATIVE_CONFIGURATION_SHA256, None
 
 
 def validate_pack(pack):

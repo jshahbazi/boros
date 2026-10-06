@@ -27,6 +27,7 @@ def full_pack_coverage(pack, ranges, recent_ids):
 
 def witness_eligibility(native, item, pack, document, operational):
     metadata = controls.metadata(pack)
+    _configuration_pin, native_configuration_pin, _amendment = controls.configuration_pins(document["configuration"])
     if not isinstance(item, dict) or not operational:
         return {"eligible": False, "failure_code": "witness_outcome_unavailable",
                 "complete_pack_delivered": None, "covered_source_count": 0}
@@ -38,6 +39,7 @@ def witness_eligibility(native, item, pack, document, operational):
         and native.get("witness_mode") == controls.VERSION and item.get("witness_mode") == controls.VERSION
         and native.get("input_sha256") == e.digest(canonical_json(document))
         and native.get("public_projection_sha256") == metadata["projection_sha256"]
+        and native.get("native_configuration_sha256") == native_configuration_pin
         and witness.get("version") == controls.VALIDATION_VERSION
         and type(witness.get("declared_source_count")) is int
         and witness["declared_source_count"] == metadata["source_count"]
@@ -86,21 +88,24 @@ def summarize(attempts):
         "overall_control_success_rate": verified_successes / len(attempts) if attempts else None}
 
 
-def run(source, output, *, timeout=10800):
+def run(source, output, *, timeout=10800, format_instructions=False):
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise e.EvaluationError("report already exists")
     if type(timeout) is not int or not 60 <= timeout <= 21600:
         raise e.EvaluationError("invalid runner timeout")
     packs = controls.prepare(source)
-    configuration = controls.validate_configuration(developer.CONFIGURATION)
+    configuration = controls.selected_configuration(format_instructions=format_instructions)
+    configuration_pin, native_configuration_pin, amendment = controls.configuration_pins(configuration)
     documents = [controls.runner_input(pack, configuration) for pack in packs]
     pack_annotations = [controls.metadata(pack) for pack in packs]
     declaration = {"witness_mode": controls.VERSION, "declared_attempts": 9,
                    "source_sha256": cases.SOURCE_SHA256,
-                   "configuration_sha256": controls.CONFIGURATION_SHA256,
-                   "native_configuration_sha256": controls.NATIVE_CONFIGURATION_SHA256,
+                   "configuration_sha256": configuration_pin,
+                   "native_configuration_sha256": native_configuration_pin,
                    "packs": pack_annotations}
+    if amendment is not None:
+        declaration["development_amendment"] = amendment
     declaration_bytes = canonical_json(declaration)
     # All source/projection/configuration/oracle pins are frozen before compile.
     with tempfile.TemporaryDirectory(prefix="boros-evidence-controls-") as temporary:
@@ -130,8 +135,8 @@ def run(source, output, *, timeout=10800):
                        "path": cases.SOURCE_PATH, "sha256": cases.SOURCE_SHA256, "bytes": cases.SOURCE_BYTES,
                        "license_status": "redistribution_permission_unverified_payload_not_in_git"},
             "configuration": {key: value for key, value in configuration.items() if key != "system"},
-            "configuration_sha256": controls.CONFIGURATION_SHA256,
-            "native_configuration_sha256": controls.NATIVE_CONFIGURATION_SHA256,
+            "configuration_sha256": configuration_pin,
+            "native_configuration_sha256": native_configuration_pin,
             "configuration_representation": "Foundation emits frozen temperature 0.0 as numeric 0; values unchanged",
             "system_sha256": e.digest(configuration["system"].encode()), "implementation": implementation,
             "declaration": declaration, "declaration_sha256": e.digest(declaration_bytes),
@@ -146,6 +151,9 @@ def run(source, output, *, timeout=10800):
                 "native witness validation and scorer inspection run after terminalization outside episode charges; runtime accounting is not total experiment cost",
                 "failures remain in overall denominator; one replicate and uncontrolled caches",
                 "controlled evidence availability does not establish general recall, model-instance identity or economics"]}
+        if amendment is not None:
+            report["development_amendment"] = amendment
+            report["limitations"].append("generic JSON output instruction amendment changes only System text; original control and paired inputs remain frozen")
         output.parent.mkdir(parents=True, exist_ok=True)
         e.private_write(output, canonical_json(report) + b"\n")
     return report
@@ -156,9 +164,11 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=10800)
+    parser.add_argument("--format-instructions", action="store_true",
+                        help="Separate pinned System-only JSON format instruction amendment")
     args = parser.parse_args()
     try:
-        report = run(args.source, args.output, timeout=args.timeout)
+        report = run(args.source, args.output, timeout=args.timeout, format_instructions=args.format_instructions)
         print(json.dumps({"declared_attempts": report["summary"]["declared_attempts"],
                           "five_category_quality_gate": "inconclusive"}, sort_keys=True))
         return 0

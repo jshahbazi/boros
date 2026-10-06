@@ -34,6 +34,9 @@ enum AnswerEvaluationCommand {
     // Foundation's canonical numeric zero is 0; the Python source pin retains
     // 0.0. Both representations describe the same frozen configuration.
     static let witnessConfigurationSHA256 = "73729124226e2a729d052ea49d6f03ecced31b2b93e3beea63064ab046fa0013"
+    /// Separate system-only development amendment; original settings and
+    /// projection pins remain accepted exactly as declared.
+    static let formatInstructionConfigurationSHA256 = "f13e87eb29ce2ecf88746293d3f01d74841394dc0a0aca3d2e9d5747dda53361"
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
     private struct Event: Decodable {
@@ -110,9 +113,11 @@ enum AnswerEvaluationCommand {
 
     private struct InputPins {
         let ordinary: Set<String>, witness: Set<String>, witnessConfiguration: String
+        var formatConfiguration: String? = nil
         static var production: InputPins {
             InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
-                witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256)
+                witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256,
+                formatConfiguration: formatInstructionConfigurationSHA256)
         }
     }
     private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
@@ -134,9 +139,11 @@ enum AnswerEvaluationCommand {
         if mode.intValue == 1 {
             guard pins.ordinary.contains(projectionDigest) else { throw Failure.invalid }
         } else {
+            let configurationDigest = digest(try JSONSerialization.data(withJSONObject: configuration,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
             guard pins.witness.contains(projectionDigest),
-                  digest(try JSONSerialization.data(withJSONObject: configuration, options: [.sortedKeys, .withoutEscapingSlashes]))
-                    == pins.witnessConfiguration else { throw Failure.invalid }
+                  configurationDigest == pins.witnessConfiguration
+                    || configurationDigest == pins.formatConfiguration else { throw Failure.invalid }
         }
         let value = try JSONDecoder().decode(Document.self, from: bytes)
         guard value.split == "development", identifier(value.history_id),
@@ -429,7 +436,11 @@ enum AnswerEvaluationCommand {
                     "unknowns": ["apple_input_tokens", "local_billed_cost", "first_useful_answer"]]
                 if document.version == 2 {
                     value["witness_mode"] = witnessMode
-                    value["native_configuration_sha256"] = witnessConfigurationSHA256
+                    let frozenConfiguration: [String: Any] = ["endpoint": c.endpoint, "model": c.model,
+                        "system": c.system, "temperature": c.temperature, "seed": c.seed, "thinking": c.thinking,
+                        "maximum_output": c.maximum_output, "context_limit": c.context_limit, "safety_tokens": c.safety_tokens]
+                    value["native_configuration_sha256"] = digest(try JSONSerialization.data(withJSONObject: frozenConfiguration,
+                        options: [.sortedKeys, .withoutEscapingSlashes]))
                 }
                 try writePrivate(try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), output.appendingPathComponent("report.json"))
                 try FileManager.default.removeItem(at: runtime)
@@ -737,6 +748,19 @@ extension AnswerEvaluationCommand {
             do { _ = try decode(witnessFixtureBytes(value), pins: selected); return false } catch { return true }
         }
         checks["witness_contract_synthetic_pack_not_production_authority"] = refused(root, using: .production)
+        var formatRoot = root
+        var formatConfiguration = root["configuration"] as! [String: Any]
+        formatConfiguration["system"] = "Follow the public synthetic requested JSON structure."
+        formatRoot["configuration"] = formatConfiguration
+        var formatPins = pins
+        formatPins.formatConfiguration = digest(try witnessFixtureBytes(formatConfiguration))
+        checks["witness_contract_separate_format_configuration_accepted"] = try decode(witnessFixtureBytes(formatRoot), pins: formatPins).version == 2
+        checks["witness_contract_format_configuration_requires_separate_pin"] = refused(formatRoot, using: pins)
+        checks["witness_contract_original_configuration_preserved_with_amendment"] = try decode(bytes, pins: formatPins).version == 2
+        var changedFormat = formatConfiguration
+        changedFormat["maximum_output"] = 65
+        var changedFormatRoot = formatRoot; changedFormatRoot["configuration"] = changedFormat
+        checks["witness_contract_format_configuration_other_settings_rejected"] = refused(changedFormatRoot, using: formatPins)
         var source = root; var events = source["events"] as! [[String: Any]]
         events[0]["text"] = "Changed public synthetic original."; source["events"] = events
         checks["witness_contract_changed_original_rejected"] = refused(source, using: pins)

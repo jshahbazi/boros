@@ -55,6 +55,7 @@ def native_report(pack, document, directory, *, correct=True):
             "delivered_source_count": len(pack["events"]), "complete_pack_delivered": True,
             "source_body_count_revalidated": True, "input_proof_version": 3, "failure_code": None}}
     return {"version": 1, "attempts": [item], "witness_mode": controls.VERSION,
+        "native_configuration_sha256": controls.configuration_pins(document["configuration"])[1],
         "input_sha256": e.digest(canonical_json(document)),
         "public_projection_sha256": e.digest(canonical_json(controls.projection(pack)))}
 
@@ -94,6 +95,42 @@ class Contracts(unittest.TestCase):
         self.assertTrue(native == developer.CONFIGURATION)
         for field, value in (("maximum_output", 2049), ("seed", 1), ("temperature", 0), ("thinking", True)):
             with self.assertRaises(e.EvaluationError): controls.validate_configuration({**developer.CONFIGURATION, field: value})
+
+    def test_format_amendment_changes_only_system_and_preserves_baseline_pins(self):
+        original = copy.deepcopy(developer.CONFIGURATION)
+        baseline = controls.selected_configuration()
+        amended = controls.selected_configuration(format_instructions=True)
+        self.assertTrue(baseline == original and developer.CONFIGURATION == original)
+        self.assertTrue([key for key in baseline if baseline[key] != amended[key]] == ["system"])
+        self.assertTrue(amended["system"] == controls.FORMAT_INSTRUCTION_SYSTEM)
+        self.assertTrue(e.digest(canonical_json(baseline)) == controls.CONFIGURATION_SHA256)
+        self.assertTrue(e.digest(canonical_json(amended)) == controls.FORMAT_CONFIGURATION_SHA256)
+        native = {**amended, "temperature": 0}
+        self.assertTrue(e.digest(canonical_json(native)) == controls.FORMAT_NATIVE_CONFIGURATION_SHA256)
+        self.assertTrue(controls.configuration_pins(amended) == (controls.FORMAT_CONFIGURATION_SHA256,
+            controls.FORMAT_NATIVE_CONFIGURATION_SHA256, "json-output-instructions-v1"))
+        self.assertTrue(controls.configuration_pins(baseline) == (controls.CONFIGURATION_SHA256,
+            controls.NATIVE_CONFIGURATION_SHA256, None))
+
+    def test_format_amendment_keeps_all_nine_sources_questions_oracles_and_caps(self):
+        with controlled_packs() as (_histories, packs):
+            amended = controls.selected_configuration(format_instructions=True)
+            for pack in packs:
+                baseline_doc = controls.runner_input(pack, developer.CONFIGURATION)
+                amended_doc = controls.runner_input(pack, amended)
+                self.assertTrue({key: value for key, value in baseline_doc.items() if key != "configuration"}
+                                == {key: value for key, value in amended_doc.items() if key != "configuration"})
+                self.assertTrue(controls.validate_pack(pack) >= 0)
+                self.assertTrue(amended_doc["configuration"]["maximum_output"] == 2048)
+
+    def test_format_amendment_arbitrary_configuration_and_option_refused(self):
+        amended = controls.selected_configuration(format_instructions=True)
+        for field, value in (("system", controls.FORMAT_INSTRUCTION_SYSTEM + " Extra."),
+                             ("maximum_output", 2049), ("context_limit", 65536),
+                             ("seed", 1), ("thinking", True), ("temperature", 0)):
+            with self.assertRaises(e.EvaluationError): controls.validate_configuration({**amended, field: value})
+        for value in (None, 0, 1, "true"):
+            with self.assertRaises(e.EvaluationError): controls.selected_configuration(format_instructions=value)
 
     def test_projection_source_order_scope_role_question_tampering(self):
         with controlled_packs() as (_histories, packs):
@@ -162,10 +199,22 @@ class Contracts(unittest.TestCase):
         with controlled_packs() as (_histories, packs), tempfile.TemporaryDirectory() as temporary:
             pack = packs[0]; doc = controls.runner_input(pack, developer.CONFIGURATION)
             directory = Path(temporary) / "output"; native = native_report(pack, doc, directory)
-            for field, value in (("witness_mode", "changed"), ("public_projection_sha256", "0" * 64)):
+            for field, value in (("witness_mode", "changed"), ("public_projection_sha256", "0" * 64),
+                                 ("native_configuration_sha256", "0" * 64)):
                 changed = {**native, field: value}
                 self.assertTrue(diagnostic.score_native(changed, directory, pack, doc)[0]["conditional_task_score"] is None)
             with self.assertRaises(e.EvaluationError): diagnostic.score_native({**native, "input_sha256": "0" * 64}, directory, pack, doc)
+
+    def test_amended_conditional_eligibility_requires_matching_native_config_pin(self):
+        with controlled_packs() as (_histories, packs), tempfile.TemporaryDirectory() as temporary:
+            pack = packs[0]
+            doc = controls.runner_input(pack, controls.selected_configuration(format_instructions=True))
+            directory = Path(temporary) / "output"; native = native_report(pack, doc, directory)
+            self.assertTrue(diagnostic.score_native(native, directory, pack, doc)[0]["conditional_task_score"] == 1)
+            native["native_configuration_sha256"] = controls.NATIVE_CONFIGURATION_SHA256
+            self.assertTrue(diagnostic.score_native(native, directory, pack, doc)[0]["conditional_task_score"] is None)
+            native.pop("native_configuration_sha256")
+            self.assertTrue(diagnostic.score_native(native, directory, pack, doc)[0]["conditional_task_score"] is None)
 
     def test_positive_witness_cannot_replace_actual_pack_delivery(self):
         with controlled_packs() as (_histories, packs), tempfile.TemporaryDirectory() as temporary:
@@ -216,6 +265,28 @@ class Contracts(unittest.TestCase):
             self.assertTrue(report["summary"]["declared_attempts"] == 9 and report["summary"]["operational_failures"] == 9)
             self.assertTrue(output.stat().st_mode & 0o777 == 0o600)
             with self.assertRaises(e.EvaluationError): diagnostic.run(Path("controlled-public-source"), output)
+
+    def test_amended_run_labels_declaration_before_compile_and_retains_nine_failures(self):
+        with controlled_packs() as (_histories, _packs), tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "amended-report.json"
+            def compile_declared(scratch):
+                declaration = e.strict_json((scratch / "declared-controls.json").read_bytes())
+                self.assertTrue(declaration["development_amendment"] == "json-output-instructions-v1")
+                self.assertTrue(declaration["configuration_sha256"] == controls.FORMAT_CONFIGURATION_SHA256)
+                self.assertTrue(declaration["native_configuration_sha256"] == controls.FORMAT_NATIVE_CONFIGURATION_SHA256)
+                self.assertTrue(declaration["declared_attempts"] == 9 and len(declaration["packs"]) == 9)
+                return Path("unused-driver"), {}
+            with (patch.object(e, "compile_driver", side_effect=compile_declared),
+                  patch.object(e, "execute", return_value={"version": 1, "attempts": []}) as execute_call):
+                report = diagnostic.run(Path("controlled-public-source"), output, format_instructions=True)
+            self.assertTrue(execute_call.call_count == 9 and report["development_amendment"] == "json-output-instructions-v1")
+            self.assertTrue(report["summary"]["declared_attempts"] == 9 and report["summary"]["operational_failures"] == 9)
+            self.assertTrue(report["summary"]["overall_control_success_rate"] == 0)
+            self.assertTrue(report["configuration_sha256"] == controls.FORMAT_CONFIGURATION_SHA256)
+            self.assertTrue(report["native_configuration_sha256"] == controls.FORMAT_NATIVE_CONFIGURATION_SHA256)
+            self.assertTrue(report["configuration"] == {key: value for key, value in developer.CONFIGURATION.items() if key != "system"})
+            self.assertTrue(report["declaration_sha256"] == e.digest(canonical_json(report["declaration"])))
+            with self.assertRaises(e.EvaluationError): diagnostic.run(Path("controlled-public-source"), output, format_instructions=True)
 
     def test_pin_failure_precedes_compile_or_provider_work(self):
         with controlled_packs() as (_histories, _packs), tempfile.TemporaryDirectory() as temporary:
