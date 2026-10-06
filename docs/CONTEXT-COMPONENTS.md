@@ -1,8 +1,8 @@
 # Exact context component limits
 
-Status: implemented, verified and pushed October 5, 2026 at `9cf4d11`. The matched component-token configuration passed 1,297 combined checks, 97 coordinator/proof fixtures, independent rendering and identity review, strict app signature verification and two live mlx-serve turns. Counts overlap. Registered measurement adoption remains pending.
+The original component allocation was implemented, verified and pushed October 5, 2026 at `9cf4d11`. That configuration passed 1,297 combined checks, 97 coordinator/proof fixtures, independent rendering and identity review, strict app signature verification and two live mlx-serve turns. Counts overlap. Registered measurement adoption remains pending.
 
-Use `selected-model-context-components-v1` with 8,000 recent tokens and 12,000 historical-evidence tokens. Freeze counting, reduction and independent byte/row guards together before registered measurement. The original decision sheet and preregistration remain unchanged; the next development amendment will identify this configuration after implementation stabilizes.
+The working-tree ordinary selected-Qwen default remains exact `selected-model-context-components-v1`, with 16 spans, 8,000 recent tokens and 12,000 evidence tokens. Explicit experimental v2 protects at most 16 primaries before adding neighbors, with 48 total spans and unchanged token/byte allowances. The [bounded neighborhood contract](BOUNDED-NEIGHBORHOOD.md) describes its reductions, provenance and audit fitting. The frozen experimental app passed 3,887 checks and genuine old-writer archive replay. Its matched repeat recovered no additional positive turns and locally accepted hybrid 8/14 versus 10/14; it did not earn promotion. The subsequent v1-default restoration requires a fresh build. Historical v1 records retain their exact allocation and JSON. Registered settings remain unchanged.
 
 ## Exact counting
 
@@ -26,9 +26,9 @@ An immutable count receipt binds text digest, token count, tokenizer-work ID, ep
 2. Count mandatory-only input early; fail intact if it cannot fit with unchanged output and safety reservations.
 3. Select bounded whole recent messages. Count their rendered component; if it exceeds its cap, remove the oldest half, rounding up, and recount. Retain a contiguous suffix.
 4. Retrieve historical evidence using the final retained recent IDs as exclusions. A source removed from recent context becomes eligible for retrieval.
-5. Validate original spans and frame the evidence. If its count exceeds the cap, remove the last half of selected spans, rounding up, and recount. Preserve order and whole spans.
+5. Validate original spans and frame the evidence. Ordinary v1 removes half the evidence spans on overflow, rounding up, and recounts. Explicit v2 first removes half the optional neighbor suffix, then primaries if needed. Preserve order and whole spans.
 6. Count the complete canonical candidate. On envelope overflow, reduce evidence first and then oldest recent messages under the same rules. Recount every changed component and complete request.
-7. Reconcile the authoritative terminal receipt before successful publication.
+7. Explicit v2 additionally fits the actual proof-bearing delivery audit before freezing selection work. Audit-size exclusions remove one suffix span at a time, neighbors first; recount changed evidence and the whole prompt under the original lease. Reconcile the authoritative terminal receipt before successful publication.
 
 This geometric reduction bounds calls and can underfill an allocation. It is a declared selection rule, rather than maximal packing. Do not assume token-count monotonicity after deleting text; termination follows from decreasing source count. All counts, reductions, retrieval passes and calibration use the same episode and preserve previous charges. Output headroom and the complete current request remain fixed.
 
@@ -36,13 +36,14 @@ This geometric reduction bounds calls and can underfill an allocation. It is a d
 
 Refactor provider admission into one verified session for component counts and final body admission. Reuse an unchanged count only under its identical verified binding and original validity period. Identity drift or expiry requires rejection or re-verification within remaining allowances. No unsupported batch endpoint, offline tokenizer or cross-episode cache is assumed.
 
-The component policy freezes these independent materialization guards alongside `whole-source-geometric-v1` and `qwen38-attributed-text-v1`:
+The component allocation freezes these independent materialization guards with `qwen38-attributed-text-v1`. Explicit experimental v2 uses `primary-first-neighbor-geometric-v1`; the v1 default retains `whole-source-geometric-v1`:
 
 | Guard | Limit |
 |---|---|
 | Serialized recent-message array | 180,000 bytes |
 | Recent candidate rows | 256 |
-| Historical spans | 16 |
+| Historical primary candidates | 16 |
+| Historical spans | 16 in default v1; 48 in explicit experimental v2 |
 | Individual historical excerpt | 4,096 UTF-8 bytes |
 | Serialized framed evidence-message array | 131,072 bytes |
 | Complete serialized message array | 1,900,000 bytes |
@@ -84,6 +85,8 @@ Held-out execution remains gated on the complete baseline, credible workload/pow
 
 ### Bounded following-assistant evidence
 
+This section records the expansion retained by ordinary v1. Explicit experimental v2 uses the [bounded neighborhood contract](BOUNDED-NEIGHBORHOOD.md); legacy byte-only preparation also keeps this earlier path.
+
 Ordinary historical selection can add the immediate next published assistant event in a matching human event's conversation. `following-assistant-prefix-v2` validates the scoped original anchor, reads one indexed same-conversation metadata row within the search's original source frontier, and applies current/recent exclusions before any neighbor payload read. A human boundary, absent row, excluded source or empty assistant yields no added excerpt. It never skips a boundary or infers relationships from event IDs, timestamps or importer pair labels. Publication adjacency is not an authoritative reply/turn link; late assistant publication can make this heuristic inappropriate.
 
 The added excerpt is the scalar-safe first 4,096 UTF-8 bytes, with its original source digest, length, role, status and offset. Partial capture and prefix truncation remain explicit. Complete original content stays in the store. Human anchors retain selection order; an adjacent assistant prefix follows each eligible anchor. A complete existing primary prefix can be promoted to that position, retaining its exact span and avoiding another payload read. Distinct primary spans from one source remain available. Prefixes are suppressed only when an actually retained span covers the desired prefix range. A short or nonzero-offset span from that source does not establish coverage; the paid prefix is added. Promotion prevents a future complete primary span being dropped by the candidate cap after suppressing the prefix. Exact duplicate spans are deduplicated. Final selection has at most 16 candidates; interleaving can displace lower-ranked primary hits, and the metadata audit records retained/dropped/promoted counts and fixed decisions.
@@ -91,6 +94,8 @@ The added excerpt is the scalar-safe first 4,096 UTF-8 bytes, with its original 
 Metadata validation and source paging are prefunded under the same lease and existing caps. Page reads charge two logical passes; the assembler separately charges source revalidation. Exhaustion refuses the preparation; no allowance is renewed. Recent-only skips query/neighbor selection entirely. The original semantic manifest records primary search results; `exchange_expansion` records the additional adjacency step, and the selection receipt/final source ranges bind actual delivered excerpts. Later token/envelope reductions can remove them. Auxiliary audit overflow preserves the core source/count/body proofs.
 
 ### Preceding human evidence
+
+This section records the ordinary v1 component path and its earlier measurements.
 
 The shared selected-Qwen component path also expands selected assistant sources to the immediately preceding published human source in that same conversation. `adjacent-exchange-prefix-v3` retains the original human-to-following-assistant behavior and adds this reverse direction. The direct legacy preparation path and default standalone expansion keep the preceding contract. The matching app passed 3,555 checks, including 36 new reverse-expansion contracts and a counted pair fixture through invocation/archive/restore. The unchanged-input comparison recovers one complete positive turn (8/11 total), with 11/14 operational completions and local-judge acceptance of hybrid 3/7. It establishes no answer-quality improvement; see [STATUS.md](STATUS.md#preceding-human-sources).
 

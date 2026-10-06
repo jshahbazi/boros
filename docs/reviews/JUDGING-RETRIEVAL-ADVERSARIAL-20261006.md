@@ -99,3 +99,12 @@ Required synthetic checks include late primary survival under neighbor saturatio
 Then predeclare a matched repeat on the same fourteen histories and 1,024-token setting. Independently reconstruct delivered ranges and count proofs, preserve all attempts, and separately report candidate/turn recovery, answer completion, local labels and abstention. Include new independent cases containing distractors and both adjacency directions before claiming general quality. A positive delivery change is not an answer-quality result until generation is rerun.
 
 The judging follow-up should be a small blinded real-answer calibration set adjudicated independently, including accepted answers, rejected answers, incomplete evidence, abstentions and correct-plus-unsupported claims. Report disagreement by failure type. Preserve unchanged upstream labels as a separate benchmark diagnostic. This calibration is necessary for trusted correctness claims; it should not delay the evidenced candidate-expansion fix.
+
+
+## Follow-up: the wider candidate frontier did not earn promotion
+
+The separately declared matched neighborhood experiment completed 28/28 answering attempts and 28 local judge calls. It corrected the candidate-frontier mechanics described above, but hybrid complete positive-turn delivery stayed 14/18 and all four missing targets remained missing. Gold-session hits rose 18/19 to 19/19. Local hybrid acceptance changed 10/14 to 8/14, with recent-only changing 2/14 to 3/14. These are one-replicate, uncalibrated judgments and do not establish a statistically reliable regression.
+
+All fourteen experimental hybrid contexts removed optional spans for tokens. Independent replay places three needed neighbors beyond the retained prefix; native full initial-trace bodies were omitted from exports, limiting independent authentication of that attribution. Two newly rejected hybrid answers received every annotated positive turn. Candidate protection alone therefore did not establish adequate evidence selection or answering quality. The ordinary v1 default is restored in unbuilt working-tree source; the experimental implementation and frozen results remain retained.
+
+The [architecture reassessment](ARCHITECTURE-REASSESSMENT-20261006.md) records the receipts and proposes five counted sufficient-source controls with independent correctness/grounding assessment before further retrieval implementation. This follow-up does not change the original reviewed snapshot or its findings.
