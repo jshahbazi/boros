@@ -69,7 +69,9 @@ def main():
             return 1
         for name, script in (("answer-rubrics", "test_answer_rubrics.py"),
                              ("developer-answer-evaluation", "test_developer_answer_evaluation.py"),
-                             ("evidence-controls", "test_evidence_controls.py")):
+                             ("evidence-controls", "test_evidence_controls.py"),
+                             ("longmemeval-cases", "test_longmemeval_cases.py"),
+                             ("longmemeval-evaluation", "test_longmemeval_evaluation.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)
             report = json.loads(checked.stdout)

@@ -49,6 +49,17 @@ enum AnswerEvaluationCommand {
         "09316ffa9fc3f26d2dc81acad2eb7ede0c1c1c9b12dd678e6c80d38ed9c8230c",
         "eedf2f3ca33017e90b1ad449be99ef50bddba4f792b5f9635f44001151cbccdb"
     ]
+    /// Separately declared LongMemEval S development projections; no oracle labels.
+    static let longMemoryCorpusProjectionSHA256: Set<String> = [
+        "87dcca85d2aaf4c1e5db21efbf466bed20b3673477698ff8a2e9b8adbdc9c32c",
+        "5015ce3363b4f540b1eb2e7ec2ce398366e5a5d8253a6da40e63e10cd200c908",
+        "9ee0a2ee042f99e87cdd82e5313c1a033c0880ad1d98bcbc1175ee05001f5dbd",
+        "6bc8af5c9058844422d2a43b4640b85c50d43d470d33ea86a90f40ae7c7458a1",
+        "cc2fbe2a44c6a0db7431044e67af686f80af7ec4fa8a7820cb2075711eb963e1",
+        "d0a768245614fcf955266240969c66038f6d132b332ad24661413755982babb1",
+        "1b1416dee0c4e8bb4508d6d5e4d9af10896d5ca68f8656b5a1a45888768f432f"
+    ]
+    static let longMemoryConfigurationSHA256 = "c23bf5d0bb63e7a348adfc4f673c9c01a1217d89e4c9e51c61f9bf80a300cf21"
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
     private struct Event: Decodable {
@@ -58,6 +69,7 @@ enum AnswerEvaluationCommand {
         let role: String
         let status: CaptureStatus
         let text: String
+        let source_time: EventSourceTime?
     }
     private struct Attempt: Decodable {
         let probe_id: String
@@ -66,6 +78,11 @@ enum AnswerEvaluationCommand {
         let prompt: String
         let strategy: ContextRetrievalStrategy
         let replicate: Int
+        let question_time: EventSourceTime?
+        var effectivePrompt: String {
+            guard let time = question_time else { return prompt }
+            return "Question Date: " + time.originalValue + "\nQuestion: " + prompt
+        }
     }
     private struct Configuration: Decodable {
         let endpoint: String
@@ -130,11 +147,14 @@ enum AnswerEvaluationCommand {
         var formatConfiguration: String? = nil
         var jsonWitness: Set<String> = []
         var jsonConfiguration: String? = nil
+        var longMemory: Set<String> = []
+        var longMemoryConfiguration: String? = nil
         static var production: InputPins {
             InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
                 witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256,
                 formatConfiguration: formatInstructionConfigurationSHA256,
-                jsonWitness: jsonObjectCorpusProjectionSHA256, jsonConfiguration: jsonObjectConfigurationSHA256)
+                jsonWitness: jsonObjectCorpusProjectionSHA256, jsonConfiguration: jsonObjectConfigurationSHA256,
+                longMemory: longMemoryCorpusProjectionSHA256, longMemoryConfiguration: longMemoryConfigurationSHA256)
         }
     }
     private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
@@ -142,16 +162,18 @@ enum AnswerEvaluationCommand {
         guard let root = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               Set(root.keys) == ["version", "split", "history_id", "events", "attempts", "configuration"],
               let events = root["events"] as? [[String: Any]],
-              events.allSatisfy({ Set($0.keys) == ["id", "project_id", "conversation_key", "role", "status", "text"] }),
               let attempts = root["attempts"] as? [[String: Any]],
-              attempts.allSatisfy({ Set($0.keys) == ["probe_id", "project_id", "conversation_key", "prompt", "strategy", "replicate"] }),
               let configuration = root["configuration"] as? [String: Any] else { throw Failure.invalid }
         var publicProjection = root
         publicProjection.removeValue(forKey: "configuration")
         let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
             options: [.sortedKeys, .withoutEscapingSlashes]))
         guard let mode = root["version"] as? NSNumber, CFGetTypeID(mode) != CFBooleanGetTypeID(),
-              mode.doubleValue == Double(mode.intValue), (1...3).contains(mode.intValue) else { throw Failure.invalid }
+              mode.doubleValue == Double(mode.intValue), (1...4).contains(mode.intValue) else { throw Failure.invalid }
+        let eventKeys: Set<String> = ["id", "project_id", "conversation_key", "role", "status", "text"]
+        let attemptKeys: Set<String> = ["probe_id", "project_id", "conversation_key", "prompt", "strategy", "replicate"]
+        guard events.allSatisfy({ Set($0.keys) == (mode.intValue == 4 ? eventKeys.union(["source_time"]) : eventKeys) }),
+              attempts.allSatisfy({ Set($0.keys) == (mode.intValue == 4 ? attemptKeys.union(["question_time"]) : attemptKeys) }) else { throw Failure.invalid }
         let baseKeys: Set<String> = ["endpoint", "model", "system", "temperature", "seed", "thinking", "maximum_output", "context_limit", "safety_tokens"]
         guard Set(configuration.keys) == (mode.intValue == 3 ? baseKeys.union(["response_format"]) : baseKeys),
               mode.intValue != 3 || configuration["response_format"] as? String == "json_object" else { throw Failure.invalid }
@@ -163,10 +185,14 @@ enum AnswerEvaluationCommand {
             guard pins.witness.contains(projectionDigest),
                   configurationDigest == pins.witnessConfiguration
                     || configurationDigest == pins.formatConfiguration else { throw Failure.invalid }
-        } else {
+        } else if mode.intValue == 3 {
             guard pins.jsonWitness.contains(projectionDigest),
                   digest(try JSONSerialization.data(withJSONObject: configuration,
                     options: [.sortedKeys, .withoutEscapingSlashes])) == pins.jsonConfiguration else { throw Failure.invalid }
+        } else {
+            guard pins.longMemory.contains(projectionDigest),
+                  digest(try JSONSerialization.data(withJSONObject: configuration,
+                    options: [.sortedKeys, .withoutEscapingSlashes])) == pins.longMemoryConfiguration else { throw Failure.invalid }
         }
         let value = try JSONDecoder().decode(Document.self, from: bytes)
         guard value.split == "development", identifier(value.history_id),
@@ -177,16 +203,27 @@ enum AnswerEvaluationCommand {
         for event in value.events {
             guard identifier(event.id), identifier(event.project_id), identifier(event.conversation_key),
                   ["user", "assistant"].contains(event.role), event.text.utf8.count <= MemoryStore.maximumPayloadBytes else { throw Failure.invalid }
+            if value.version == 4 {
+                guard let sourceTime = event.source_time else { throw Failure.invalid }
+                _ = try sourceTime.validated()
+            }
             conversations.insert(key(event.project_id, event.conversation_key))
         }
         for attempt in value.attempts {
             guard identifier(attempt.probe_id), identifier(attempt.project_id), identifier(attempt.conversation_key),
                   conversations.contains(key(attempt.project_id, attempt.conversation_key)),
-                  !attempt.prompt.isEmpty, attempt.prompt.utf8.count <= MemoryStore.maximumPayloadBytes,
+                  !attempt.prompt.isEmpty, attempt.effectivePrompt.utf8.count <= MemoryStore.maximumPayloadBytes,
                   (0...100).contains(attempt.replicate),
                   attemptsSeen.insert("\(attempt.probe_id)|\(attempt.strategy.rawValue)|\(attempt.replicate)").inserted else { throw Failure.invalid }
         }
-        if value.version >= 2 {
+        if value.version == 4 {
+            guard value.attempts.count == 2, value.attempts.map(\.strategy) == [.recentOnly, .hybrid],
+                  value.attempts.allSatisfy({ $0.replicate == 0 && $0.question_time != nil }),
+                  value.events.allSatisfy({ $0.status == .complete }),
+                  Set(value.events.map(\.project_id)).count == 1 else { throw Failure.invalid }
+            for attempt in value.attempts { _ = try attempt.question_time!.validated() }
+        }
+        if (2...3).contains(value.version) {
             guard value.attempts.count == 1, let attempt = value.attempts.first,
                   attempt.strategy == .recentOnly, attempt.replicate == 0,
                   value.events.count == 2 || value.events.count == 4,
@@ -203,7 +240,7 @@ enum AnswerEvaluationCommand {
               (0...Int(Int32.max)).contains(c.seed), (1...8192).contains(c.maximum_output),
               (1024...131072).contains(c.context_limit), (0...8192).contains(c.safety_tokens),
               c.maximum_output + c.safety_tokens < c.context_limit else { throw Failure.invalid }
-        _ = try EndpointRequest.build(prompt: value.attempts[0].prompt, settings: c.settings, conversation: Conversation())
+        _ = try EndpointRequest.build(prompt: value.attempts[0].effectivePrompt, settings: c.settings, conversation: Conversation())
         return value
     }
 
@@ -211,6 +248,19 @@ enum AnswerEvaluationCommand {
         guard var projection = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw Failure.invalid }
         projection.removeValue(forKey: "configuration")
         return digest(try JSONSerialization.data(withJSONObject: projection, options: [.sortedKeys, .withoutEscapingSlashes]))
+    }
+
+    private static func ingestEvents(_ document: Document, into owner: MemoryStore) throws -> [String: String] {
+        var conversations: [String: String] = [:]
+        for event in document.events {
+            let mapping = key(event.project_id, event.conversation_key)
+            if conversations[mapping] == nil {
+                conversations[mapping] = try owner.createConversation(projectID: project(event.project_id), title: "Public diagnostic corpus").id
+            }
+            _ = try owner.append(conversationID: conversations[mapping]!, role: event.role == "user" ? .human : .assistant,
+                text: event.text, status: event.status, turnID: "public-turn:" + event.id, eventID: event.id, sourceTime: event.source_time)
+        }
+        return conversations
     }
 
     private final class Session {
@@ -243,20 +293,13 @@ enum AnswerEvaluationCommand {
         }
         private func ingestCheckpoint() throws {
             let owner = try MemoryStore(directory: runtime.appendingPathComponent("baseline", isDirectory: true))
-            for event in document.events {
-                let mapping = key(event.project_id, event.conversation_key)
-                if conversations[mapping] == nil {
-                    conversations[mapping] = try owner.createConversation(projectID: project(event.project_id), title: "Public diagnostic corpus").id
-                }
-                _ = try owner.append(conversationID: conversations[mapping]!, role: event.role == "user" ? .human : .assistant,
-                    text: event.text, status: event.status, turnID: "public-turn:" + event.id, eventID: event.id)
-            }
+            conversations = try ingestEvents(document, into: owner)
             let manifest = try BackupArchive.create(from: owner, at: archive)
             baseline = ["events": manifest.inventory.events, "source_bytes": manifest.inventory.sourceBytes,
                 "conversations": manifest.inventory.conversations, "archive_id": manifest.archiveID,
                 "database_schema": manifest.databaseSchema,
                 "archive_sha256": digest(try canonical(manifest)),
-                "timestamps": "ingestion_frozen_in_checkpoint", "derived_sidecar_in_checkpoint": false]
+                "timestamps": document.version == 4 ? "original_session_dates_preserved_ingestion_frozen" : "ingestion_frozen_in_checkpoint", "derived_sidecar_in_checkpoint": false]
         }
         private func advance() {
             guard ordinal < document.attempts.count else { finish(fatal: nil); return }
@@ -323,7 +366,7 @@ enum AnswerEvaluationCommand {
                             construction: [String: Any], restored: URL, started: UInt64?) {
             let value = AnswerAttemptCoordinator(store: owner,
                 conversationID: conversations[key(attempt.project_id, attempt.conversation_key)]!,
-                projectID: project(attempt.project_id), prompt: attempt.prompt,
+                projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
                 settings: document.configuration.settings, semanticIndex: semantic, retrievalStrategy: attempt.strategy,
                 onText: { _ in }, onComplete: { completion, text in
                     do {
@@ -369,7 +412,7 @@ enum AnswerEvaluationCommand {
                             }
                             item["delivered_ranges"] = ranges
                         }
-                        if self.document.version >= 2 {
+                        if (2...3).contains(self.document.version) {
                             item["witness_validation"] = validateWitness(document: self.document, completion: completion,
                                 directory: restored, conversationID: self.conversations[key(attempt.project_id, attempt.conversation_key)]!)
                         }
@@ -419,7 +462,7 @@ enum AnswerEvaluationCommand {
             report.append(witnessMetadata(item))
         }
         private func witnessMetadata(_ item: [String: Any]) -> [String: Any] {
-            guard document.version >= 2 else { return item }
+            guard (2...3).contains(document.version) else { return item }
             var result = item
             result["witness_mode"] = witnessMode
             if result["witness_validation"] == nil {
@@ -458,7 +501,7 @@ enum AnswerEvaluationCommand {
                         "episode_limits": configuration, "background_limits": try object(BackgroundIndexLimits.development)],
                     "unknowns": ["apple_input_tokens", "local_billed_cost", "first_useful_answer"]]
                 if document.version >= 2 {
-                    value["witness_mode"] = witnessMode
+                    if (2...3).contains(document.version) { value["witness_mode"] = witnessMode }
                     var frozenConfiguration: [String: Any] = ["endpoint": c.endpoint, "model": c.model,
                         "system": c.system, "temperature": c.temperature, "seed": c.seed, "thinking": c.thinking,
                         "maximum_output": c.maximum_output, "context_limit": c.context_limit, "safety_tokens": c.safety_tokens]
@@ -734,7 +777,7 @@ extension AnswerEvaluationCommand {
         guard LocalEndpoint.chatURL(baseURL) != nil else {
             completion(["witness_fixture_loopback_required": false]); return
         }
-        do { WitnessCheckSuite(baseURL: baseURL, checks: try witnessDecodeChecks(baseURL: baseURL), completion: completion).next() }
+        do { WitnessCheckSuite(baseURL: baseURL, checks: try witnessDecodeChecks(baseURL: baseURL).merging(longMemoryDecodeChecks(baseURL: baseURL)) { _, newer in newer }, completion: completion).next() }
         catch { completion(["witness_contract_fixture_started": false]) }
     }
 
@@ -856,6 +899,80 @@ extension AnswerEvaluationCommand {
         let duplicate = Data(("{\"version\":2," + String(decoding: bytes.dropFirst(), as: UTF8.self)).utf8)
         do { _ = try decode(duplicate, pins: pins); checks["witness_contract_duplicate_keys_rejected"] = false }
         catch { checks["witness_contract_duplicate_keys_rejected"] = true }
+        return checks
+    }
+
+    private static func longMemoryDecodeChecks(baseURL: String) throws -> [String: Bool] {
+        var root = witnessFixture(baseURL: baseURL)
+        root["version"] = 4
+        let time = EventSourceTime(value: "2023-07-27T18:00", precision: "minute", timezone: "unspecified",
+            sourceSHA256: String(repeating: "a", count: 64), locator: "/0/haystack_dates/0", originalValue: "2023/07/27 (Thu) 18:00")
+        var events = root["events"] as! [[String: Any]]
+        events[0]["source_time"] = time.object; events[1]["source_time"] = time.object
+        events[1]["conversation_key"] = "synthetic-other-session"
+        root["events"] = events
+        var attempt = (root["attempts"] as! [[String: Any]])[0]
+        let questionTime = EventSourceTime(value: "2023-07-28T18:00", precision: "minute", timezone: "unspecified",
+            sourceSHA256: time.sourceSHA256, locator: "/0/question_date", originalValue: "2023/07/28 (Fri) 18:00")
+        attempt["question_time"] = questionTime.object
+        var hybrid = attempt; hybrid["strategy"] = "hybrid"
+        root["attempts"] = [attempt, hybrid]
+        let bytes = try witnessFixtureBytes(root)
+        var pins = InputPins(ordinary: [], witness: [], witnessConfiguration: witnessConfigurationSHA256)
+        pins.longMemory = [try projectionSHA256(bytes)]
+        pins.longMemoryConfiguration = digest(try witnessFixtureBytes(root["configuration"] as! [String: Any]))
+        let document = try decode(bytes, pins: pins)
+        var checks: [String: Bool] = [
+            "longmem_v4_paired_dates_decode": document.events.count == 2 && document.attempts.count == 2,
+            "longmem_v4_question_date_separate": document.attempts[0].prompt == attempt["prompt"] as? String
+                && document.attempts[0].effectivePrompt == "Question Date: " + questionTime.originalValue + "\nQuestion: " + document.attempts[0].prompt,
+            "longmem_v4_timezone_remains_unknown": document.events[0].source_time?.timezone == "unspecified",
+            "longmem_v4_production_disjoint": longMemoryCorpusProjectionSHA256.count == 7
+                && longMemoryCorpusProjectionSHA256.isDisjoint(with: InputPins.production.ordinary)
+                && longMemoryCorpusProjectionSHA256.isDisjoint(with: witnessCorpusProjectionSHA256)
+        ]
+        func refused(_ changed: [String: Any], using selected: InputPins) -> Bool {
+            do { _ = try decode(witnessFixtureBytes(changed), pins: selected); return false } catch { return true }
+        }
+        checks["longmem_synthetic_not_production_authority"] = refused(root, using: .production)
+        for kind in ["event_date_null", "question_date_null", "oracle", "changed_source", "changed_question", "legacy", "configuration"] {
+            var changed = root
+            switch kind {
+            case "event_date_null": var rows = events; rows[0]["source_time"] = NSNull(); changed["events"] = rows
+            case "question_date_null": var rows = [attempt, hybrid]; rows[0]["question_time"] = NSNull(); changed["attempts"] = rows
+            case "oracle": changed["answer"] = "Synthetic scorer only"
+            case "changed_source": var rows = events; rows[0]["text"] = "Changed synthetic source"; changed["events"] = rows
+            case "changed_question": var rows = [attempt, hybrid]; rows[0]["prompt"] = "Changed synthetic question"; changed["attempts"] = rows
+            case "legacy": changed["version"] = 1
+            default: var c = root["configuration"] as! [String: Any]; c["maximum_output"] = 129; changed["configuration"] = c
+            }
+            checks["longmem_v4_" + kind + "_refused"] = refused(changed, using: pins)
+        }
+        // Re-pin a malformed synthetic projection to test grammar separately from its checksum.
+        var malformed = root; var badEvents = events; var invalidTime = time.object
+        invalidTime["original_value"] = "2023/02/30 (Thu) 18:00"; badEvents[0]["source_time"] = invalidTime; malformed["events"] = badEvents
+        var malformedPins = pins; malformedPins.longMemory = [try projectionSHA256(witnessFixtureBytes(malformed))]
+        checks["longmem_v4_invalid_date_grammar_refused"] = refused(malformed, using: malformedPins)
+        guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.io }
+        let temporaryRoot = String(cString: resolved); free(resolved)
+        let directory = URL(fileURLWithPath: temporaryRoot, isDirectory: true).appendingPathComponent("boros-longmem-check-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try MemoryStore(directory: directory.appendingPathComponent("store"))
+        let conversations = try ingestEvents(document, into: owner)
+        checks["longmem_v4_original_session_boundaries_preserved"] = conversations.count == 2
+        checks["longmem_v4_exact_dates_and_text_ingested"] = try document.events.allSatisfy { event in
+            let chat = conversations[key(event.project_id, event.conversation_key)]!
+            return try owner.events(conversationID: chat).contains { stored in
+                stored.id == event.id && Data(stored.text.utf8) == Data(event.text.utf8) && stored.sourceTime == event.source_time
+            }
+        }
+        let archive = directory.appendingPathComponent("archive"), restored = directory.appendingPathComponent("restored")
+        _ = try BackupArchive.create(from: owner, at: archive)
+        _ = try BackupArchive.restore(from: archive, to: restored, authority: .unmanagedNoDeletion)
+        let reopened = try MemoryStore(directory: restored)
+        checks["longmem_v4_dates_survive_attempt_checkpoint"] = try document.events.allSatisfy { event in
+            try reopened.sourceReference(eventID: event.id, projectID: project(event.project_id))?.sourceTime == event.source_time
+        }
         return checks
     }
 
