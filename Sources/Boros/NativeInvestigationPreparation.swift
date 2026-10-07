@@ -286,6 +286,12 @@ final class NativeInvestigationPreparationOperation: AnswerContextPreparing {
                                             if closingOutcome != nil { completeClosing(); return }
                                             do {
                                                 try active()
+                                                if output.failure == "incomplete_result", !output.stopped, output.providerUsage != nil {
+                                                    throw NativeHistoryNavigationError.outputBound
+                                                }
+                                                if output.failure == "empty_result", !output.stopped, output.providerUsage != nil {
+                                                    throw NativeHistoryNavigationError.invalidPlan
+                                                }
                                                 guard output.failure == nil, !output.stopped, !stageText.isEmpty,
                                                       output.providerUsage != nil else { throw ProviderAdmissionError.countMismatch }
                                                 try consume(stageText)

@@ -183,6 +183,9 @@ class Handler(COMPONENT.Handler):
                                      "unresolved": []}, separators=(",", ":"))
             else:
                 answer = "Synthetic final Lisbon [native-original-correction-assistant]."
+            if stage == "planner" and mode == "private_empty_output":
+                answer = ""
+            finish_reason = "length" if stage == "planner" and mode == "private_output_bound" else "stop"
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Connection", "close")
@@ -194,7 +197,7 @@ class Handler(COMPONENT.Handler):
                     self.close_connection = True
                     return
             self.event({"choices": [{"delta": {"content": answer}, "finish_reason": None}]})
-            self.event({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+            self.event({"choices": [{"delta": {}, "finish_reason": finish_reason}]})
             if not (stage == "planner" and mode == "private_usage_missing"):
                 prompt = stage_count(FIXTURE.render(body), mode)
                 self.event({"model": FIXTURE.MODEL, "choices": [],
@@ -241,7 +244,8 @@ def main():
             checks["native_fixture_pin_release_reaches_extraction_and_final"] = release.get("extraction") == 1 and release.get("final") == 1 and release.get("final_has_original_pair") is True
             reformulation = OBSERVED.get("initial_query_reformulation", {})
             checks["native_fixture_initial_query_reformulation_reaches_answer"] = reformulation.get("planner", 0) >= 2 and reformulation.get("extraction") == 1 and reformulation.get("final") == 1
-            for mode in ("cancel_planner", "deadline_planner", "malformed_plan", "invalid_quote", "private_usage_missing"):
+            for mode in ("cancel_planner", "deadline_planner", "malformed_plan", "invalid_quote", "private_usage_missing",
+                         "private_output_bound", "private_empty_output"):
                 state = OBSERVED.get(mode, {})
                 checks["native_fixture_" + mode + "_private_stage_reached"] = state.get("planner", 0) >= 1
                 checks["native_fixture_" + mode + "_final_dispatch_fenced"] = state.get("final", 0) == 0

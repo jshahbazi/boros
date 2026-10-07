@@ -301,6 +301,16 @@ final class ComponentContextPreparationOperation {
     static func failureCode(_ error: Error) -> String {
         if let error = error as? ProviderAdmissionError { return error.failureCode }
         if let error = error as? EpisodeBudgetError { return error.failureCode }
+        if let error = error as? NativeHistoryNavigationError {
+            switch error {
+            case .invalidPlan, .invalidExtraction, .invalidQuery, .invalidRegion, .invalidCursor:
+                return "native_investigation_format_failed"
+            case .outputBound:
+                return "native_investigation_output_bound_exceeded"
+            case .scope, .snapshotLimit, .sourceMismatch:
+                return "context_preparation_failed"
+            }
+        }
         if case ContextError.mandatoryOverflow = error { return "context_full" }
         return "context_preparation_failed"
     }

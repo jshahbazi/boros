@@ -13,6 +13,7 @@ enum NativeInvestigationChecks {
         case success, pinRelease = "pin_release", defaultOff = "default_off", cancelPlanner = "cancel_planner", deadlinePlanner = "deadline_planner"
         case initialQueryReformulation = "initial_query_reformulation"
         case malformedPlan = "malformed_plan", invalidQuote = "invalid_quote", privateUsageMissing = "private_usage_missing"
+        case privateOutputBound = "private_output_bound", privateEmptyOutput = "private_empty_output"
         var interrupted: Bool { self == .cancelPlanner || self == .deadlinePlanner }
         var answers: Bool { [.success, .pinRelease, .initialQueryReformulation, .defaultOff].contains(self) }
     }
@@ -267,6 +268,14 @@ enum NativeInvestigationChecks {
                     if kind == .privateUsageMissing {
                         checks[prefix + "missing_private_usage_remains_unknown"] = (report.episode?.held.outputTokens ?? 0) >= 1024
                             && (counts["unknown_answers"] ?? 0) >= 1
+                    }
+                    if kind == .malformedPlan || kind == .invalidQuote || kind == .privateEmptyOutput {
+                        checks[prefix + "model_format_failure_has_case_specific_code"] = report.generation.failure == "native_investigation_format_failed"
+                            && report.episode?.held.outputTokens == 0 && counts["unknown_answers"] == 0
+                    }
+                    if kind == .privateOutputBound {
+                        checks[prefix + "known_output_limit_has_case_specific_code"] = report.generation.failure == "native_investigation_output_bound_exceeded"
+                            && report.episode?.held.outputTokens == 0 && counts["unknown_answers"] == 0
                     }
                 }
             } catch { checks[prefix + "durable_inventory_and_backup_validated"] = false }

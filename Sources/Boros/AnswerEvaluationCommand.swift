@@ -99,6 +99,111 @@ enum AnswerEvaluationCommand {
         "853e68bd253f3ae19612131600b16a86c37dff639c555aa510efa3c6752c3780"
     ]
     static let independentLongMemoryConfigurationSHA256 = "59dee690589e35b394ea40b6adfbf4bde36aacb349912abb0e94a09aebbefe07"
+    /// Separately frozen 100-question, single-investigation projections. All
+    /// model-visible identities are opaque; annotations remain scorer-only.
+    static let hundredLongMemoryCorpusProjectionSHA256: Set<String> = [
+        "2306e233f42ea2c9499731491c2cb3126beecd7ea75d2e9b3cf2c99a81750477",
+        "87c07140cb577da40eef6d3e5529007c264133d5d9e8eb51899b6042dd0aef22",
+        "ebf76985c9d887c5cc2f9804a93218f8c7607ea4e74b76001ae013a85c300c4f",
+        "62e2f02168af8ec44ceed7306fcb5f43742020532e26f755b4b34f5fe1d5faf2",
+        "de1b49c58f212f378d42bd33d202189eb9f6cd162995b14136b7c2ba334a0423",
+        "caf3b3b438243f2ca177df54d3bebc9bb82db52538aa8924335b52aad4234cfd",
+        "43508938411c73bc839c1ae504b49674c37ba501df54d3929798310de354ea64",
+        "75da9cf555be112d94d8b7301f6667e95cdabdd48f8ceee67cae4b86c5f7a7d5",
+        "9ec0250544a8d6e6b5456cfb8713090cefd98b800da26d9efa83166d70406241",
+        "6219b502a7497b510f7bb79189b5a6303489b2ea23703d35ba9552d7ce35c046",
+        "17408156239b0acc6df6f68e075f92b6b6ede8b84e5996a54f2e5179960348c4",
+        "ce62c00bcd7c954970a9aebecc7baf1168e8b83121a5ebc706e291083cb6110c",
+        "a4ed285d18737de7554a7953f247b434920c35fb7198017258df7c8eb0978636",
+        "e43511b1789a2ef63d3cc78110febc613014e4d57deeaa7c8d34583aa409f2c0",
+        "2bbfd8f56ecbd10cb713a176a1328c9e1f84382d9e9473e206e7fb084ba17516",
+        "2705b896bcdcbb197ff2f931015487d504ee1a0a93a5e1c8f6f0a42918e7f822",
+        "2a1141d5a11bb7843e4dba177c3105b0df89e531d81ea92396dab8327f49bd7d",
+        "7d7cf52d0d090b0fe2d22098af33f0058128c9dfc1db6c1ca31ce086fee49cdb",
+        "0d4c268559e9b5d39dee2686653c92584e9d633eb179a44a92e4148e44f5aeb4",
+        "5a4b6db45956844fd246c8f14a897ec8fa5f560a1a8f539b1874b5a4dfa0fea2",
+        "9797f5b8c395acb01b5027e4a54834afd298c1211854672411df615d2981689d",
+        "e42e06599167951c5084b3c3217cd0072523cb1d698cb8d5843e0d59d64cf6a0",
+        "c344d50823eac46dd8635919b62a8fd25e27a69969b66a7930465634182c3559",
+        "4a6383f812f86f76ecff1220a87930dc041e2d770cfc896c24999b43fe0496f9",
+        "fa2783afeff427575b4020496cc15e197f8e71a198e5db34f7716b7d0fa46afd",
+        "9e425c755a21b09c8594ba5a65323c3e702c139bbb2cb458cf623a7804e4f3bc",
+        "308083460f9c020247de6b323dfa9ac6e53bc4753e255d3c7ca757a248a3576e",
+        "332611112e58b42b0d7412a95bd3aa365539f71d8649cf4479be5b5cd7efdb6b",
+        "de1a1868543cb455525f21ececb45df73303e7062c2b78e6f87fe4663c124073",
+        "6a46834e3c5b01d23f12ff37fd99802347f2aaba1dcf303b1e95dcdeaebdb481",
+        "8e7ceb3e0acf2f690e24a8f141dbab2669d35c58461767da6ecb277d5e4bdda4",
+        "e994c2a6f22cc5a554101aecfb67273635106b275ee2030d752a6b226b81cf06",
+        "bc0a77022635c0394a2c74aa58cefd43b5d664f8c45f2b10512504bab8e393f6",
+        "bdb54d7071f62cb109a9d7a98e6e6d7995768cc316269ca3a974462d6dac5b2c",
+        "31310e8252cf0140624f359cbdaea8a0f0f84184bc2a16b9224199f8c0542f86",
+        "391331ddbce1063dfdd0139c9c0ae8c39fd1572c6e531388317a2b4b5c64e917",
+        "e82f9fb496569626088c5551efd595301117853549a2b311f4567272ec4a7184",
+        "e8ce7245692e4d0e033ecfa2f4e5ede8ee65e3c721701a0c64860f1f9a8ddda0",
+        "e793aab36e331bf639423cb589e0d3af212a798d8d8a83aac14e25f252d420f1",
+        "ac07131b74205c19bab769688e2cd262e551ac88be6e3e7049f71355992fedc2",
+        "ed59ea60390f85452f4a878d44f1d56e052623dfe1bd18f88c6ac27ebbf1af63",
+        "0a9cf123f493b50cc89791550e955a828dfb9f798823bded91998b3145e97c3c",
+        "e1e8753d9530e5129f3a85d96ad0b8a422d49b7e4be35ce1fda275d12677e651",
+        "1567227b554ad6c1c48a551b93102336eaa7237d9c2cb779773baf9622cbda69",
+        "01cf272af6df035922fb0234c894741731d41fb1349e4668cd77ea71a216cfd3",
+        "51eba20694b4f6cf5b2141b1294a4ec4488219f1759dd2e9a2ce011c5c880920",
+        "78b08e77be87fc556da33eab4b8df7cb310865c719b918857266771cce9a891c",
+        "805eb06dc24b7594a4886a0e4f3e3e1b248bbe669afea197726251e20a24015d",
+        "18b053634a1dac576166a0bcc57dbaf32720b9d17bc0acf93a1c639ca02ce968",
+        "e78a9e550169e479aad524ad55948a502e2c8f960e56a41dad72f2cb739dc227",
+        "5cb89a79214b918a698373f810a547b51b24595da3751487fe723da1d8925afc",
+        "b2b47e5392e266e5826be6fe424ef10ce0f2da8bc28464e96613eaa4499eabdb",
+        "093babc22f84a998986ff841a5c807494d378edbe049ab2ce70e539aa47a60a9",
+        "1b9701fa5c394479d4bc9c87ec06c9acb5f562b415b5b3822840326199ab10ba",
+        "325b33a2f8f2ab1f084c337d652123ecfa0c60bbdd3801e68ffca18e5fec6bad",
+        "f536df55d03d1b7d4b35e44c63c54b87e44acbd10e2fe6642dd4707c43a970d0",
+        "08186aacb3db34592e32d2be235f45862562c5ee88976c586fed3c99ca8ed16a",
+        "d4fa316abaea6c2ffaf9214be4fcd8df37602ec8bc44471fe2a6c6a9b2947dc8",
+        "cf99f295f3da787dc26e9f3792562a97c46125b6230dbc9a4a3489c9c7830077",
+        "752d24dc96540f20f1c93df57b32d0b44d30cfe786a1295e05b9b367d3786902",
+        "726094e2e45bb32342f1ad4b1934f263cb7e06e49580c580aadd96d01b1e6750",
+        "4fa2350178cf8604db4b08ec12cd5d2bec14131df8d66a8f3a89ed8fa8801d3f",
+        "176843edb5be864809512a5e7cda83a53015ded9d14a0b8b782c58f400ef3090",
+        "07a100f9350c6ac49b0b0e79498a59b6dcc6516cb9c6ae97c97f72b164b5321d",
+        "46bc58e60859b0230e7915aa1e0298d3570676370b6f2304050cba665de315bc",
+        "bdda50dd59cad77c77600f9a0dd53cf76e08053a2c33fa16edee7285001dea88",
+        "1f9c89dc8208d26b5f4776fec7c4c265182a37a947751faacfd756da38ece4b9",
+        "9fa1a1500601197c20e8a87871c352bdc4d4baa51aee7ea566fa193e1e3b564f",
+        "17e8155817a1b24035476688a8ffe9c36c7fe4b7ba1e4f1e9e023139245c3a3c",
+        "db54b22144dc9782865f30fe87edabecaa09d2a3cff95f9aeb0bfdedb61a6eb7",
+        "152c538a195c90e4f89aed7b59ebec8b88e01f697e2318437c29495547e03b24",
+        "3895b72e4d4621373d386176970b055d18895c8139ec8b15c76b251b596c7d85",
+        "6e98349c5593285fc05697567342a4a83c1d5cc08753ff64dbb6bd4c194f5b72",
+        "a09ab8fa43d6e2b5261389d51ec65b0fb69de70543ba77c4bde07ab11a101b74",
+        "9da6ada86e1f0766677c9a493550b7759d09e621faba81bd2b9e67dde38a5522",
+        "4be6ee11b43ef9b53a123f1f62a645e3ed0b74cd7004f9c6578613c5bc9ad2ef",
+        "5a0be36e82f7fa3c18df959f48f80660b8f105d66b5554ad6b34241e83ba3055",
+        "5f7fa8059fcdbd20353522d1ac667887f8e44c029e11c3bc9c9767260917b911",
+        "10ca30005fece8243eadacc6bef68421ef6d9f4fffb2566e4d868580e9ac4c85",
+        "d12ec34eca906669fbef7b40109e11cbf0c359774fb5a80bbbd3c1e2b5798ad3",
+        "40b7c17c6f0aab217b8921f8f421336c007749ed157cda48bbf4fa8ed038a4ae",
+        "f8c59d3fe58a42fa77bdc7932bf531b419b2c4a169119c027bdeb21e7f2ae842",
+        "302180d81debe8bc0aafcbd223b065c8754d7ab0acafde42f7a334fd3d28b5a2",
+        "9bd3833c52f7a15b305ea7ac9f885e12e976f0d0b12a05f8d6bfb1ad1ac8f904",
+        "aac67c4b7ef1f8145012bd21f323e80beb24f0f6e63852429a564da60b5bb887",
+        "38e624b95236fb1dd1336085dfccc7bd5c2d71ec5a4d70b8a6290814fdf4ec71",
+        "4058d71770d4aae38d4b7113ca7f35f6ef9a019bd6850ad7cc137613b3818936",
+        "d70187eb317cf02f1eaca3ea1b53023ce33d9ecf213d0571704b08b82a6f322c",
+        "33c67f5c1c81f063333b9f1aec31e4b6f14f1e43adc4e17d11c6e1cca9ef3119",
+        "afd9eba1f241ec59fe83a44f295b1bf80f71cf987365dc0ac688228fa6e93f9f",
+        "3b2fd5eb5f302c7a0767590e1c99cac2f45aa99961334515def65057dccc3cae",
+        "e1ecc64507f5861ceaf8101824df3700a6e1c641d35dc151769a4f3a30037800",
+        "0649bacd4e8e19d8f2f552a22ec144b794fe32e300ed77a1b7520b80336886be",
+        "4e6ed319b78cb362188f17d89e71c7bc756b23c1c3691ef8e9af9c0cb345eb2e",
+        "ddfc3374f2655ab7989c3ac7a088eddf0c0c1e6dcc77ac9188cdeaab417044f9",
+        "e9ef531bf362588785c205085a7aa5558774196c68d4f46d7067e84b81c1aa9b",
+        "06a4cbeb6a1e4acaf606ba348de8dbd7d8b190125f87562ad7ff6cbf87fcce70",
+        "9a08139367da0c1d78ca945de5ce4d30549526534cc8931e8ae1371be8ce4190",
+        "9fc4999a212ade7d397d74b6f8c71ec653ed560f7a1992296b3cd2cb543f6653",
+        "c9797e1a1f06ff193d31f29f7cb887ac47eb4de02ccb6a09b440c3e4408ec989"
+    ]
+    static let hundredLongMemoryConfigurationSHA256 = independentLongMemoryConfigurationSHA256
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
     /// A command-level amendment keeps the exact v7 source/configuration pins
@@ -107,7 +212,7 @@ enum AnswerEvaluationCommand {
         case ordinary = "ordinary-v1"
         case investigation = "native-investigation-paired-v1"
         func validate(_ document: Document) throws {
-            guard self == .ordinary || document.version == 7 else { throw Failure.invalid }
+            guard (self == .ordinary ? document.version != 8 : [7, 8].contains(document.version)) else { throw Failure.invalid }
         }
         func investigates(_ attempt: Attempt) -> Bool {
             self == .investigation && attempt.strategy == .hybrid
@@ -228,6 +333,8 @@ enum AnswerEvaluationCommand {
         var completeSourceLongMemory: Set<String> = []
         var independentLongMemory: Set<String> = []
         var independentLongMemoryConfiguration: String? = nil
+        var hundredLongMemory: Set<String> = []
+        var hundredLongMemoryConfiguration: String? = nil
         static var production: InputPins {
             InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
                 witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256,
@@ -237,7 +344,9 @@ enum AnswerEvaluationCommand {
                 semanticLongMemory: semanticLongMemoryCorpusProjectionSHA256,
                 completeSourceLongMemory: completeSourceLongMemoryCorpusProjectionSHA256,
                 independentLongMemory: independentLongMemoryCorpusProjectionSHA256,
-                independentLongMemoryConfiguration: independentLongMemoryConfigurationSHA256)
+                independentLongMemoryConfiguration: independentLongMemoryConfigurationSHA256,
+                hundredLongMemory: hundredLongMemoryCorpusProjectionSHA256,
+                hundredLongMemoryConfiguration: hundredLongMemoryConfigurationSHA256)
         }
     }
     private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
@@ -252,7 +361,7 @@ enum AnswerEvaluationCommand {
         let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
             options: [.sortedKeys, .withoutEscapingSlashes]))
         guard let mode = root["version"] as? NSNumber, CFGetTypeID(mode) != CFBooleanGetTypeID(),
-              mode.doubleValue == Double(mode.intValue), (1...7).contains(mode.intValue) else { throw Failure.invalid }
+              mode.doubleValue == Double(mode.intValue), (1...8).contains(mode.intValue) else { throw Failure.invalid }
         let eventKeys: Set<String> = ["id", "project_id", "conversation_key", "role", "status", "text"]
         let attemptKeys: Set<String> = ["probe_id", "project_id", "conversation_key", "prompt", "strategy", "replicate"]
         guard events.allSatisfy({ Set($0.keys) == (mode.intValue >= 4 ? eventKeys.union(["source_time"]) : eventKeys) }),
@@ -273,6 +382,10 @@ enum AnswerEvaluationCommand {
             guard pins.jsonWitness.contains(projectionDigest),
                   digest(try JSONSerialization.data(withJSONObject: configuration,
                     options: [.sortedKeys, .withoutEscapingSlashes])) == pins.jsonConfiguration else { throw Failure.invalid }
+        } else if mode.intValue == 8 {
+            guard pins.hundredLongMemory.contains(projectionDigest),
+                  digest(try JSONSerialization.data(withJSONObject: configuration,
+                    options: [.sortedKeys, .withoutEscapingSlashes])) == pins.hundredLongMemoryConfiguration else { throw Failure.invalid }
         } else if mode.intValue == 7 {
             guard pins.independentLongMemory.contains(projectionDigest),
                   digest(try JSONSerialization.data(withJSONObject: configuration,
@@ -307,8 +420,8 @@ enum AnswerEvaluationCommand {
                   attemptsSeen.insert("\(attempt.probe_id)|\(attempt.strategy.rawValue)|\(attempt.replicate)").inserted else { throw Failure.invalid }
         }
         if value.version >= 4 {
-            guard value.attempts.count == (value.version == 6 ? 1 : 2),
-                  value.attempts.map(\.strategy) == (value.version == 6 ? [.hybrid] : [.recentOnly, .hybrid]),
+            guard value.attempts.count == ([6, 8].contains(value.version) ? 1 : 2),
+                  value.attempts.map(\.strategy) == ([6, 8].contains(value.version) ? [.hybrid] : [.recentOnly, .hybrid]),
                   value.attempts.allSatisfy({ $0.replicate == 0 && $0.question_time != nil }),
                   value.events.allSatisfy({ $0.status == .complete }),
                   Set(value.events.map(\.project_id)).count == 1 else { throw Failure.invalid }
@@ -492,6 +605,11 @@ enum AnswerEvaluationCommand {
                         item["invocation_status"] = completion.captureStatus?.rawValue as Any? ?? NSNull()
                         item["terminal_reason"] = completion.terminalReason?.rawValue as Any? ?? NSNull()
                         item["capture_healthy"] = completion.captureHealthy; item["accounting_healthy"] = completion.accountingHealthy
+                        if self.document.version == 8 {
+                            for (field, count) in try terminalWorkInventory(restored, episodeID: completion.identifiers.episodeID) {
+                                item[field] = count
+                            }
+                        }
                         item["invocation_started"] = completion.invocationStarted
                         item["failure"] = completion.generation.failure as Any? ?? NSNull()
                         item["failure_stage"] = completion.preparation == nil ? "preparation" : completion.generation.failure == nil ? "none" : "answer_or_finalization"
@@ -650,9 +768,9 @@ enum AnswerEvaluationCommand {
                         options: [.sortedKeys, .withoutEscapingSlashes]))
                 }
                 if preparationMode == .investigation {
-                    value["diagnostic"] = "native-investigation-paired-development-v1"
-                    value["mode"] = "native-memory-investigation-trial-v1"
-                    value["preparation_mode"] = preparationMode.rawValue
+                    value["diagnostic"] = document.version == 8 ? "native-investigation-100-development-v1" : "native-investigation-paired-development-v1"
+                    value["mode"] = document.version == 8 ? "native-memory-investigation-100-v1" : "native-memory-investigation-trial-v1"
+                    value["preparation_mode"] = document.version == 8 ? "native-investigation-100-v1" : preparationMode.rawValue
                     value["private_runtime_retained"] = true
                     value["private_runtime_directory"] = runtime.lastPathComponent
                     value["stops_after_operational_failure"] = true
@@ -996,6 +1114,21 @@ enum AnswerEvaluationCommand {
         return ["states": states]
     }
 
+    /// Numeric terminal-work diagnostics only; payloads stay in the private store.
+    private static func terminalWorkInventory(_ directory: URL, episodeID: String) throws -> [String: Int] {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(directory.appendingPathComponent("memory.sqlite3").path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { throw Failure.io }
+        defer { sqlite3_close(db) }
+        let sql = "SELECT sum(CASE WHEN state='outcomeUnknown' AND kind IN ('answer','calibration','nativeInference') THEN 1 ELSE 0 END),sum(CASE WHEN state IN ('prepared','dispatchArmed','submitted','outcomeUnknown') THEN 1 ELSE 0 END) FROM episode_work WHERE episode_id=?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { throw Failure.io }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_text(statement, 1, episodeID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW else { throw Failure.io }
+        return ["unknown_output_operations": Int(sqlite3_column_int64(statement, 0)),
+                "unresolved_work_count": Int(sqlite3_column_int64(statement, 1))]
+    }
+
     private static func sourceInventory(_ directory: URL) throws -> (events: Int, bytes: Int) {
         var db: OpaquePointer?
         guard sqlite3_open_v2(directory.appendingPathComponent("memory.sqlite3").path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { throw Failure.io }
@@ -1302,6 +1435,42 @@ extension AnswerEvaluationCommand {
             do { _ = try decode(witnessFixtureBytes(changed), pins: selected); return false } catch { return true }
         }
         checks["longmem_v\(version)_synthetic_not_production_authority"] = refused(root, using: .production)
+        if version == 7 {
+            var hundredRoot = root
+            hundredRoot["version"] = 8
+            hundredRoot["attempts"] = [hybrid]
+            var hundredPins = pins
+            hundredPins.hundredLongMemory = [try projectionSHA256(witnessFixtureBytes(hundredRoot))]
+            hundredPins.hundredLongMemoryConfiguration = pins.independentLongMemoryConfiguration
+            let hundredDocument = try decode(witnessFixtureBytes(hundredRoot), pins: hundredPins)
+            try PreparationMode.investigation.validate(hundredDocument)
+            checks["longmem_v8_exact_single_hybrid_investigation_accepted"] = hundredDocument.attempts.count == 1
+                && hundredDocument.attempts[0].strategy == .hybrid
+                && PreparationMode.investigation.settings(hundredDocument.configuration, attempt: hundredDocument.attempts[0]).investigateMemory
+            do { try PreparationMode.ordinary.validate(hundredDocument); checks["longmem_v8_ordinary_mode_refused"] = false }
+            catch { checks["longmem_v8_ordinary_mode_refused"] = true }
+            checks["longmem_v8_prior_projection_authority_refused"] = refused(hundredRoot, using: pins)
+            checks["longmem_v8_hundred_projection_authority_cannot_enable_v7"] = refused(root, using: InputPins(
+                ordinary: [], witness: [], witnessConfiguration: "",
+                hundredLongMemory: [try projectionSHA256(bytes)],
+                hundredLongMemoryConfiguration: pins.independentLongMemoryConfiguration))
+            checks["longmem_v8_production_has_exact_100_separate_pins"] = hundredLongMemoryCorpusProjectionSHA256.count == 100
+                && hundredLongMemoryCorpusProjectionSHA256.isDisjoint(with: independentLongMemoryCorpusProjectionSHA256)
+                && hundredLongMemoryCorpusProjectionSHA256.isDisjoint(with: longMemoryCorpusProjectionSHA256)
+            for kind in ["paired", "recent_only", "replicate", "annotation", "configuration"] {
+                var changed = hundredRoot
+                switch kind {
+                case "paired": changed["attempts"] = [attempt, hybrid]
+                case "recent_only": changed["attempts"] = [attempt]
+                case "replicate": var row = hybrid; row["replicate"] = 1; changed["attempts"] = [row]
+                case "annotation": var row = hybrid; row["answer"] = "Scorer-only synthetic value"; changed["attempts"] = [row]
+                default: var c = root["configuration"] as! [String: Any]; c["maximum_output"] = 512; changed["configuration"] = c
+                }
+                var repinned = hundredPins
+                repinned.hundredLongMemory = [try projectionSHA256(witnessFixtureBytes(changed))]
+                checks["longmem_v8_repin_\(kind)_refused"] = refused(changed, using: repinned)
+            }
+        }
         for kind in ["event_date_null", "question_date_null", "oracle", "changed_source", "changed_question", "legacy", "other_longmem_version", "unsupported_version", "configuration"] {
             var changed = root
             switch kind {

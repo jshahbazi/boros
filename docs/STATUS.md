@@ -8,6 +8,8 @@ Start with [next work](#6-dependency-ordered-next-work) and [open decisions](#8-
 
 ## 1. Current position
 
+**Authorized broader local measurement:** the user requested [100 investigation questions](NATIVE-INVESTIGATION-100.md) after the three-question result. The new answer-blind, category-proportional selection excludes all 51 prior question identities and includes ten abstentions. Version-8 single-investigation inputs use opaque identifiers and separately compiled projection pins. The optimized build passes 4,087 application checks, eleven new controller tests, seven original pilot-controller tests and strict deep signature verification; all 167 captured source/test hashes remain stable. Execution is ready; no model calls have occurred in this new run at this checkpoint. The preceding paid experiment remains held.
+
 **Overall: working local development app; reliable long-history answering and the full planned architecture remain unfinished.** Current work targets recall and answer generation. Further policy expansion is deferred, and optional trees require measured benefit.
 
 Boros provides a native macOS chat application, durable accepted text, bounded recent context and historical evidence, source search and paging, local model integration, resource accounting, semantic maintenance, backup/restore, and public-chat ingestion. The System editor now supports explicit saved instructions across restart. Reliable answering across long histories, representative performance, and total economics remain unproven.

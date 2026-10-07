@@ -2,7 +2,7 @@ import Foundation
 import CoreFoundation
 
 enum NativeHistoryNavigationError: Error {
-    case scope, snapshotLimit, sourceMismatch, invalidQuery, invalidCursor, invalidRegion, invalidPlan, invalidExtraction
+    case scope, snapshotLimit, sourceMismatch, invalidQuery, invalidCursor, invalidRegion, invalidPlan, invalidExtraction, outputBound
 }
 
 /// One complete, immutable project snapshot. Navigation is lexical and derived;

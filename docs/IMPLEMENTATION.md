@@ -39,6 +39,8 @@ The subsequent [native investigation adapter](NATIVE-MEMORY-INVESTIGATION.md) ad
 
 ## Storage boundary
 
+The separately authorized [100-question source amendment](NATIVE-INVESTIGATION-100.md) adds version-8 fixed inputs with exactly one hybrid investigation attempt. Native invocation requires the explicit investigation flag and a separately compiled set of 100 oracle-free opaque-identity projections. The prior version-7 paired inputs retain their contract. A new local controller checkpoints each answer and JevK5 grade, authenticates original delivery and refuses replay of an ambiguous dispatch. Known format/output-cap failures have distinct fixed diagnostics; zero unknown/held work is required before continuing to the next question. The optimized build passes 4,087 application checks, eleven controller checks and seven preceding pilot-controller tests with 167 stable source/test files and strict signature verification. The 100-question model run is prepared; quality results are pending. Ordinary GUI defaults remain unchanged.
+
 The first store accepts bounded text payloads, retained completely as SQLite BLOBs with SHA-256 digests. A payload above the explicit acceptance limit is rejected. This avoids introducing separate database/file commit recovery before the text-only prototype needs external payload files. Preview and prompt budgets do not truncate the stored source.
 
 SQLite uses WAL and synchronous FULL on a local filesystem. The process holds an exclusive owner lock. The store and runtime state live outside the checkout with private filesystem permissions. Tests must cover reopen, idempotency, scope filtering, full payload recovery, UTF-8 paging, and refusal of a second owner.

@@ -466,7 +466,8 @@ final class AnswerAttemptCoordinator {
             "provider_admission_unavailable", "provider_adapter_unverified", "provider_template_mismatch", "admission_mismatch",
             "provider_count_mismatch", "episode_budget_exceeded", "episode_deadline_exceeded", "episode_inactive",
             "episode_input_unobservable", "episode_adapter_violation", "episode_clock_unavailable", "episode_accounting_failed",
-            "context_preparation_failed", "capture_failure", "cancelled", "host_settings_failure"]
+            "context_preparation_failed", "native_investigation_format_failed", "native_investigation_output_bound_exceeded",
+            "capture_failure", "cancelled", "host_settings_failure"]
         return allowed.contains(failure) ? failure : "process_failed"
     }
 }
