@@ -16,7 +16,7 @@ The design goal is evidence-backed continuity within bounded context and resourc
 
 | Snapshot | Status |
 |---|---|
-| Latest local model trial | Native investigation pilot: six JevK5 judging controls pass; first recent-only Qwen calibration fails before retrieval or answering; one accepted failed attempt and five undispatched arms. No quality score or investigation dispatch; [trial record](NATIVE-INVESTIGATION-LOCAL-TRIAL.md) |
+| Latest local model trial | Native investigation pilot: six JevK5 judging controls pass; Boros's first recent-only calibration request fails after approximately 15.2 seconds under its 15-second transport ceiling, before retrieval or answering. One accepted failed attempt and five undispatched arms. General Qwen runtime health remains unmeasured by this trial. No quality score or investigation dispatch; [trial record](NATIVE-INVESTIGATION-LOCAL-TRIAL.md) |
 | Preceding committed evidence documentation | `d132424`: adversarial judging/retrieval review and declared scaling results |
 | Underlying integrated foundation | `b006b6a`: schema-5 background accounting, on top of selected-Qwen context and read-episode work |
 | Latest recorded application verification | Complete native investigation wave: 4,024 checks. Trial optimized build and subsequent timeout-repair debug build pass focused checks and strict deep signature verification. Repair checks cover admission (150), endpoints (281), components (682), navigation (53), investigation pipeline (248), answering (25) and controller (7). No live recovery or quality result |

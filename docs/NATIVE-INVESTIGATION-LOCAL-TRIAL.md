@@ -1,6 +1,6 @@
 # Native investigation local trial
 
-Recorded October 7, 2026. **The trial stopped during Qwen calibration before retrieval or answering. It produced no answer-quality comparison.** The supplied JevK5-4B MCP connector passed all six public judging controls. It received no Boros answers to judge.
+Recorded October 7, 2026. **The trial stopped during Boros's calibration request to Qwen, before retrieval or answering. It produced no answer-quality comparison.** The supplied JevK5-4B MCP connector passed all six public judging controls. It received no Boros answers to judge.
 
 The user explicitly authorized a small local trial after the native investigation implementation. This authorization covered this fixed trial; the preceding paid orientation experiment and its continuation remain held. No OpenAI API call or other remote-provider request occurred.
 
@@ -37,6 +37,8 @@ The ordinary score helper reports empty delivery fractions for the failed prepar
 ## Failure attribution and repair
 
 The measured implementation applied a 15-second per-request transport limit to calibration as well as metadata and tokenization. The matching local server log tail contains the calibration signature of four messages, 74 prompt tokens and a one-token output cap. It records client cancellation and an approximately 68.8-second prefill/decode interval. This strongly implicates inference outlasting the client timeout. The log lacks request IDs and request timestamps; cold loading, queuing and memory pressure remain unproven.
+
+The observed failure is in Boros's provider-admission request handling. Discovery and tokenization completed; the calibration request failed at approximately the client transport ceiling. General Qwen runtime health remains unmeasured by this trial. The user's report that Qwen is serving local requests normally is consistent with this client-specific failure. No additional generation probe or experiment was run to check that report.
 
 A separate repair permits calibration requests up to 90 seconds. Metadata/tokenizer requests retain 15 seconds. Admission sessions have a fixed 120-second ceiling with an episode lease and retain 45 seconds without one. Each request takes the minimum of its stage limit, original session remainder and original episode remainder; no original turn deadline or resource allowance is extended. Unknown dispatched usage remains held; no calibration retry is introduced. Fixed numeric transport causes, timeout and HTTP status are recorded without request or response text. Task-bound absolute timers prevent a queued old timeout from affecting a later request. The component proof's 30-second freshness interval still starts after verification.
 
