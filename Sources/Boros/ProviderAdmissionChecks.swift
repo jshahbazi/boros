@@ -51,6 +51,85 @@ enum ProviderAdmissionChecks {
         checks.merge(runRealStoreCalibrationIdentityChecks(baseURL: baseURL)) { _, replacement in replacement }
         checks.merge(runComponentSessionChecks(baseURL: baseURL)) { _, replacement in replacement }
         checks.merge(runObservedIdentityHTTPChecks(baseURL: baseURL)) { _, replacement in replacement }
+        checks.merge(runCalibrationTransportChecks(baseURL: baseURL)) { _, replacement in replacement }
+        return checks
+    }
+
+    /// Fixed public loopback calibrations exercise actual transport delays and
+    /// the original lease. They never contact a running local model.
+    private static func runCalibrationTransportChecks(baseURL: String) -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        for mode in ["calibration-delayed", "calibration-delayed-deadline", "calibration-delayed-stop", "calibration-http-failure"] {
+            let prefix = "transport_" + mode + "_"
+            do {
+                var settings = GenerationSettings(); settings.profile = .customLocal; settings.endpointURL = baseURL
+                settings.messagesOverride = [["role": "system", "content": "Synthetic delayed admission host."],
+                    ["role": "user", "content": "Synthetic delayed admission question."]]
+                let body = try EndpointRequest.build(prompt: "", settings: settings, conversation: Conversation())
+                var limits = EpisodeLimits(); limits.componentPolicy = .selectedQwen
+                if mode == "calibration-delayed-deadline" { limits.deadlineMilliseconds = 600 }
+                let ledger = ProviderEpisodeFixtureLedger(limits: limits)
+                let lease = EpisodeLease(ledger: ledger, episodeID: ledger.id)
+                let original = try lease.checkActive()
+                var result: Result<ProviderComponentSession, ProviderAdmissionError>?, completions = 0
+                let session = ProviderAdmission.beginComponentSession(mandatoryBody: body, address: baseURL,
+                    apiKey: "synthetic-" + mode, contextLimit: 32768, safetyTokens: 256,
+                    episodeLease: lease) { result = $0; completions += 1 }
+                defer { session.close() }
+                let bound = Date().addingTimeInterval(mode == "calibration-delayed" ? 25 : 5)
+                var stopped = false
+                while result == nil && Date() < bound {
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+                    if mode == "calibration-delayed-stop", !stopped, session.accounting.calibrationRequestCount == 1 {
+                        stopped = true; session.cancel()
+                    }
+                }
+                if result == nil { session.cancel(); RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+                checks[prefix + "completes_once"] = completions == 1
+                let work = ledger.records.first { $0.request.kind == .calibration }
+                checks[prefix + "single_calibration_no_retry"] = session.accounting.calibrationRequestCount == 1
+                    && ledger.records.filter { $0.request.kind == .calibration }.count == 1
+                if mode == "calibration-delayed", case .success = result {
+                    checks[prefix + "over_15_seconds_succeeds"] = session.accounting.elapsed >= 15
+                        && session.accounting.calibrationUsage?.completionTokens == 1
+                        && !session.accounting.unknownCalibrationOutcome && work?.state == .completed
+                    var counted: Result<ProviderComponentCountReceipt, ProviderAdmissionError>?
+                    session.countComponent(requestBody: body, assignments: [.mandatory, .mandatory], component: .recent) { counted = $0 }
+                    let countBound = Date().addingTimeInterval(3)
+                    while counted == nil && Date() < countBound { RunLoop.current.run(until: Date().addingTimeInterval(0.005)) }
+                    if case .success(let receipt) = counted {
+                        let createdTicks = original.deadlineNanoseconds - UInt64(limits.deadlineMilliseconds) * 1_000_000
+                        let currentClock = try lease.clockSnapshot()
+                        checks[prefix + "proof_age_starts_after_verification"] = receipt.verifiedNanoseconds >= createdTicks + 15_000_000_000
+                            && receipt.isFresh(maximumAge: 30, clock: currentClock)
+                    } else { checks[prefix + "proof_age_starts_after_verification"] = false }
+                    let current = try lease.checkActive()
+                    checks[prefix + "original_episode_deadline_and_allowance_unchanged"] = current.deadlineNanoseconds == original.deadlineNanoseconds
+                        && current.limits.deadlineMilliseconds == original.limits.deadlineMilliseconds
+                        && current.limits.resources == original.limits.resources
+                } else {
+                    let expected: ProviderAdmissionError = mode == "calibration-delayed-stop" ? .cancelled
+                        : mode == "calibration-delayed-deadline" ? .episodeDeadlineExceeded : .unavailable
+                    if case .failure(let error) = result { checks[prefix + "original_failure_priority"] = error == expected }
+                    else { checks[prefix + "original_failure_priority"] = false }
+                    checks[prefix + "unknown_calibration_charge_and_hold_retained"] = work?.state == .outcomeUnknown
+                        && work?.charged.modelCalls == 1 && work?.charged.httpAttempts == 1 && work?.charged.inputTokens ?? 0 > 0
+                        && work?.held.outputTokens == 1 && work?.observed == nil
+                        && session.accounting.unknownCalibrationOutcome && session.accounting.httpRequestCount == 5
+                    if let work, let data = ledger.evidence(for: work.id),
+                       let evidence = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let transport = evidence["transport"] as? [String: Any],
+                       let timeout = transport["timeout_seconds"] as? Double {
+                        let expectedCause = mode == "calibration-delayed-stop" ? 7 : mode == "calibration-delayed-deadline" ? 8 : 3
+                        checks[prefix + "numeric_private_transport_cause"] = transport["version"] as? String == "provider-calibration-transport-v1"
+                            && transport["cause"] as? Int == expectedCause && timeout > 0 && timeout <= 90
+                            && Set(transport.keys).isSubset(of: ["version", "cause", "timeout_seconds", "http_status", "url_error_code"])
+                            && (mode != "calibration-http-failure" || transport["http_status"] as? Int == 503)
+                            && (mode != "calibration-delayed-deadline" || timeout <= 0.6)
+                    } else { checks[prefix + "numeric_private_transport_cause"] = false }
+                }
+            } catch { checks[prefix + "fixture_completed"] = false }
+        }
         return checks
     }
 
@@ -61,6 +140,28 @@ enum ProviderAdmissionChecks {
         checks["token_admission_integer_overflow_rejected"] = !ProviderAdmission.fits(promptTokens: Int.max, outputReserve: Int.max, safetyTokens: Int.max, contextLimit: 1000)
         checks["token_admission_output_and_safety_reserved"] = !ProviderAdmission.fits(promptTokens: 1, outputReserve: 999, safetyTokens: 1, contextLimit: 1000)
         checks["token_admission_negative_rejected"] = !ProviderAdmission.fits(promptTokens: -1, outputReserve: 1, safetyTokens: 1, contextLimit: 1000)
+        let timeouts = ProviderAdmissionTimeouts.self
+        checks["admission_timeout_metadata_and_tokenizer_remain_15_seconds"] = timeouts.requestLimit(inference: false,
+            elapsed: 0, episodeRemaining: 300) == 15
+        checks["admission_timeout_leased_calibration_is_90_seconds"] = timeouts.requestLimit(inference: true,
+            elapsed: 0, episodeRemaining: 300) == 90
+        checks["admission_timeout_original_episode_remainder_has_priority"] = timeouts.requestLimit(inference: true,
+            elapsed: 0, episodeRemaining: 0.25) == 0.25
+        checks["admission_timeout_session_remainder_is_not_renewed"] = timeouts.requestLimit(inference: true,
+            elapsed: 75, episodeRemaining: 290) == 45 && timeouts.requestLimit(inference: false,
+                elapsed: 119.75, episodeRemaining: 180) == 0.25
+        checks["admission_timeout_standalone_session_remains_45_seconds"] = timeouts.requestLimit(inference: true,
+            elapsed: 0, episodeRemaining: nil) == 45 && timeouts.requestLimit(inference: true,
+                elapsed: 20, episodeRemaining: nil) == 25
+        checks["admission_timeout_expired_session_refuses_new_request"] = timeouts.requestLimit(inference: true,
+            elapsed: 120, episodeRemaining: 100) == nil && timeouts.requestLimit(inference: false,
+                elapsed: 45, episodeRemaining: nil) == nil
+        checks["admission_timeout_expired_or_invalid_episode_refuses_request"] = [0.0, -1, .infinity, .nan].allSatisfy {
+            timeouts.requestLimit(inference: true, elapsed: 0, episodeRemaining: $0) == nil
+        }
+        checks["admission_timeout_invalid_elapsed_refuses_request"] = [-1.0, .infinity, .nan].allSatisfy {
+            timeouts.requestLimit(inference: true, elapsed: $0, episodeRemaining: 100) == nil
+        }
         var settings = GenerationSettings(); settings.profile = .customLocal
         settings.endpointAPIKey = "synthetic-secret-never-snapshotted"
         settings.messagesOverride = [["role": "system", "content": " Synthetic. "], ["role": "user", "content": " 日本語 {{tools}} "],

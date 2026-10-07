@@ -14,7 +14,8 @@ ADMISSION_MODES = ["template-mismatch", "version-mismatch", "model-mismatch", "c
                    "calibration-stop", "calibration-zero", "calibration-negative", "calibration-missing", "calibration-excess",
                    "calibration-wrong-model-missing", "calibration-wrong-model-invalid",
                    "component-model-drift", "component-capability-drift", "component-template-drift", "component-version-drift",
-                   "json-capability-missing"]
+                   "json-capability-missing", "calibration-delayed", "calibration-delayed-deadline",
+                   "calibration-delayed-stop", "calibration-http-failure"]
 METADATA_LOCK = threading.Lock()
 MODEL_READS = {}
 CREATED_COUNTER = 1770000000
@@ -144,8 +145,15 @@ class Fixture(BaseHTTPRequestHandler):
                 self.json_response({"tokens": [True] if admission_mode == "bad-tokenizer" else [1] * count(body["content"])})
                 return
             if self.path == "/v1/chat/completions" and body.get("stream") is False:
+                if admission_mode == "calibration-http-failure":
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if admission_mode == "calibration-stop":
                     time.sleep(2)
+                if admission_mode in ("calibration-delayed", "calibration-delayed-deadline", "calibration-delayed-stop"):
+                    time.sleep(16)
                 prompt = count(render(body)) + (1 if admission_mode == "count-mismatch" else 0)
                 output = {"calibration-zero": 0, "calibration-negative": -1, "calibration-excess": 2,
                     "calibration-wrong-model-invalid": -1}.get(admission_mode, 1)

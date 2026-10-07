@@ -406,8 +406,28 @@ class NativeContracts(unittest.TestCase):
                     "longmem_v7_checkpoint_preserves_exact_original_source_bodies",
                     "longmem_v7_request_encoding_preserves_full_dated_question_and_output_cap",
                     "longmem_v7_checkpoint_preserves_exact_full_dated_accepted_question",
-                    "longmem_v7_checkpoint_question_reencodes_same_request_body")
+                    "longmem_v7_checkpoint_question_reencodes_same_request_body",
+                    "native_trial_cli_exact_optional_flag_accepted",
+                    "native_trial_cli_recent_control_uses_ordinary_settings",
+                    "native_trial_cli_only_hybrid_uses_investigation_settings",
+                    "native_trial_cli_skips_semantic_construction_only_for_native",
+                    "native_trial_cli_per_attempt_mode_identity",
+                    "native_trial_cli_ordinary_metadata_contract_unchanged",
+                    "native_trial_cli_version_4_refused", "native_trial_cli_version_5_refused",
+                    "native_trial_cli_version_4_ordinary_accepted", "native_trial_cli_version_5_ordinary_accepted",
+                    *(f"native_trial_cli_invalid_argument_{i}_refused" for i in range(5)))
         self.assertTrue(all(checks.get(name) is True for name in required))
+
+    def test_native_trial_flag_refuses_legacy_input_before_dispatch_or_output_creation(self):
+        output = self.directory / "legacy-investigation-refused"
+        before = dict(self.observed)
+        process = subprocess.run([str(NATIVE_BINARY), "--answer-evaluation", str(self.input_path),
+                                  "--output-directory", str(output), "--investigate-memory"],
+                                 capture_output=True, timeout=10)
+        self.assertTrue(process.returncode != 0 and not output.exists())
+        self.assertTrue(self.observed == before)
+        self.assertTrue(not any(probe["prompt"].encode() in process.stdout + process.stderr
+                                for probe in self.history["episodes"]))
 
     def test_native_refuses_existing_output_unknown_fields_nondev_and_store(self):
         preserved = e.digest((self.output / "report.json").read_bytes())

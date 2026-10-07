@@ -101,6 +101,37 @@ enum AnswerEvaluationCommand {
     static let independentLongMemoryConfigurationSHA256 = "59dee690589e35b394ea40b6adfbf4bde36aacb349912abb0e94a09aebbefe07"
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
+    /// A command-level amendment keeps the exact v7 source/configuration pins
+    /// intact while giving this different answering path a separate identity.
+    private enum PreparationMode: String {
+        case ordinary = "ordinary-v1"
+        case investigation = "native-investigation-paired-v1"
+        func validate(_ document: Document) throws {
+            guard self == .ordinary || document.version == 7 else { throw Failure.invalid }
+        }
+        func investigates(_ attempt: Attempt) -> Bool {
+            self == .investigation && attempt.strategy == .hybrid
+        }
+        func settings(_ configuration: Configuration, attempt: Attempt) -> GenerationSettings {
+            var value = configuration.settings
+            value.investigateMemory = investigates(attempt)
+            return value
+        }
+        func constructsSemanticIndex(version: Int, attempt: Attempt) -> Bool {
+            attempt.strategy == .hybrid && version != 6 && !investigates(attempt)
+        }
+    }
+    private struct InvocationOptions {
+        let input: String, output: String
+        let preparationMode: PreparationMode
+    }
+    private static func invocationOptions(_ args: [String]) throws -> InvocationOptions {
+        guard (args.count == 4 || args.count == 5), args[0] == "--answer-evaluation",
+              args[2] == "--output-directory",
+              args.count == 4 || args[4] == "--investigate-memory" else { throw Failure.arguments }
+        return InvocationOptions(input: args[1], output: args[3],
+            preparationMode: args.count == 5 ? .investigation : .ordinary)
+    }
     private struct Event: Decodable {
         let id: String
         let project_id: String
@@ -167,19 +198,18 @@ enum AnswerEvaluationCommand {
         if let first = args.first, !first.hasPrefix("--") { args.removeFirst() }
         guard args.contains("--answer-evaluation") else { return nil }
         do {
-            guard args.count == 4, args[0] == "--answer-evaluation", args[2] == "--output-directory" else {
-                throw Failure.arguments
-            }
-            let input = try checkedPath(args[1]), output = try checkedPath(args[3])
+            let options = try invocationOptions(args)
+            let input = try checkedPath(options.input), output = try checkedPath(options.output)
             let bytes = try readPrivateInput(input)
             let document = try decode(bytes)
+            try options.preparationMode.validate(document)
             try createNewDirectory(output)
             let session = try Session(document: document, inputDigest: digest(bytes),
-                projectionDigest: projectionSHA256(bytes), output: output)
+                projectionDigest: projectionSHA256(bytes), output: output, preparationMode: options.preparationMode)
             DispatchQueue.global(qos: .userInitiated).async { session.begin() }
             dispatchMain()
         } catch Failure.arguments {
-            fputs("Usage: --answer-evaluation ABS_JSON --output-directory NEW_ABS.\n", stderr)
+            fputs("Usage: --answer-evaluation ABS_JSON --output-directory NEW_ABS [--investigate-memory].\n", stderr)
             return 2
         } catch {
             fputs("Answer evaluation input or destination failed validation.\n", stderr)
@@ -342,13 +372,18 @@ enum AnswerEvaluationCommand {
         let output: URL
         let runtime: URL
         let archive: URL
+        let preparationMode: PreparationMode
         var conversations: [String: String] = [:]
         var report: [[String: Any]] = []
         var baseline: [String: Any] = [:]
         var ordinal = 0
         var coordinator: AnswerAttemptCoordinator?
-        init(document: Document, inputDigest: String, projectionDigest: String, output: URL) throws {
+        var stoppedAfterOperationalFailure = false
+        init(document: Document, inputDigest: String, projectionDigest: String, output: URL,
+             preparationMode: PreparationMode = .ordinary) throws {
+            try preparationMode.validate(document)
             self.document = document; self.inputDigest = inputDigest; self.projectionDigest = projectionDigest; self.output = output
+            self.preparationMode = preparationMode
             // Keep every store inside the checked private output owner. The
             // Python supervisor can remove this subtree even if this process
             // dies before native finalization. Direct CLI owners retain it on
@@ -374,6 +409,7 @@ enum AnswerEvaluationCommand {
                 "timestamps": document.version >= 4 ? "original_session_dates_preserved_ingestion_frozen" : "ingestion_frozen_in_checkpoint", "derived_sidecar_in_checkpoint": false]
         }
         private func advance() {
+            if stoppedAfterOperationalFailure { finish(fatal: "trial_stopped_after_operational_failure"); return }
             guard ordinal < document.attempts.count else { finish(fatal: nil); return }
             let index = ordinal, attempt = document.attempts[index]
             let started = continuousSample()
@@ -385,7 +421,7 @@ enum AnswerEvaluationCommand {
                 var construction: [String: Any] = ["schedule": "per_hybrid_attempt_before_acceptance", "performed": false]
                 let before = try owner.backgroundBudgetSnapshot()
                 let constructionStart = continuousSample()
-                if attempt.strategy == .hybrid && document.version != 6 {
+                if preparationMode.constructsSemanticIndex(version: document.version, attempt: attempt) {
                     do {
                         let index = try SemanticIndex(store: owner)
                         semantic = index
@@ -416,6 +452,7 @@ enum AnswerEvaluationCommand {
                 construction["budget_after"] = try object(owner.backgroundBudgetSnapshot())
                 construction["quiescent_during_answer"] = true
                 if document.version == 6 { construction["schedule"] = "skipped_declared_original_sources_control" }
+                if preparationMode.investigates(attempt) { construction["schedule"] = "skipped_native_investigation_lexical_navigation" }
                 let frozenConstruction = construction, frozenSemantic = semantic
                 DispatchQueue.main.async {
                     self.answer(attempt, ordinal: index, owner: owner, semantic: frozenSemantic,
@@ -423,14 +460,15 @@ enum AnswerEvaluationCommand {
                 }
             } catch {
                 do {
-                    var item = attemptMetadata(attempt, ordinal: index)
+                    var item = attemptMetadata(attempt, ordinal: index, preparationMode: preparationMode)
                     item["terminalized"] = true; item["failure_stage"] = "restore_or_setup"
                     item["failure"] = "attempt_setup_failed"; item["answer_bytes"] = 0
                     item["answer_sha256"] = digest(Data()); item["episode_state"] = NSNull()
                     item["invocation_status"] = NSNull(); item["delivered_ranges"] = []
                     item["delivered_recent_source_ids"] = []; item["full_host_milliseconds"] = milliseconds(started)
                     try publish(item, text: "", ordinal: index)
-                    try? FileManager.default.removeItem(at: restored)
+                    stoppedAfterOperationalFailure = preparationMode == .investigation
+                    if preparationMode == .ordinary { try? FileManager.default.removeItem(at: restored) }
                     ordinal += 1; advance()
                 } catch { finish(fatal: "ipc_publication_failed") }
             }
@@ -440,13 +478,13 @@ enum AnswerEvaluationCommand {
             let value = AnswerAttemptCoordinator(store: owner,
                 conversationID: conversations[key(attempt.project_id, attempt.conversation_key)]!,
                 projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
-                settings: document.configuration.settings, semanticIndex: semantic, retrievalStrategy: attempt.strategy,
+                settings: preparationMode.settings(document.configuration, attempt: attempt), semanticIndex: semantic, retrievalStrategy: attempt.strategy,
                 lexicalQueryUTF8Range: attempt.lexicalQueryUTF8Range,
                 semanticQueryUTF8Range: document.version >= 5 ? attempt.lexicalQueryUTF8Range : nil,
                 evidenceSourceIDs: attempt.evidence_source_ids,
                 onText: { _ in }, onComplete: { completion, text in
                     do {
-                        var item = attemptMetadata(attempt, ordinal: ordinal)
+                        var item = attemptMetadata(attempt, ordinal: ordinal, preparationMode: self.preparationMode)
                         item["terminalized"] = true; item["background"] = construction
                         item["identifiers"] = try object(completion.identifiers)
                         item["episode"] = try completion.episode.map { try object($0) } ?? NSNull()
@@ -467,6 +505,13 @@ enum AnswerEvaluationCommand {
                         item["delivered_ranges"] = []; item["delivered_recent_source_ids"] = []
                         if let preparation = completion.preparation {
                             guard let audit = try JSONSerialization.jsonObject(with: preparation.contextAudit) as? [String: Any] else { throw Failure.invalid }
+                            if self.preparationMode == .investigation {
+                                let native = (audit["retrieval"] as? [String: Any])?["native_investigation"] as? [String: Any]
+                                guard self.preparationMode.investigates(attempt)
+                                    ? native?["version"] as? String == "native-investigation-v1"
+                                    : native == nil else { throw Failure.invalid }
+                                item["preparation_mode_receipt_validated"] = true
+                            }
                             item["preparation"] = ["request_sha256": preparation.requestDigest,
                                 "selection_sha256": preparation.sourceSelectionDigest,
                                 "selection_work_id": preparation.sourceSelectionWorkID as Any? ?? NSNull(),
@@ -504,12 +549,14 @@ enum AnswerEvaluationCommand {
                         item["background_budget_at_completion"] = try object(owner.backgroundBudgetSnapshot())
                         item["full_host_milliseconds"] = milliseconds(started)
                         try self.publish(item, text: text, ordinal: ordinal)
+                        self.stoppedAfterOperationalFailure = self.preparationMode == .investigation
+                            && !operationallyComplete(completion)
                         self.coordinator = nil
                         // Move teardown off the callback stack, releasing both
                         // owners before removing their disposable directory.
                         DispatchQueue.main.async {
                             DispatchQueue.global(qos: .userInitiated).async {
-                                try? FileManager.default.removeItem(at: restored)
+                                if self.preparationMode == .ordinary { try? FileManager.default.removeItem(at: restored) }
                                 self.ordinal += 1; self.advance()
                             }
                         }
@@ -524,7 +571,7 @@ enum AnswerEvaluationCommand {
                     value.terminate(reason: .failed); return
                 }
                 do {
-                    var item = attemptMetadata(attempt, ordinal: ordinal)
+                    var item = attemptMetadata(attempt, ordinal: ordinal, preparationMode: preparationMode)
                     item["terminalized"] = true; item["background"] = construction
                     item["failure_stage"] = "acceptance"; item["failure"] = "acceptance_failed"
                     item["episode_state"] = NSNull(); item["invocation_status"] = NSNull()
@@ -532,10 +579,11 @@ enum AnswerEvaluationCommand {
                     item["delivered_ranges"] = []; item["delivered_recent_source_ids"] = []
                     item["full_host_milliseconds"] = milliseconds(started)
                     try publish(item, text: "", ordinal: ordinal)
+                    stoppedAfterOperationalFailure = preparationMode == .investigation
                     coordinator = nil
                     DispatchQueue.main.async {
                         DispatchQueue.global(qos: .userInitiated).async {
-                            try? FileManager.default.removeItem(at: restored)
+                            if self.preparationMode == .ordinary { try? FileManager.default.removeItem(at: restored) }
                             self.ordinal += 1; self.advance()
                         }
                     }
@@ -569,7 +617,7 @@ enum AnswerEvaluationCommand {
                 // these records cannot be mistaken for completed answers.
                 let retained = Set(report.compactMap { $0["ordinal"] as? Int })
                 for index in document.attempts.indices where !retained.contains(index) {
-                    var item = attemptMetadata(document.attempts[index], ordinal: index)
+                    var item = attemptMetadata(document.attempts[index], ordinal: index, preparationMode: preparationMode)
                     item["terminalized"] = false; item["failure_stage"] = "runner"
                     item["failure"] = fatal ?? "runner_outcome_unavailable"
                     item["episode_state"] = NSNull(); item["invocation_status"] = NSNull()
@@ -601,12 +649,26 @@ enum AnswerEvaluationCommand {
                     value["native_configuration_sha256"] = digest(try JSONSerialization.data(withJSONObject: frozenConfiguration,
                         options: [.sortedKeys, .withoutEscapingSlashes]))
                 }
+                if preparationMode == .investigation {
+                    value["diagnostic"] = "native-investigation-paired-development-v1"
+                    value["mode"] = "native-memory-investigation-trial-v1"
+                    value["preparation_mode"] = preparationMode.rawValue
+                    value["private_runtime_retained"] = true
+                    value["private_runtime_directory"] = runtime.lastPathComponent
+                    value["stops_after_operational_failure"] = true
+                    var trialConfiguration = value["configuration"] as! [String: Any]
+                    trialConfiguration["episode_limits"] = ["recent_only": configuration,
+                        "hybrid": try object(NativeInvestigationConfiguration.limits)]
+                    trialConfiguration["episode_limits_mode"] = "per_strategy"
+                    trialConfiguration["maximum_investigation_actions"] = NativeInvestigationConfiguration.maximumActions
+                    value["configuration"] = trialConfiguration
+                }
                 try writePrivate(try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), output.appendingPathComponent("report.json"))
-                try FileManager.default.removeItem(at: runtime)
+                if preparationMode == .ordinary { try FileManager.default.removeItem(at: runtime) }
                 FileHandle.standardOutput.write(Data("{\"status\":\"terminalized\",\"attempts\":\(report.count)}\n".utf8))
                 Darwin.exit(fatal == nil ? 0 : 1)
             } catch {
-                try? FileManager.default.removeItem(at: runtime)
+                if preparationMode == .ordinary { try? FileManager.default.removeItem(at: runtime) }
                 fputs("Answer evaluation report publication failed.\n", stderr); Darwin.exit(1)
             }
         }
@@ -835,9 +897,20 @@ enum AnswerEvaluationCommand {
         return try body(database)
     }
 
-    private static func attemptMetadata(_ attempt: Attempt, ordinal: Int) -> [String: Any] {
-        ["ordinal": ordinal, "probe_id": attempt.probe_id, "strategy": attempt.strategy.rawValue,
-         "replicate": attempt.replicate, "answer_file": String(format: "answer-%04d.txt", ordinal)]
+    private static func operationallyComplete(_ completion: AnswerAttemptCompletion) -> Bool {
+        completion.episode?.state == .completed && completion.captureStatus == .complete
+            && completion.captureHealthy && completion.accountingHealthy && completion.invocationStarted
+            && completion.generation.failure == nil && !completion.generation.stopped
+    }
+    private static func attemptMetadata(_ attempt: Attempt, ordinal: Int,
+                                        preparationMode: PreparationMode = .ordinary) -> [String: Any] {
+        var value: [String: Any] = ["ordinal": ordinal, "probe_id": attempt.probe_id, "strategy": attempt.strategy.rawValue,
+            "replicate": attempt.replicate, "answer_file": String(format: "answer-%04d.txt", ordinal)]
+        if preparationMode == .investigation {
+            value["preparation_mode"] = preparationMode.investigates(attempt) ? "native-investigation-v1" : "ordinary-v1"
+            value["memory_investigation"] = preparationMode.investigates(attempt)
+        }
+        return value
     }
     private static func key(_ project: String, _ conversation: String) -> String { project + "|" + conversation }
     private static func project(_ publicID: String) -> String { "answer-evaluation-public:" + publicID }
@@ -1183,6 +1256,39 @@ extension AnswerEvaluationCommand {
                 && productionProjections.isDisjoint(with: witnessCorpusProjectionSHA256)
         ]
         if version == 7 {
+            let ordinaryOptions = try invocationOptions(["--answer-evaluation", "/synthetic/input.json", "--output-directory", "/synthetic/output"])
+            let trialOptions = try invocationOptions(["--answer-evaluation", "/synthetic/input.json", "--output-directory", "/synthetic/output", "--investigate-memory"])
+            try trialOptions.preparationMode.validate(document)
+            checks["native_trial_cli_exact_optional_flag_accepted"] = ordinaryOptions.preparationMode == .ordinary
+                && trialOptions.preparationMode == .investigation && trialOptions.input == ordinaryOptions.input
+                && trialOptions.output == ordinaryOptions.output
+            for (index, args) in [
+                [] as [String], ["--answer-evaluation"],
+                ["--investigate-memory", "--answer-evaluation", "/synthetic/input", "--output-directory", "/synthetic/output"],
+                ["--answer-evaluation", "/synthetic/input", "--output-directory", "/synthetic/output", "--unknown"],
+                ["--answer-evaluation", "/synthetic/input", "--output-directory", "/synthetic/output", "--investigate-memory", "--investigate-memory"]
+            ].enumerated() {
+                do { _ = try invocationOptions(args); checks["native_trial_cli_invalid_argument_\(index)_refused"] = false }
+                catch { checks["native_trial_cli_invalid_argument_\(index)_refused"] = true }
+            }
+            let recentAttempt = document.attempts[0], hybridAttempt = document.attempts[1]
+            checks["native_trial_cli_recent_control_uses_ordinary_settings"] = !PreparationMode.investigation
+                .settings(document.configuration, attempt: recentAttempt).investigateMemory
+            checks["native_trial_cli_only_hybrid_uses_investigation_settings"] = PreparationMode.investigation
+                .settings(document.configuration, attempt: hybridAttempt).investigateMemory
+                && !PreparationMode.ordinary.settings(document.configuration, attempt: hybridAttempt).investigateMemory
+            checks["native_trial_cli_skips_semantic_construction_only_for_native"] = !PreparationMode.investigation
+                .constructsSemanticIndex(version: version, attempt: hybridAttempt)
+                && PreparationMode.ordinary.constructsSemanticIndex(version: version, attempt: hybridAttempt)
+                && !PreparationMode.investigation.constructsSemanticIndex(version: version, attempt: recentAttempt)
+            let recentMetadata = attemptMetadata(recentAttempt, ordinal: 0, preparationMode: .investigation)
+            let nativeMetadata = attemptMetadata(hybridAttempt, ordinal: 1, preparationMode: .investigation)
+            checks["native_trial_cli_per_attempt_mode_identity"] = recentMetadata["memory_investigation"] as? Bool == false
+                && nativeMetadata["memory_investigation"] as? Bool == true
+                && recentMetadata["preparation_mode"] as? String == "ordinary-v1"
+                && nativeMetadata["preparation_mode"] as? String == "native-investigation-v1"
+            checks["native_trial_cli_ordinary_metadata_contract_unchanged"] = Set(attemptMetadata(hybridAttempt, ordinal: 1).keys)
+                == ["ordinal", "probe_id", "strategy", "replicate", "answer_file"]
             checks["longmem_v7_production_independent_from_all_prior_versions"] = productionProjections
                 .isDisjoint(with: longMemoryCorpusProjectionSHA256.union(semanticLongMemoryCorpusProjectionSHA256)
                     .union(completeSourceLongMemoryCorpusProjectionSHA256).union(jsonObjectCorpusProjectionSHA256))
@@ -1278,6 +1384,12 @@ extension AnswerEvaluationCommand {
                 let name = malformedVersion is Bool ? "boolean" : (malformedVersion as? Double == 7.5 ? "fractional" : "out_of_range_\(malformedVersion)")
                 checks["longmem_v7_repin_malformed_version_\(name)_refused"] = refused(changed, using: repinned)
             }
+        }
+        if version != 7 {
+            do { try PreparationMode.investigation.validate(document); checks["native_trial_cli_version_\(version)_refused"] = false }
+            catch { checks["native_trial_cli_version_\(version)_refused"] = true }
+            try PreparationMode.ordinary.validate(document)
+            checks["native_trial_cli_version_\(version)_ordinary_accepted"] = true
         }
         guard let resolved = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.io }
         let temporaryRoot = String(cString: resolved); free(resolved)
