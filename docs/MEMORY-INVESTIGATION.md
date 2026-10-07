@@ -1,6 +1,6 @@
 # Experimental memory investigation
 
-Implemented October 6, 2026. The new standalone path gives the reader a history map, deliberate search and zoom, protected complete exchanges, and a source-bound extraction step before answering. It preserves the frozen orientation pilot. Ordinary native GUI Send still uses its existing one-pass selection.
+Implemented October 6, 2026. The new standalone path gives the reader a history map, deliberate search and zoom, protected complete exchanges, and a source-bound extraction step before answering. It preserves the frozen orientation pilot. Ordinary native GUI Send defaults to its existing one-pass selection. A separate opt-in [native adapter](NATIVE-MEMORY-INVESTIGATION.md) now connects investigation to the shared coordinator, with an original-only final reader.
 
 The implementation has synthetic verification only. No new model answers, retrieval benchmark, judge calls, paid API work, or quality/latency measurement ran. The user's experiment hold remains in effect. A future execution requires explicit authorization and a spending limit; CLI flags do not provide that authorization.
 
@@ -75,4 +75,4 @@ The original v1 report and declaration hashes remain unchanged. The prior native
 
 Next quality work requires an explicitly authorized small comparison with a spending cap, frozen original inputs, an independently checked blind projection, manual source/judgment checks, and separate baseline/investigation results. Record candidate reach, packing loss and source-supported answer quality separately. These implementation checks provide no new answer-quality result.
 
-Native integration requires a reusable stage admission helper, a new counted component session for each planner/extractor request under the original episode lease, bound derived-content framing, private intermediate capture, and one visible final invocation. Existing final-answer count proofs cannot authorize different planner bodies. The new path stays experimental until comparison supports promotion; further policy/service expansion remains deferred.
+The [native adapter](NATIVE-MEMORY-INVESTIGATION.md) now supplies reusable private-stage admission, a fresh counted component session for each planner/extractor request under the original episode lease, private intermediate capture and one visible final invocation. It keeps derived note prose out of final input. Existing final-answer count proofs cannot authorize different planner bodies. Native synthetic verification is recorded in STATUS.md; empirical quality validation remains pending. The new path stays experimental until comparison supports promotion; further policy/service expansion remains deferred.
