@@ -44,3 +44,5 @@ The prior sixty-one synthetic contracts remain mechanical evidence for their tes
 ## Current decision
 
 Hold all paid and local-model experiment execution until the user explicitly authorizes it. Do not automatically resume v1 after credits become available. A future proposal should first close identifier leakage, distinguish structural coverage from semantic fidelity, publish final fitted-pack receipts, separate unknown paired outcomes, and declare a dollar ceiling and stop conditions. Its corrected requests require a new experiment identity; earlier receipts remain evidence of what actually happened.
+
+The user later authorized a separate [local JevK5 QA pass over saved answers](../JEVK5-SAVED-QA.md). That pass makes no new answers or retrieval attempts and does not lift the experiment hold. Its second-model judgments agree with Sol on the eight matched answerable cases; they do not repair the original identifier leakage or establish summary fidelity.
