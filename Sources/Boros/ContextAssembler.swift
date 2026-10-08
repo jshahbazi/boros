@@ -198,7 +198,7 @@ struct ContextSnapshot {
         }
         var bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         if bytes.count > 32768, var retrieval = value["retrieval"] as? [String: Any] {
-            for key in ["selection_trace", "exchange_expansion"] where bytes.count > 32768 {
+            for key in ["selection_trace", "exchange_expansion", "exchange_query"] where bytes.count > 32768 {
                 guard retrieval.removeValue(forKey: key) != nil else { continue }
                 retrieval[key + "_omitted"] = "metadata_limit"
                 value["retrieval"] = retrieval
@@ -311,7 +311,10 @@ struct ContextSnapshot {
         _ = try componentAssignments()
         guard !evidence.isEmpty else { return nil }
         let optionalCount = evidence.count - (protectedPrimarySpanCount ?? evidence.count)
-        let removed = auditSize ? 1 : evidenceProvenance != nil && optionalCount > 0 ? (optionalCount + 1) / 2 : (evidence.count + 1) / 2
+        // Exchange policies rank whole blocks and pack by estimated cost, so
+        // an overflow removes one lowest-ranked span per counted round.
+        let singleSpan = selectionAudit?.version == ContextComponentPolicy.exchangeSelectionAuditVersion
+        let removed = auditSize || singleSpan ? 1 : evidenceProvenance != nil && optionalCount > 0 ? (optionalCount + 1) / 2 : (evidence.count + 1) / 2
         let retained = Array(evidence.dropLast(removed))
         let recent = Array(messages.dropFirst().prefix(includedRecentCount))
         let candidateMessages = [messages[0]] + recent + (retained.isEmpty ? [] : [try ContextAssembler.evidenceMessage(retained, selectionVersion: selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion)]) + [messages[messages.count - 1]]

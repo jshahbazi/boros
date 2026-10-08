@@ -132,12 +132,34 @@ struct ContextComponentPolicy: Codable, Equatable {
         value.reductionVersion = "primary-first-neighbor-geometric-v1"
         return value
     }()
+    /// Explicit experimental P2 policies: the whole question ranks complete
+    /// human-led exchange blocks (step 1); the adjacent variant also packs
+    /// each block's opposite-role neighbors beside it (step 2). Neither is a
+    /// default; ordinary Send keeps v1 until the offline gate justifies it.
+    static let selectedQwenExchange: ContextComponentPolicy = {
+        var value = ContextComponentPolicy()
+        value.version = "selected-model-context-components-v3-exchange"
+        value.evidenceSpans = 48
+        value.reductionVersion = "whole-source-suffix-single-v1"
+        return value
+    }()
+    static let selectedQwenExchangeAdjacent: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-adjacent"
+        return value
+    }()
+    static let exchangeSelectionAuditVersion = "context-exchange-v1"
     // The wider candidate frontier remains experimental pending answer-quality
     // evidence that justifies changing ordinary Send and public evaluation.
     static let currentSelectedQwen = selectedQwen
 
     var usesBoundedNeighborhood: Bool { self == Self.selectedQwenNeighborhood }
-    var selectionAuditVersion: String { usesBoundedNeighborhood ? "context-neighborhood-v2" : "context-geometric-v1" }
+    var usesExchangeQuery: Bool { self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent }
+    var packsAdjacentExchanges: Bool { self == Self.selectedQwenExchangeAdjacent }
+    var selectionAuditVersion: String {
+        usesBoundedNeighborhood ? "context-neighborhood-v2"
+            : usesExchangeQuery ? Self.exchangeSelectionAuditVersion : "context-geometric-v1"
+    }
 
     init() {}
     private enum CodingKeys: String, CodingKey {
@@ -163,7 +185,8 @@ struct ContextComponentPolicy: Codable, Equatable {
     }
 
     func validated() throws -> ContextComponentPolicy {
-        guard self == Self.selectedQwen || self == Self.selectedQwenNeighborhood else { throw EpisodeBudgetError.invalid }
+        guard self == Self.selectedQwen || self == Self.selectedQwenNeighborhood
+            || self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent else { throw EpisodeBudgetError.invalid }
         return self
     }
 

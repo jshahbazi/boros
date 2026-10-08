@@ -75,6 +75,16 @@ enum DeliveryHarness {
         return (end - question.prompt.utf8.count)..<end
     }
     static func project(_ id: String) -> String { "retrieval-harness:" + id }
+    /// P2 arms: explicit experimental exchange policies, no semantic index.
+    static func exchangeLimits(_ arm: String) -> EpisodeLimits? {
+        var limits = EpisodeLimits()
+        switch arm {
+        case "exchange_lexical": limits.componentPolicy = .selectedQwenExchange
+        case "exchange_adjacent": limits.componentPolicy = .selectedQwenExchangeAdjacent
+        default: return nil
+        }
+        return limits
+    }
     static func key(_ project: String, _ conversation: String) -> String { project + "|" + conversation }
 
     static func main() {
@@ -90,7 +100,7 @@ enum DeliveryHarness {
             guard input.version == 1 else { throw Failure.invalid }
             if args[0] == "select" {
                 guard input.declared_source_ids == nil, !input.arms.isEmpty,
-                      input.arms.allSatisfy({ ["recent_only", "lexical", "hybrid"].contains($0) }) else { throw Failure.invalid }
+                      input.arms.allSatisfy({ ["recent_only", "lexical", "hybrid"].contains($0) || exchangeLimits($0) != nil }) else { throw Failure.invalid }
             } else {
                 guard let ids = input.declared_source_ids, !ids.isEmpty, input.arms == ["declared_sources"] else { throw Failure.invalid }
             }
@@ -241,7 +251,7 @@ enum DeliveryHarness {
             let value = AnswerAttemptCoordinator(store: owner, conversationID: conversationID,
                 projectID: project(question.project_id), prompt: effectivePrompt(question),
                 settings: input.configuration.settings, semanticIndex: semantic,
-                retrievalStrategy: arm == "recent_only" ? .recentOnly : .hybrid,
+                retrievalStrategy: arm == "recent_only" ? .recentOnly : .hybrid, limits: exchangeLimits(arm),
                 lexicalQueryUTF8Range: queryRange(question), semanticQueryUTF8Range: queryRange(question),
                 evidenceSourceIDs: arm == "declared_sources" ? input.declared_source_ids : nil,
                 runner: runner,
@@ -328,6 +338,7 @@ enum DeliveryHarness {
                 if let value = retrieval[name] { summary[name] = value }
             }
             item["retrieval"] = summary
+            if let exchange = retrieval["exchange_query"] { item["exchange"] = exchange }
             if let trace = retrieval["selection_trace"] as? [String: Any] {
                 item["candidate_count"] = trace["candidate_count"] ?? NSNull()
                 item["trace_truncated"] = trace["trace_truncated"] ?? NSNull()
