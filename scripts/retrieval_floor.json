@@ -1,0 +1,26 @@
+{
+  "arms": {
+    "hybrid": {
+      "r1_cases": 8,
+      "r1_turns": 14,
+      "r2_cases": 8,
+      "r2_turns": 14
+    },
+    "lexical": {
+      "r1_cases": 9,
+      "r1_turns": 15,
+      "r2_cases": 9,
+      "r2_turns": 15
+    },
+    "recent_only": {
+      "r1_cases": 0,
+      "r1_turns": 0,
+      "r2_cases": 0,
+      "r2_turns": 0
+    }
+  },
+  "cohort": "regression",
+  "eligible_cases": 12,
+  "eligible_turns": 18,
+  "manifest_sha256": "bb4b3d2e6886a81a8cc3c4057c0562ab2c30257979ad2d4bf1ea7dc9e83432a9"
+}

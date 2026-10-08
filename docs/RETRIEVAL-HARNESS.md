@@ -112,11 +112,15 @@ python3 scripts/retrieval_harness.py --cohort development --output .build/evalua
 
 `--cohort regression` runs the fourteen-history set in under two minutes with a warm cache. `--rebuild-stores` discards the store cache. `scripts/test_retrieval_harness.py` holds 12 synthetic contracts for the scorer, feasibility, denominators, the stand-in endpoint and failure output, and runs in `scripts/check.py`.
 
-## Limits
+## Recall floor in check.py
+
+Implemented October 8, 2026. `scripts/retrieval_floor.py` runs `--cohort regression` with three workers into a temporary report under `.build/`, then compares each arm's case-level R1 and R2 and turn-level counts with the committed numbers in `scripts/retrieval_floor.json`: the cohort manifest hash, the denominators, and per arm the minimum passed cases and turns (hybrid 8/12 cases and 14/18 turns, lexical 9/12 and 15/18, recent-only 0). A lower count, a missing arm, a changed manifest hash or a changed denominator fails `scripts/check.py`. An arm present in a run but absent from the floor is reported and does not fail. `--update` rewrites the floor from a run and refuses to lower any number without `--allow-lower`.
+
+The floor needs the pinned dataset and the pinned tokenizer, neither of which is committed. When either is missing, or the `tokenizers` package is absent, the script prints one skip reason and exits 0 with zero checks, and `check.py` prints the skip as a skip, not a pass. 22 synthetic contracts in `scripts/test_retrieval_floor.py` cover the comparison and skip logic without the dataset or tokenizer. Measured October 8, 2026 with a warm store cache and a cached harness binary: about 60 to 75 seconds added to `check.py` (a cold store cache needs about 100 seconds at four workers plus the first Swift compile of the harness, about 225 seconds in total on the first run in a fresh checkout). The check contributes 19 comparisons. The floor guards the regression cohort only; the development cohort takes minutes and is not part of `check.py`.
 
 - One replicate per build. Selection is deterministic, so replicates matter for model-involved stages, not this one.
 - LongMemEval positive-turn annotations are a proxy for sufficient source spans. `1a1907b4` was previously accepted without its annotated turn.
 - R1 at depth 16 cannot separate from R2 at v1/16, as explained above.
 - Cached stores carry the ingestion and indexing timings of the run that built them.
 - The parity sample is a deterministic subset of the counted strings, not every request.
-- `scripts/check.py` does not yet enforce a recall floor. The floor needs the pinned dataset and tokenizer, which `check.py` does not assume; see the plan's testing changes.
+- The recall floor in `scripts/check.py` covers only the regression cohort and needs the pinned dataset and tokenizer. See the next section.

@@ -87,6 +87,7 @@ def main():
                              ("local-longmemeval-source-control-qa", "test_local_longmemeval_source_control_qa.py"),
                              ("local-longmemeval-independent-qa", "test_local_longmemeval_independent_qa.py"),
                              ("retrieval-harness", "test_retrieval_harness.py"),
+                             ("retrieval-floor-contracts", "test_retrieval_floor.py"),
                              ("vertex-anthropic", "test_vertex_anthropic.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)
@@ -109,7 +110,20 @@ def main():
         total += evaluation_report["checks"]
         if imported_evaluation.returncode or evaluation_report["failed"] or evaluation_report["errors"] or evaluation_report["skipped"]:
             return 1
-    print(json.dumps({"total_checks": total, "passed": True}))
+    # Recall floor: runs the offline retrieval harness on the regression cohort. It skips, visibly
+    # and with exit code 0, when the pinned dataset or tokenizer is unavailable. A skip adds no checks.
+    floor = subprocess.run([sys.executable, str(ROOT / "scripts/retrieval_floor.py")],
+                           capture_output=True, text=True, env=env, timeout=2400)
+    floor_report = json.loads(floor.stdout)
+    print(json.dumps(floor_report))
+    total += floor_report["checks"]
+    if floor.returncode or floor_report["failed"] or floor_report["errors"]:
+        return 1
+    floor_ran = floor_report["status"] == "passed"
+    if floor_report["status"] == "skipped":
+        print("SKIPPED retrieval recall floor (not a pass): " + floor_report["skip_reason"])
+    print(json.dumps({"total_checks": total, "passed": True,
+                      "retrieval_floor": "ran" if floor_ran else floor_report["status"]}))
     return 0
 
 
