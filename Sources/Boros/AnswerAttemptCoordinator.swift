@@ -104,7 +104,8 @@ final class AnswerAttemptCoordinator {
     private var state: State = .idle
     private let interruptionLock = NSLock()
     private var interruption: (EpisodeState, String?)?
-    private var operation: ComponentContextPreparationOperation?
+    private var operation: AnswerContextPreparing?
+    private var preparationDrainPending = false
     private var timer: DispatchSourceTimer?
     private var lifetime: AnswerAttemptCoordinator?
     private var startedClock: EpisodeClockSnapshot?
@@ -124,7 +125,7 @@ final class AnswerAttemptCoordinator {
 
     init(store: MemoryStore, conversationID: String, projectID: String, prompt: String,
          settings: GenerationSettings, conversation: Conversation = Conversation(), semanticIndex: SemanticIndex? = nil,
-         retrievalStrategy: ContextRetrievalStrategy = .hybrid, limits: EpisodeLimits = EpisodeLimits(),
+         retrievalStrategy: ContextRetrievalStrategy = .hybrid, limits: EpisodeLimits? = nil,
          lexicalQueryUTF8Range: Range<Int>? = nil,
          semanticQueryUTF8Range: Range<Int>? = nil,
          evidenceSourceIDs: [String]? = nil,
@@ -138,7 +139,7 @@ final class AnswerAttemptCoordinator {
         self.evidenceSourceIDs = evidenceSourceIDs
         self.retrievalStrategy = retrievalStrategy; self.clock = clock; self.runner = runner
         self.onStage = onStage; self.onText = onText; self.onComplete = onComplete
-        var frozenLimits = limits
+        var frozenLimits = limits ?? (settings.investigateMemory ? NativeInvestigationConfiguration.limits : EpisodeLimits())
         if frozenLimits.componentPolicy == nil { frozenLimits.componentPolicy = .currentSelectedQwen }
         self.limits = frozenLimits
         lease = EpisodeLease(ledger: store, episodeID: identifiers.episodeID, clock: clock)
@@ -188,15 +189,20 @@ final class AnswerAttemptCoordinator {
             _ = try lease.checkActive(projectID: projectID)
             state = .preparing; onStage?(.preparing, nil)
             guard state == .preparing else { return }
-            let operation = ComponentContextPreparationOperation(store: store, conversationID: conversationID,
-                projectID: projectID, humanEventID: identifiers.humanEventID, prompt: prompt,
-                settings: settings, conversation: conversation, semanticIndex: semanticIndex,
-                retrievalStrategy: retrievalStrategy, lexicalQueryUTF8Range: lexicalQueryUTF8Range,
-                semanticQueryUTF8Range: semanticQueryUTF8Range,
-                evidenceSourceIDs: evidenceSourceIDs,
-                episodeLease: lease) { [self] outcome in
-                    prepared(outcome)
-                }
+            let operation: AnswerContextPreparing
+            if settings.investigateMemory {
+                operation = NativeInvestigationPreparationOperation(store: store, conversationID: conversationID,
+                    projectID: projectID, humanEventID: identifiers.humanEventID, prompt: prompt,
+                    settings: settings, conversation: conversation, episodeLease: lease) { [self] in prepared($0) }
+            } else {
+                operation = ComponentContextPreparationOperation(store: store, conversationID: conversationID,
+                    projectID: projectID, humanEventID: identifiers.humanEventID, prompt: prompt,
+                    settings: settings, conversation: conversation, semanticIndex: semanticIndex,
+                    retrievalStrategy: retrievalStrategy, lexicalQueryUTF8Range: lexicalQueryUTF8Range,
+                    semanticQueryUTF8Range: semanticQueryUTF8Range,
+                    evidenceSourceIDs: evidenceSourceIDs,
+                    episodeLease: lease) { [self] in prepared($0) }
+            }
             self.operation = operation; operation.start()
         } catch { finish(failureResult(error)) }
     }
@@ -323,11 +329,15 @@ final class AnswerAttemptCoordinator {
             : resolved.failure != nil || captureFailed ? .failed : .completed)
         closingResult = resolved
         lease.interruptLocally(reason: terminal)
-        operation?.cancel(); operation = nil
+        let pending = operation; operation = nil
+        preparationDrainPending = pending != nil
         // Close the durable allowance immediately. Host readiness still waits
         // for transport drain, while uncertain dispatched work retains bounds.
         do { closingReceipt = try lease.finish(reason: terminal) }
         catch { closingAccountingHealthy = false }
+        pending?.cancelAndDrain { [self] in onMain { [self] in
+            preparationDrainPending = false; completeAfterDrain()
+        } }
         if runnerStarted, runnerCompletion == nil {
             // Before our handoff, ModelRunner may be returning an async busy
             // refusal for another job. The original lease fence suppresses
@@ -361,6 +371,7 @@ final class AnswerAttemptCoordinator {
 
     private func completeAfterDrain() {
         guard state == .finishing, let original = closingResult,
+              !preparationDrainPending,
               !runnerStarted || (runnerCompletion != nil && !runner.isRunning) else { return }
         let finalizationStarted = elapsedMilliseconds()
         state = .finished
@@ -455,7 +466,8 @@ final class AnswerAttemptCoordinator {
             "provider_admission_unavailable", "provider_adapter_unverified", "provider_template_mismatch", "admission_mismatch",
             "provider_count_mismatch", "episode_budget_exceeded", "episode_deadline_exceeded", "episode_inactive",
             "episode_input_unobservable", "episode_adapter_violation", "episode_clock_unavailable", "episode_accounting_failed",
-            "context_preparation_failed", "capture_failure", "cancelled", "host_settings_failure"]
+            "context_preparation_failed", "native_investigation_format_failed", "native_investigation_output_bound_exceeded",
+            "capture_failure", "cancelled", "host_settings_failure"]
         return allowed.contains(failure) ? failure : "process_failed"
     }
 }

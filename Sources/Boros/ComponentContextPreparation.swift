@@ -36,6 +36,7 @@ final class ComponentContextPreparationOperation {
     private let lexicalQueryUTF8Range: Range<Int>?
     private let semanticQueryUTF8Range: Range<Int>?
     private let evidenceSourceIDs: [String]?
+    private let preselectedSnapshot: ContextSnapshot?
     private let settings: GenerationSettings
     private let conversation: Conversation
     private let semanticIndex: SemanticIndex?
@@ -56,12 +57,14 @@ final class ComponentContextPreparationOperation {
          lexicalQueryUTF8Range: Range<Int>? = nil,
          semanticQueryUTF8Range: Range<Int>? = nil,
          evidenceSourceIDs: [String]? = nil,
-         episodeLease: EpisodeLease, completion: @escaping (Result<PreparedComponentContext, Error>) -> Void) {
+         episodeLease: EpisodeLease, preselectedSnapshot: ContextSnapshot? = nil,
+         completion: @escaping (Result<PreparedComponentContext, Error>) -> Void) {
         self.store = store; self.conversationID = conversationID; self.projectID = projectID
         self.humanEventID = humanEventID; self.prompt = prompt; self.settings = settings
         self.lexicalQueryUTF8Range = lexicalQueryUTF8Range
         self.semanticQueryUTF8Range = semanticQueryUTF8Range
         self.evidenceSourceIDs = evidenceSourceIDs
+        self.preselectedSnapshot = preselectedSnapshot
         self.conversation = conversation; self.semanticIndex = semanticIndex; self.lease = episodeLease
         self.retrievalStrategy = retrievalStrategy
         self.completion = completion
@@ -97,6 +100,19 @@ final class ComponentContextPreparationOperation {
                         case .success:
                             do {
                                 try self.checkActive()
+                                if let supplied = self.preselectedSnapshot {
+                                    let mandatory = ContextAssembler.mandatoryMessages(prompt: self.prompt, system: self.settings.system)
+                                    guard let binding = supplied.selectionBinding,
+                                          episodeIdentifierEqual(binding.projectID, self.projectID),
+                                          episodeIdentifierEqual(binding.conversationID, self.conversationID),
+                                          episodeIdentifierEqual(binding.acceptedHumanEventID, self.humanEventID),
+                                          binding.mandatoryMessagesSHA256 == EndpointRequest.digest(try ContextAssembler.serializedMessages(mandatory)) else {
+                                        throw ContextError.sourceMismatch
+                                    }
+                                    _ = try supplied.componentAssignments()
+                                    self.countRecent(supplied, prepareEvidence: false)
+                                    return
+                                }
                                 let recent = try ContextAssembler.prepareRecent(store: self.store,
                                     conversationID: self.conversationID, projectID: self.projectID,
                                     prompt: self.prompt, system: self.settings.system, excludingEventID: self.humanEventID,
@@ -158,6 +174,7 @@ final class ComponentContextPreparationOperation {
                         case .failure(let error): self.finish(.failure(error))
                         case .success(let receipt):
                             if receipt.tokens > self.policy.recentTokens {
+                                guard self.preselectedSnapshot == nil else { throw ProviderAdmissionError.contextOverflow }
                                 guard let reduced = try snapshot.reducedRecentForComponentCap() else {
                                     throw ProviderAdmissionError.countMismatch
                                 }
@@ -193,6 +210,7 @@ final class ComponentContextPreparationOperation {
                         case .failure(let error): self.finish(.failure(error))
                         case .success(let receipt):
                             if receipt.tokens > self.policy.evidenceTokens {
+                                guard self.preselectedSnapshot == nil else { throw ProviderAdmissionError.contextOverflow }
                                 guard let reduced = try snapshot.reducedEvidenceForComponentCap() else {
                                     throw ProviderAdmissionError.countMismatch
                                 }
@@ -220,7 +238,8 @@ final class ComponentContextPreparationOperation {
                         try self.checkActive()
                         switch outcome {
                         case .failure(let error):
-                            if error == .contextOverflow, let reduced = try snapshot.reducedForTokenAdmission() {
+                            if self.preselectedSnapshot == nil, error == .contextOverflow,
+                               let reduced = try snapshot.reducedForTokenAdmission() {
                                 self.countRecent(reduced, prepareEvidence: false)
                             } else { self.finish(.failure(error)) }
                         case .success(let receipt):
@@ -303,6 +322,16 @@ final class ComponentContextPreparationOperation {
     static func failureCode(_ error: Error) -> String {
         if let error = error as? ProviderAdmissionError { return error.failureCode }
         if let error = error as? EpisodeBudgetError { return error.failureCode }
+        if let error = error as? NativeHistoryNavigationError {
+            switch error {
+            case .invalidPlan, .invalidExtraction, .invalidQuery, .invalidRegion, .invalidCursor:
+                return "native_investigation_format_failed"
+            case .outputBound:
+                return "native_investigation_output_bound_exceeded"
+            case .scope, .snapshotLimit, .sourceMismatch:
+                return "context_preparation_failed"
+            }
+        }
         if case ContextError.mandatoryOverflow = error { return "context_full" }
         return "context_preparation_failed"
     }

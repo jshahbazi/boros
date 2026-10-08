@@ -28,6 +28,8 @@ struct GenerationSettings {
     var endpointSafetyTokens = 256
     // Optional supported provider output mode; frozen in the counted request.
     var endpointJSONOutput = false
+    // Experimental multi-stage preparation, selected explicitly for this turn.
+    var investigateMemory = false
     var endpointAdmission: EndpointAdmissionReceipt?
     var preparedNativeBody: Data?
     // One durable allowance spans preparation, calibration and answering.

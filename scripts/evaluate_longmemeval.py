@@ -250,14 +250,20 @@ def score_native(native, directory, history, document, *, configuration=None, ru
     """Return content-free attempts and a separate private prediction inventory."""
     configuration = CONFIGURATION if configuration is None else configuration
     runner_document_version = RUNNER_DOCUMENT_VERSION if runner_document_version is None else runner_document_version
-    if type(runner_document_version) is not int or runner_document_version not in (4, 5, 7):
+    if type(runner_document_version) is not int or runner_document_version not in (4, 5, 7, 8):
         raise e.EvaluationError("unsupported benchmark scoring version")
     probe = validate_history(history)
     requested = document["attempts"]
-    expected = cases.runner_input(history, configuration, version=5 if runner_document_version == 7 else runner_document_version)
-    expected["version"] = runner_document_version
+    if runner_document_version == 8:
+        import native_investigation_hundred_cases as hundred
+        expected = hundred.runner_input(history, configuration)
+        expected_strategies = ["hybrid"]
+    else:
+        expected = cases.runner_input(history, configuration, version=5 if runner_document_version == 7 else runner_document_version)
+        expected["version"] = runner_document_version
+        expected_strategies = list(e.STRATEGIES)
     if (canonical_json(document) != canonical_json(expected)
-            or len(requested) != 2 or [r["strategy"] for r in requested] != list(e.STRATEGIES)
+            or len(requested) != len(expected_strategies) or [r["strategy"] for r in requested] != expected_strategies
             or any(type(r.get("replicate")) is not int or r["replicate"] != 0 for r in requested)):
         raise e.EvaluationError("benchmark runner document mismatch")
     if not isinstance(native, dict) or type(native.get("version")) is not int or native["version"] != 1:

@@ -45,6 +45,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private let keyField = NSSecureTextField(string: "")
     private let endpointTokenLimit = NSTextField(string: "32768")
     private let jsonOutput = NSButton(checkboxWithTitle: "JSON object", target: nil, action: nil)
+    private let investigateMemory = NSButton(checkboxWithTitle: "Investigate memory (experimental)", target: nil, action: nil)
     private let memoryButton = NSButton(title: "Search Memory", target: nil, action: nil)
     private var credentialOrigin: String?
     private var store: MemoryStore?
@@ -316,12 +317,15 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         endpointTokenLimit.toolTip = "Maximum total prompt and response tokens. Admission also respects the server's current safe capacity and reserves a safety margin."
         let tokenRow = row([label("API token budget"), endpointTokenLimit])
         let outputRow = row([label("API output"), jsonOutput])
-        for item in [endpointRow, servedRow, keyRow, tokenRow, outputRow] {
+        investigateMemory.state = .off
+        investigateMemory.toolTip = "Use a whole-history map, deliberate search or zoom, and private extraction before answering from originals. Up to six tool actions; five-minute turn deadline. Additional local model calls. Off by default."
+        let investigationRow = row([label("Memory"), investigateMemory])
+        for item in [endpointRow, servedRow, keyRow, tokenRow, outputRow, investigationRow] {
             panel.addArrangedSubview(item)
             item.widthAnchor.constraint(equalTo: panel.widthAnchor).isActive = true
         }
         for field in [endpointField, servedModelField, keyField] { field.setContentHuggingPriority(.defaultLow, for: .horizontal) }
-        settingsControls += [endpointField, servedModelField, keyField, endpointTokenLimit, jsonOutput, saveEndpoint]
+        settingsControls += [endpointField, servedModelField, keyField, endpointTokenLimit, jsonOutput, investigateMemory, saveEndpoint]
         if !CommandLine.arguments.contains("--ui-self-test") { reloadCredential() }
         else { credentialOrigin = try? LocalCredentialStore.origin(for: endpointField.stringValue) }
         modelField.stringValue = selectedProfile.defaultModelPath
@@ -352,6 +356,11 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             && jsonOutput.state == .on
     }
 
+    private var requestedMemoryInvestigation: Bool {
+        selectedProfile == .customLocal && servedModelField.stringValue == Qwen38TextAdapter.modelID
+            && investigateMemory.state == .on
+    }
+
     private func configureReasoningControls(for profile: ModelProfile, session: ChatSession? = nil) {
         thinking.state = (session?.thinkingEnabled ?? profile.defaultThinkingEnabled) ? .on : .off
         thinkingBudget.removeAllItems()
@@ -369,6 +378,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private func refreshReasoningControls() {
         let isAPI = selectedProfile == .customLocal
         jsonOutput.isEnabled = !generating && isAPI && servedModelField.stringValue == Qwen38TextAdapter.modelID
+        investigateMemory.isEnabled = !generating && isAPI && servedModelField.stringValue == Qwen38TextAdapter.modelID
         if requestedJSONOutput || (isAPI && !usesQwenMLXThinkingToggle) { thinking.state = .off }
         thinking.title = isAPI ? "Request thinking" : "Think before answering"
         thinking.isEnabled = !generating && !requestedJSONOutput
@@ -769,6 +779,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         settings.endpointURL = endpointField.stringValue
         settings.endpointModel = servedModelField.stringValue
         settings.endpointJSONOutput = requestedJSONOutput
+        settings.investigateMemory = requestedMemoryInvestigation
         if selectedProfile == .customLocal {
             guard let origin = try? LocalCredentialStore.origin(for: settings.endpointURL), origin == credentialOrigin else {
                 reloadCredential(); status.stringValue = "Check the API address and its server-specific credentials."; return
@@ -1852,6 +1863,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     && snapshot.messages.last?.content == "Synthetic follow-up"
                 checks.merge(try sendContextChecks(store: store)) { _, new in new }
                 let before = responseView.string
+                checks["gui_memory_investigation_defaults_off"] = investigateMemory.state == .off && !requestedMemoryInvestigation
+                investigateMemory.state = .on
                 let priorJSONState = jsonOutput.state
                 jsonOutput.state = .on
                 modelSelector.selectItem(at: ModelProfile.selectableProfiles.firstIndex(of: .qwen35)!)
@@ -1859,11 +1872,13 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 checks["model_switch_keeps_durable_chat"] = self.activeChat?.id == activeChat.id && responseView.string == before
                 checks["gui_native_profile_disables_json_option"] = !jsonOutput.isEnabled
                     && !requestedJSONOutput && jsonOutput.state == .on
+                checks["gui_native_profile_disables_memory_investigation"] = !investigateMemory.isEnabled && !requestedMemoryInvestigation
                 modelSelector.selectItem(at: 0); selectModel()
                 checks["api_profile_is_default_selection"] = selectedProfile == .customLocal
                 checks["api_address_and_served_id_configurable"] = endpointField.isEditable && servedModelField.isEditable
                 checks["gui_qwen_api_enables_json_option"] = jsonOutput.isEnabled
                     && requestedJSONOutput && jsonOutput.state == .on
+                checks["gui_qwen_api_enables_memory_investigation"] = investigateMemory.isEnabled && requestedMemoryInvestigation
                 checks["api_key_uses_secure_control"] = (keyField as NSView) is NSSecureTextField
                 jsonOutput.state = .off; jsonOutputChanged()
                 checks["qwen_api_thinking_defaults_off_and_can_be_requested"] = thinking.isEnabled
@@ -1885,6 +1900,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: servedModelField))
                 checks["gui_other_api_model_disables_json_option"] = !jsonOutput.isEnabled
                     && !requestedJSONOutput && jsonOutput.state == .on
+                checks["gui_other_api_model_disables_memory_investigation"] = !investigateMemory.isEnabled && !requestedMemoryInvestigation
                 checks["other_api_models_use_server_reasoning_defaults"] = !thinking.isEnabled
                     && thinking.state == .off && !requestedThinkingEnabled && !thinkingBudget.isEnabled
                 servedModelField.stringValue = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
@@ -1892,9 +1908,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 setGenerating(true)
                 checks["generation_disables_qwen_api_thinking_toggle"] = !thinking.isEnabled
                 checks["gui_generation_disables_json_option"] = !jsonOutput.isEnabled
+                checks["gui_generation_disables_memory_investigation"] = !investigateMemory.isEnabled
                 setGenerating(false)
                 checks["gui_idle_qwen_api_restores_json_option"] = jsonOutput.isEnabled
                     && requestedJSONOutput && jsonOutput.state == .on
+                checks["gui_idle_qwen_api_restores_memory_investigation"] = investigateMemory.isEnabled && requestedMemoryInvestigation
+                investigateMemory.state = .off
                 jsonOutput.state = .off; jsonOutputChanged()
                 checks["gui_disabled_json_preference_omits_request_option"] = !requestedJSONOutput
                 checks["gui_json_deselection_restores_thinking_toggle_off"] = thinking.isEnabled
@@ -2265,6 +2284,29 @@ private enum BonsaiPlayground {
         if let code = ChatImportCommand.run(arguments: CommandLine.arguments) { exit(code) }
         if let code = BackupCommand.run(arguments: CommandLine.arguments) { exit(code) }
         if let code = AnswerEvaluationCommand.run(arguments: CommandLine.arguments) { exit(code) }
+        if CommandLine.arguments.contains("--native-investigation-self-test") {
+            do {
+                let checks = try NativeHistoryNavigationChecks.run().merging(InvestigationStagePreparationChecks.run()) { _, latest in latest }
+                print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
+                exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+            } catch { print("{\"native_investigation_self_test\":false}"); exit(1) }
+        }
+        for flag in ["--investigation-stage-preparation-integration-test", "--native-investigation-integration-test"] {
+            if let index = CommandLine.arguments.firstIndex(of: flag), index + 1 < CommandLine.arguments.count {
+                let completion: ([String: Bool]) -> Void = { checks in
+                    if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) {
+                        print(String(decoding: data, as: UTF8.self))
+                    }
+                    exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+                }
+                if flag == "--investigation-stage-preparation-integration-test" {
+                    InvestigationStagePreparationChecks.run(baseURL: CommandLine.arguments[index + 1], completion: completion)
+                } else {
+                    NativeInvestigationChecks.run(baseURL: CommandLine.arguments[index + 1], completion: completion)
+                }
+                dispatchMain()
+            }
+        }
         if CommandLine.arguments.contains("--retrieval-strategy-self-test") {
             do {
                 let checks = try RetrievalStrategyChecks.run().merging(ExchangeExpansionChecks.run()) { _, latest in latest }

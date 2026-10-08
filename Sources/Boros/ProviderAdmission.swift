@@ -411,6 +411,25 @@ enum ProviderAdmission {
     }
 }
 
+/// These are transport ceilings, never additional episode allowance. The
+/// original session start and original lease deadline bound every request.
+enum ProviderAdmissionTimeouts {
+    static let metadataAndTokenizer: TimeInterval = 15
+    static let calibration: TimeInterval = 90
+    static let leasedSession: TimeInterval = 120
+    static let standaloneSession: TimeInterval = 45
+    static func sessionLimit(hasLease: Bool) -> TimeInterval { hasLease ? leasedSession : standaloneSession }
+    static func requestLimit(inference: Bool, elapsed: TimeInterval,
+                             episodeRemaining: TimeInterval?) -> TimeInterval? {
+        guard elapsed.isFinite, elapsed >= 0,
+              episodeRemaining.map({ $0.isFinite && $0 > 0 }) ?? true else { return nil }
+        let sessionRemaining = sessionLimit(hasLease: episodeRemaining != nil) - elapsed
+        let result = min(inference ? calibration : metadataAndTokenizer,
+            sessionRemaining, episodeRemaining ?? standaloneSession)
+        return result > 0 ? result : nil
+    }
+}
+
 final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
     private let queue = DispatchQueue(label: "dev.boros.provider.admission")
     private let body: Data
@@ -435,6 +454,8 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     private var chatURL: URL?
     private var calibrationUsage: ProviderUsage?
     private var started = Date()
+    private var startedClock: EpisodeClockSnapshot?
+    private var sessionTransportDeadline: DispatchTime?
     private var finishedAt: Date?
     private var httpRequestCount = 0
     private var tokenizerRequestCount = 0
@@ -448,6 +469,16 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     private var lateViolationRecorded = false
     private var calibrationWorkID: String?
     private var deadlineTimer: DispatchSourceTimer?
+    private var sessionDeadlineTimer: DispatchSourceTimer?
+    private var requestDeadlineTimer: DispatchSourceTimer?
+    private enum TransportCause: Int {
+        case none = 0, requestTimeout = 1, urlFailure = 2, httpStatus = 3, invalidResponse = 4
+        case responseLimit = 5, redirect = 6, cancelled = 7, episodeDeadline = 8, sessionDeadline = 9
+    }
+    private var activeTransportCause: TransportCause = .none
+    private var activeTimeout: TimeInterval?
+    private var activeHTTPStatus: Int?
+    private var activeURLErrorCode: Int?
     private var componentSessionEnabled = false
     private var componentReady = false
     private var componentBusy = false
@@ -498,6 +529,8 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
             if self.componentBusy || !self.componentReady { self.finish(.failure(.cancelled)); return }
             self.ended = true; self.finishedAt = Date(); self.terminalError = .cancelled
             self.deadlineTimer?.cancel(); self.deadlineTimer = nil
+            self.sessionDeadlineTimer?.cancel(); self.sessionDeadlineTimer = nil
+            self.requestDeadlineTimer?.cancel(); self.requestDeadlineTimer = nil
             self.session?.invalidateAndCancel(); self.session = nil
         }
     }
@@ -679,7 +712,11 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
 
     func start() {
         queue.async {
+            guard self.startedClock == nil, !self.ended else { return }
             self.started = Date()
+            do { self.startedClock = try SystemEpisodeClock().now() }
+            catch { self.finish(.failure(.episodeClockUnavailable)); return }
+            self.sessionTransportDeadline = .now() + ProviderAdmissionTimeouts.sessionLimit(hasLease: self.episodeLease != nil)
             if let lease = self.episodeLease {
                 do {
                     if self.componentSessionEnabled {
@@ -693,7 +730,11 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                     let remaining = try lease.remainingSeconds()
                     let timer = DispatchSource.makeTimerSource(queue: self.queue)
                     timer.schedule(deadline: .now() + remaining)
-                    timer.setEventHandler { [weak self] in self?.finish(.failure(.episodeDeadlineExceeded)) }
+                    timer.setEventHandler { [weak self] in
+                        guard let self, !self.ended else { return }
+                        self.activeTransportCause = .episodeDeadline
+                        self.finish(.failure(.episodeDeadlineExceeded))
+                    }
                     self.deadlineTimer = timer; timer.resume()
                 } catch { self.finish(.failure(.budget(error))); return }
             }
@@ -716,9 +757,22 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
             let configuration = URLSessionConfiguration.ephemeral
             configuration.urlCache = nil; configuration.httpCookieStorage = nil; configuration.httpShouldSetCookies = false
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-            configuration.timeoutIntervalForRequest = 15; configuration.timeoutIntervalForResource = 45
+            let sessionLimit = ProviderAdmissionTimeouts.sessionLimit(hasLease: self.episodeLease != nil)
+            let resourceLimit: TimeInterval
+            do { resourceLimit = min(sessionLimit, try self.episodeLease?.remainingSeconds() ?? sessionLimit) }
+            catch { self.finish(.failure(.budget(error))); return }
+            configuration.timeoutIntervalForRequest = ProviderAdmissionTimeouts.calibration
+            configuration.timeoutIntervalForResource = resourceLimit
             let delegateQueue = OperationQueue(); delegateQueue.maxConcurrentOperationCount = 1
             self.session = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
+            let sessionTimer = DispatchSource.makeTimerSource(queue: self.queue)
+            sessionTimer.schedule(deadline: self.sessionTransportDeadline!)
+            sessionTimer.setEventHandler { [weak self] in
+                guard let self, !self.ended else { return }
+                self.activeTransportCause = .sessionDeadline
+                self.finishTransportFailure()
+            }
+            self.sessionDeadlineTimer = sessionTimer; sessionTimer.resume()
             self.request(path: "/v1/models") { object in
                 guard let models = object["data"] as? [[String: Any]],
                       let model = models.first(where: { $0["id"] as? String == Qwen38TextAdapter.modelID }),
@@ -734,7 +788,7 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
         }
     }
 
-    func cancel() { queue.async { self.finish(.failure(.cancelled)) } }
+    func cancel() { queue.async { self.activeTransportCause = .cancelled; self.finish(.failure(.cancelled)) } }
 
     private func readProps() {
         request(path: "/props", modelQuery: true) { object in
@@ -811,17 +865,33 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     private func request(path: String, json: [String: Any]? = nil, modelQuery: Bool = false,
                          inferencePromptTokens: Int? = nil, outputReserve: Int = 0,
                          completion: @escaping ([String: Any]) -> Void) {
-        guard !ended, Date().timeIntervalSince(started) < 45, let chatURL,
+        guard !ended, let chatURL,
               var parts = URLComponents(url: chatURL, resolvingAgainstBaseURL: false) else {
             finish(.failure(.unavailable)); return
         }
         parts.path = path
         if modelQuery { parts.queryItems = [URLQueryItem(name: "model", value: Qwen38TextAdapter.modelID)] }
         guard let url = parts.url else { finish(.failure(.invalidRequest)); return }
-        let remaining: TimeInterval
-        do { remaining = try episodeLease?.remainingSeconds() ?? 45 - Date().timeIntervalSince(started) }
+        let timeout: TimeInterval
+        do {
+            let remaining = try episodeLease?.remainingSeconds()
+            guard let origin = startedClock else { throw EpisodeBudgetError.clockUnavailable }
+            let now = try SystemEpisodeClock().now()
+            guard now.domain == origin.domain, now.continuousNanoseconds >= origin.continuousNanoseconds else {
+                throw EpisodeBudgetError.clockUnavailable
+            }
+            let elapsed = Double(now.continuousNanoseconds - origin.continuousNanoseconds) / 1_000_000_000
+            guard let limit = ProviderAdmissionTimeouts.requestLimit(inference: inferencePromptTokens != nil,
+                elapsed: elapsed, episodeRemaining: remaining) else {
+                activeTransportCause = .sessionDeadline; finishTransportFailure(); return
+            }
+            timeout = limit
+        }
         catch { finish(.failure(.budget(error))); return }
-        var request = URLRequest(url: url); request.timeoutInterval = min(15, remaining, 45 - Date().timeIntervalSince(started))
+        // Freeze before reservation/arming too; time spent at handoff cannot
+        // move this request's ceiling forward.
+        let transportDeadline = DispatchTime.now() + timeout
+        var request = URLRequest(url: url); request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if !apiKey.isEmpty { request.setValue("Bearer " + apiKey, forHTTPHeaderField: "Authorization") }
         if let json {
@@ -831,6 +901,7 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
         }
         response = Data(); receivedBytes = 0; responseLimitExceeded = false; responseCallback = completion
         activeInference = inferencePromptTokens != nil; activeDispatched = false
+        activeTransportCause = .none; activeTimeout = timeout; activeHTTPStatus = nil; activeURLErrorCode = nil
         do {
             if let lease = episodeLease {
                 let snapshot = try request.httpBody ?? EndpointRequest.serialize(["method": "GET", "endpoint": url.absoluteString])
@@ -848,6 +919,15 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                     self.calibrationRequestCount += 1; self.unknownCalibrationOutcome = true
                     self.calibrationWorkID = self.activeWork?.id
                 }
+                let timer = DispatchSource.makeTimerSource(queue: self.queue)
+                timer.schedule(deadline: transportDeadline)
+                timer.setEventHandler { [weak self] in
+                    guard let self, !self.ended, self.task === next else { return }
+                    self.activeTransportCause = .requestTimeout
+                    self.activeURLErrorCode = NSURLErrorTimedOut
+                    self.finishTransportFailure()
+                }
+                self.requestDeadlineTimer = timer; timer.resume()
                 next.resume()
             }
             if let lease = episodeLease, let work = activeWork { activeWork = try lease.dispatch(work, start: start) }
@@ -916,6 +996,11 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
         var evidence: [String: Any] = ["usage_observed": false, "model_identity_mismatch": identityMismatch,
             "protocol_count_mismatch": protocolMismatch, "expected_model_sha256": EndpointRequest.digest(Data(Qwen38TextAdapter.modelID.utf8))]
         if let observedModel { evidence["observed_model_sha256"] = EndpointRequest.digest(Data(observedModel.utf8)) }
+        var transport: [String: Any] = ["version": "provider-calibration-transport-v1", "cause": activeTransportCause.rawValue]
+        if let activeTimeout { transport["timeout_seconds"] = activeTimeout }
+        if let activeHTTPStatus { transport["http_status"] = activeHTTPStatus }
+        if let activeURLErrorCode { transport["url_error_code"] = activeURLErrorCode }
+        evidence["transport"] = transport
         return try EndpointRequest.serialize(evidence)
     }
 
@@ -948,10 +1033,13 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         queue.async {
+            if let http = response as? HTTPURLResponse { self.activeHTTPStatus = http.statusCode }
             guard !self.ended, let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
                   http.value(forHTTPHeaderField: "Content-Type")?.lowercased().hasPrefix("application/json") == true,
                   response.expectedContentLength <= 4 * 1_048_576 else {
-                completionHandler(.cancel); self.finish(.failure(.unavailable)); return
+                completionHandler(.cancel)
+                self.activeTransportCause = self.activeHTTPStatus.map { (200...299).contains($0) } == false ? .httpStatus : .invalidResponse
+                self.finishTransportFailure(); return
             }
             completionHandler(.allow)
         }
@@ -962,7 +1050,7 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
             guard (!self.ended || self.lateWork != nil), !self.responseLimitExceeded else { return }
             guard data.count <= 4 * 1_048_576 - self.receivedBytes else {
                 self.responseLimitExceeded = true; self.response.removeAll(keepingCapacity: true)
-                self.finish(.failure(.unavailable)); return
+                self.activeTransportCause = .responseLimit; self.finishTransportFailure(); return
             }
             self.receivedBytes += data.count
             self.response.append(data)
@@ -978,8 +1066,16 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                 }
                 return
             }
+            if let error = error as NSError? {
+                self.activeTransportCause = error.domain == NSURLErrorDomain && error.code == NSURLErrorTimedOut ? .requestTimeout : .urlFailure
+                if error.domain == NSURLErrorDomain { self.activeURLErrorCode = error.code }
+            }
             guard error == nil, let object = (try? JSONSerialization.jsonObject(with: self.response)) as? [String: Any],
-                  let callback = self.responseCallback else { self.finish(.failure(.unavailable)); return }
+                  let callback = self.responseCallback else {
+                if error == nil { self.activeTransportCause = .invalidResponse }
+                self.finishTransportFailure(); return
+            }
+            self.requestDeadlineTimer?.cancel(); self.requestDeadlineTimer = nil
             do {
                 try self.settleActive(object: object)
                 _ = try self.episodeLease?.checkActive()
@@ -990,12 +1086,25 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil); queue.async { self.finish(.failure(.unavailable)) }
+        completionHandler(nil); queue.async { self.activeHTTPStatus = response.statusCode; self.activeTransportCause = .redirect; self.finishTransportFailure() }
+    }
+
+    /// The original lease takes priority over a simultaneous transport timeout.
+    private func finishTransportFailure() {
+        do { _ = try episodeLease?.checkActive() }
+        catch {
+            let error = ProviderAdmissionError.budget(error)
+            if error == .episodeDeadlineExceeded { activeTransportCause = .episodeDeadline }
+            finish(.failure(error)); return
+        }
+        finish(.failure(.unavailable))
     }
 
     private func finish(_ result: Result<EndpointAdmissionReceipt, ProviderAdmissionError>) {
         guard !ended else { return }
         var result = result
+        if case .failure(.episodeDeadlineExceeded) = result { activeTransportCause = .episodeDeadline }
+        if case .failure(.cancelled) = result { activeTransportCause = .cancelled }
         do {
             let object = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any]
             try settleActive(object: object)
@@ -1031,6 +1140,8 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
         componentBusy = false
         ended = true; finishedAt = Date(); let callback = completion; completion = nil; responseCallback = nil
         deadlineTimer?.cancel(); deadlineTimer = nil
+        sessionDeadlineTimer?.cancel(); sessionDeadlineTimer = nil
+        requestDeadlineTimer?.cancel(); requestDeadlineTimer = nil
         task?.cancel(); task = nil; session?.invalidateAndCancel(); session = nil
         if let callback { DispatchQueue.main.async { callback(result) } }
         if let countCallback { DispatchQueue.main.async { countCallback(.failure(error)) } }

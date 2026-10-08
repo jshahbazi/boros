@@ -21,7 +21,7 @@ def main():
     total = 0
     with tempfile.TemporaryDirectory(prefix="boros-checks-") as directory:
         env = {**os.environ, "BOROS_DATA_DIR": directory}
-        suites = ["--source-time-self-test", "--authority-policy-rendering-self-test", "--episode-cleanup-self-test", "--episode-accounting-self-test", "--authority-validation-cache-self-test", "--authority-binding-self-test", "--authority-clock-self-test", "--authority-state-self-test", "--recent-source-framing-self-test", "--retrieval-strategy-self-test", "--background-budget-self-test", "--background-ledger-self-test", "--background-worker-self-test", "--episode-self-test", "--local-read-self-test", "--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test", "--context-admission-self-test", "--semantic-self-test", "--backup-self-test"]
+        suites = ["--native-investigation-self-test", "--source-time-self-test", "--authority-policy-rendering-self-test", "--episode-cleanup-self-test", "--episode-accounting-self-test", "--authority-validation-cache-self-test", "--authority-binding-self-test", "--authority-clock-self-test", "--authority-state-self-test", "--recent-source-framing-self-test", "--retrieval-strategy-self-test", "--background-budget-self-test", "--background-ledger-self-test", "--background-worker-self-test", "--episode-self-test", "--local-read-self-test", "--conversation-self-test", "--ui-self-test", "--reasoning-self-test", "--memory-self-test", "--endpoint-self-test", "--context-admission-self-test", "--semantic-self-test", "--backup-self-test"]
         for suite in suites:
             run = subprocess.run([str(binary), suite], capture_output=True, text=True, env=env, timeout=90)
             checks = json.loads(run.stdout)
@@ -59,6 +59,13 @@ def main():
         print(json.dumps(component_report))
         total += component_report["checks"]
         if component.returncode or component_report["failed"]:
+            return 1
+        native = subprocess.run([sys.executable, str(ROOT / "scripts/test_native_investigation.py"),
+                                 "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=360)
+        native_report = json.loads(native.stdout)
+        print(json.dumps({"suite": "native-investigation", **native_report}))
+        total += native_report["total"]
+        if native.returncode or native_report["failed"] or native_report["passed"] != native_report["total"]:
             return 1
         answering = subprocess.run([sys.executable, str(ROOT / "scripts/test_answer_evaluation.py"),
                                     "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=420)
