@@ -94,6 +94,7 @@ final class AnswerAttemptCoordinator {
     private let conversation: Conversation
     private let semanticIndex: SemanticIndex?
     private let retrievalStrategy: ContextRetrievalStrategy
+    private let semanticSearch: SemanticSearchSelection
     private let limits: EpisodeLimits
     private let clock: EpisodeClockSource
     private let runner: AnswerAttemptRunning
@@ -129,6 +130,7 @@ final class AnswerAttemptCoordinator {
          lexicalQueryUTF8Range: Range<Int>? = nil,
          semanticQueryUTF8Range: Range<Int>? = nil,
          evidenceSourceIDs: [String]? = nil,
+         semanticSearch: SemanticSearchSelection = .shipped,
          clock: EpisodeClockSource = SystemEpisodeClock(), runner: AnswerAttemptRunning = ModelRunner(),
          onStage: ((AnswerAttemptStage, AnswerAttemptPreparation?) -> Void)? = nil,
          onText: @escaping (String) -> Void, onComplete: @escaping (AnswerAttemptCompletion, String) -> Void) {
@@ -137,6 +139,7 @@ final class AnswerAttemptCoordinator {
         self.lexicalQueryUTF8Range = lexicalQueryUTF8Range
         self.semanticQueryUTF8Range = semanticQueryUTF8Range
         self.evidenceSourceIDs = evidenceSourceIDs
+        self.semanticSearch = semanticSearch
         self.retrievalStrategy = retrievalStrategy; self.clock = clock; self.runner = runner
         self.onStage = onStage; self.onText = onText; self.onComplete = onComplete
         var frozenLimits = limits ?? (settings.investigateMemory ? NativeInvestigationConfiguration.limits : EpisodeLimits())
@@ -201,7 +204,7 @@ final class AnswerAttemptCoordinator {
                     retrievalStrategy: retrievalStrategy, lexicalQueryUTF8Range: lexicalQueryUTF8Range,
                     semanticQueryUTF8Range: semanticQueryUTF8Range,
                     evidenceSourceIDs: evidenceSourceIDs,
-                    episodeLease: lease) { [self] in prepared($0) }
+                    episodeLease: lease, semanticSearch: semanticSearch) { [self] in prepared($0) }
             }
             self.operation = operation; operation.start()
         } catch { finish(failureResult(error)) }
