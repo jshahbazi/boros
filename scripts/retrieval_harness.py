@@ -48,7 +48,7 @@ INGESTION_SOURCES = ("MemoryStore.swift", "SemanticIndex.swift", "BackgroundInde
     "BackgroundIndexWorker.swift", "BackgroundIndexJournal.swift", "EventSourceTime.swift", "SourceTimeSchema.swift",
     "EpisodeAccountingJournal.swift", "ContextComponentJournal.swift", "AuthoritySchemaFive.swift",
     "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "AuthoritySchemaNine.swift")
-ARMS = ("recent_only", "lexical", "hybrid")
+ARMS = ("recent_only", "lexical", "hybrid", "exchange_lexical", "exchange_adjacent")
 PRIMARY_ARM = "hybrid"
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
@@ -439,10 +439,17 @@ def score_attempt(attempt, case):
         if item.get("rank") is not None and item["rank"] < DECLARED_CANDIDATE_DEPTH:
             ranks.setdefault(item["event_id"], item["rank"])
     turns = []
+    # P2 exchange arms report their top ranked blocks by event ID (answer-blind).
+    blocks = {}
+    for item in (attempt.get("exchange") or {}).get("ranked_blocks") or []:
+        for identifier in item.get("event_ids") or []:
+            blocks.setdefault(identifier, (item.get("rank"), item.get("disposition")))
     for identifier in positives:
         turns.append({"recent": identifier in recent, "candidate_rank": ranks.get(identifier),
                       "candidate": identifier in recent or identifier in ranks or identifier in whole,
                       "whole": identifier in whole, "partial": identifier in partial})
+        if attempt.get("exchange") is not None:
+            turns[-1]["block_rank"], turns[-1]["block_disposition"] = blocks.get(identifier, (None, None))
     return {"failure": None, "positives": len(positives), "turns": turns,
             "candidate": sum(t["candidate"] for t in turns), "whole": sum(t["whole"] for t in turns),
             "partial": sum(t["partial"] for t in turns),
@@ -453,7 +460,8 @@ def score_attempt(attempt, case):
             "selection": {key: value for key, value in (attempt.get("selection") or {}).items()
                           if key.endswith("Count") or key.endswith("Rounds")},
             "retrieval_mode": (attempt.get("retrieval") or {}).get("mode"),
-            "preparation_milliseconds": attempt.get("preparation_milliseconds")}
+            "preparation_milliseconds": attempt.get("preparation_milliseconds"),
+            "exchange": {key: value for key, value in (attempt.get("exchange") or {}).items() if key != "ranked_blocks"} or None}
 
 
 def feasibility(control, case):
@@ -592,7 +600,9 @@ def run(args):
             | {"system_sha256": digest(configuration["system"].encode())},
         "component_policy": "ContextComponentPolicy.currentSelectedQwen (v1/16)",
         "arms": {"recent_only": "recent_only strategy", "lexical": "hybrid strategy without a semantic index",
-                 "hybrid": "hybrid strategy with the history's semantic index, as ordinary Send"},
+                 "hybrid": "hybrid strategy with the history's semantic index, as ordinary Send",
+                 "exchange_lexical": "explicit P2 step 1 policy selected-model-context-components-v3-exchange; no semantic index",
+                 "exchange_adjacent": "explicit P2 step 1+2 policy selected-model-context-components-v3-exchange-adjacent; no semantic index"},
         "definitions": {
             "r1": f"every annotated positive turn is delivered, in recent context, or among the first {DECLARED_CANDIDATE_DEPTH} ranked candidates traced before span and token limits",
             "r2": "every annotated positive turn is delivered whole (union of delivered byte ranges covers the source) after component token fitting and admission",

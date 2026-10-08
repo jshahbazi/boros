@@ -133,6 +133,9 @@ enum ChatContextPreparation {
             if retrievalStrategy == .recentOnly {
                 return try recentOnlySnapshot(recent)
             }
+            // Explicit experimental P2 exchange policies select through
+            // ExchangeBlockQuery; this ranked path never runs under them.
+            guard !componentPolicy.usesExchangeQuery else { throw ContextError.sourceMismatch }
             let formulation = HistoricalQueryFormulation.formulate(lexicalInput)
             let lexical = formulation.query
             let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
