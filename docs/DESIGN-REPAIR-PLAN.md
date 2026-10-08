@@ -51,6 +51,8 @@ Cache ingested stores by projection hash so iteration reruns only selection. Lex
 
 Exit: R1 and R2 for the current `v1/16` default on the development cohort and the fourteen-history regression set, with budget-feasibility labels and the cohort manifest hash. This becomes the baseline every retrieval change is compared against.
 
+Status, October 8, 2026: done; see [the harness record](RETRIEVAL-HARNESS.md). Development cohort R2: hybrid 50/90, lexical 60/90; all 90 cases budget-feasible. R1 equals R2 in every arm because token fitting removed no evidence at v1/16, so a packing change alone cannot raise R2 until the candidate window widens; the measured losses are in the query and ranking that steps 1, 2 and 4 address. Semantic fusion currently costs ten cases against lexical alone, which is the comparison step 4 must decide. The `check.py` recall floor remains open.
+
 ### P2 Retrieval repair
 
 The four known misses have two different causes ([adversarial review](reviews/JUDGING-RETRIEVAL-ADVERSARIAL-20261006.md), case table). In `51c32626` and `1b9b7252` the needed turn is the message just after or just before a retrieved primary, but in the adjacent exchange. In `4baee567` the eight-term query has no lexical match for the target. The bidirectional neighborhood experiment reached three needed turns but appended them at candidate positions 30 and 31, after every primary, where geometric suffix reduction removed them under the 12,000-token cap ([reassessment](reviews/ARCHITECTURE-REASSESSMENT-20261006.md)). Implement in the ordinary native path, each step measured on P1 before the next:

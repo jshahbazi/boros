@@ -1,6 +1,8 @@
 # Boros status and roadmap
 
-Updated October 8, 2026. Development branch: `main`, which consolidates `codex/boros-foundation` (including the bounded neighborhood experiment) and `codex/native-investigation`. The consolidated build passes 4,259 `scripts/check.py` checks. Ordinary selection defaults to `v1/16`; the neighborhood policy and native investigation remain explicit opt-in experiments. The [design repair plan](DESIGN-REPAIR-PLAN.md) sets the next work order.
+Updated October 8, 2026. Development branch: `main`, which consolidates `codex/boros-foundation` (including the bounded neighborhood experiment) and `codex/native-investigation`. The consolidated build passes 4,271 `scripts/check.py` checks. Ordinary selection defaults to `v1/16`; the neighborhood policy and native investigation remain explicit opt-in experiments. The [design repair plan](DESIGN-REPAIR-PLAN.md) sets the next work order.
+
+**Retrieval baseline (P1), October 8, 2026:** the [offline retrieval harness](RETRIEVAL-HARNESS.md) runs the ordinary selected-Qwen path with pinned offline token counts and no generation. On the 90 answerable development questions, ordinary hybrid delivers every annotated turn in 50 cases (R2 55.6 percent) and lexical alone in 60 (66.7 percent), against the plan's 90 percent interim target. Every miss is a ranking miss: token fitting removed no evidence. The harness reproduces the earlier fourteen-history result (hybrid 14/18 turns, 8/12 cases) without model calls.
 
 This is the planning index for Boros: available features, implementation gaps, recorded evidence, remaining design, and dependencies between next steps. Detailed contracts remain in the linked documents. TraceChat is the historical name of the original design and review.
 
@@ -772,6 +774,7 @@ The [official LongMemEval protocol](https://github.com/xiaowu0162/LongMemEval/tr
 | [Design review](../tracechat-adversarial-review.md) | Immutable revision-1 review; revision-2 disposition in plan section 16 |
 | [Design and test assessment](reviews/DESIGN-AND-TEST-ASSESSMENT-20261007.md) | Why the passing check suite does not establish recall; four measured limits against the plan's gates |
 | [Design repair plan](DESIGN-REPAIR-PLAN.md) | Stage-split gates (R1, R2, A1, A2, L1, L2), cohorts and dependency-ordered packages P0–P7 |
+| [Offline retrieval harness](RETRIEVAL-HARNESS.md) | P1: case-level R1/R2 on the development and regression cohorts, token parity with mlx-serve, baseline for P2 |
 | [Adversarial judging/retrieval review](reviews/JUDGING-RETRIEVAL-ADVERSARIAL-20261006.md) | Reproduced judging results, concrete primary/neighbor omissions and bounded application amendment |
 | [Synthetic scaling](SCALING.md) | Declared provider-free 1k/10k/100k warm/restart tool, latency results and remaining N5 boundary |
 | [Local QA diagnostic](LOCAL-QA.md) | Pinned grading templates, local synthetic controls, private outputs and explicit judge limits |
