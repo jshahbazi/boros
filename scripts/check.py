@@ -88,6 +88,7 @@ def main():
                              ("local-longmemeval-independent-qa", "test_local_longmemeval_independent_qa.py"),
                              ("retrieval-harness", "test_retrieval_harness.py"),
                              ("retrieval-floor-contracts", "test_retrieval_floor.py"),
+                             ("judge-calibration", "test_judge_calibration.py"),
                              ("vertex-anthropic", "test_vertex_anthropic.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)

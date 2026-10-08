@@ -93,6 +93,8 @@ Before any model-involved quality claim:
 
 Exit: recorded judge error rates with intervals; the earlier LongMemEval local labels annotated with the measured rate of their judge; a set of adjudicated sufficient packs for P5.
 
+Status, October 8, 2026: prepared, not started; see [the calibration record](JUDGE-CALIBRATION.md). A blinded 50-item set is assembled privately from 192 usable saved answers (144 Qwen, 48 Sol; none authored by Opus or Sonnet), with a local adjudication form and scoring for five candidate judges: JevK5, Qwen, Vertex Opus, Vertex Sonnet and hosted Jev. The correct-plus-unsupported stratum has 2 of the intended 10 items and rejected has 8. No judge runner exists yet; a Sonnet run needs `vertex_anthropic.py` parameterized by model, and hosted Jev needs its own provider amendment, adapter and data-terms review. Waiting on: adjudication by the user or a designated reviewer, then per-run authorization with filled declarations.
+
 ### P5 Reader decision
 
 A1 needs sufficient packs, not P2's selector. Build them from annotations as the source controls did, keep only those P4 adjudicates sufficient, and measure A1 on identical packs for the selected Qwen, at least one larger locally runnable model, and a Vertex-hosted model as an upper reference. Compare direct answering with the investigation route's quote-extraction step. Repeat on P2's delivered packs once P2 exits. Decide the default reader on A1, latency and the remote-processing boundary. A remote default requires the plan's egress and disclosure contracts first; this package only produces the measurement that would justify that work.
