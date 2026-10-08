@@ -1,6 +1,6 @@
 # Boros status and roadmap
 
-Updated October 7, 2026. Current implementation branch: `codex/native-investigation`. Prior evaluation work remains preserved on `codex/boros-foundation`.
+Updated October 8, 2026. Development branch: `main`, which consolidates `codex/boros-foundation` (including the bounded neighborhood experiment) and `codex/native-investigation`. The consolidated build passes 4,259 `scripts/check.py` checks. Ordinary selection defaults to `v1/16`; the neighborhood policy and native investigation remain explicit opt-in experiments. The [design repair plan](DESIGN-REPAIR-PLAN.md) sets the next work order.
 
 This is the planning index for Boros: available features, implementation gaps, recorded evidence, remaining design, and dependencies between next steps. Detailed contracts remain in the linked documents. TraceChat is the historical name of the original design and review.
 
@@ -770,6 +770,8 @@ The [official LongMemEval protocol](https://github.com/xiaowu0162/LongMemEval/tr
 | [Implementation](IMPLEMENTATION.md) | Detailed available boundaries and older verification |
 | [Plan](../tracechat-plan.md) | Full architecture, dependencies and gates |
 | [Design review](../tracechat-adversarial-review.md) | Immutable revision-1 review; revision-2 disposition in plan section 16 |
+| [Design and test assessment](reviews/DESIGN-AND-TEST-ASSESSMENT-20261007.md) | Why the passing check suite does not establish recall; four measured limits against the plan's gates |
+| [Design repair plan](DESIGN-REPAIR-PLAN.md) | Stage-split gates (R1, R2, A1, A2, L1, L2), cohorts and dependency-ordered packages P0–P7 |
 | [Adversarial judging/retrieval review](reviews/JUDGING-RETRIEVAL-ADVERSARIAL-20261006.md) | Reproduced judging results, concrete primary/neighbor omissions and bounded application amendment |
 | [Synthetic scaling](SCALING.md) | Declared provider-free 1k/10k/100k warm/restart tool, latency results and remaining N5 boundary |
 | [Local QA diagnostic](LOCAL-QA.md) | Pinned grading templates, local synthetic controls, private outputs and explicit judge limits |
