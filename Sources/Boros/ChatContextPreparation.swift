@@ -110,7 +110,8 @@ enum ChatContextPreparation {
         semanticIndex: SemanticIndex? = nil, retrievalStrategy: ContextRetrievalStrategy = .hybrid,
         episodeLease: EpisodeLease? = nil, lexicalQueryUTF8Range: Range<Int>? = nil,
         semanticQueryUTF8Range: Range<Int>? = nil, evidenceSourceIDs: [String]? = nil,
-        componentPolicy: ContextComponentPolicy = .selectedQwen) throws -> ContextSnapshot {
+        componentPolicy: ContextComponentPolicy = .selectedQwen,
+        semanticSearch: SemanticSearchSelection = .shipped) throws -> ContextSnapshot {
         let active = try episodeLease?.checkActive(projectID: projectID)
         _ = try componentPolicy.validated()
         if let frozen = active?.limits.componentPolicy, frozen != componentPolicy { throw EpisodeBudgetError.invalid }
@@ -188,10 +189,18 @@ enum ChatContextPreparation {
             }
             guard let semanticIndex else { return try lexicalSnapshot(fallback: false) }
             let report: SemanticSearchReport
+            var globalSemanticAudit: [String: Any]? // P2 step 4 evaluation option; nil on ordinary Send.
             do {
-                report = try semanticIndex.search(query: semanticInput, lexicalQuery: lexical ?? "", projectID: projectID,
-                    limit: ContextAssembler.componentMaximumEvidenceSpans, excludingSourceIDs: excluded, includeLiteral: false,
-                    episodeLease: episodeLease, operationIsNested: true)
+                if semanticSearch.mode != .shipped {
+                    let global = try GlobalSemanticSearch.search(index: semanticIndex, selection: semanticSearch, query: semanticInput,
+                        lexicalQuery: lexical ?? "", projectID: projectID, limit: ContextAssembler.componentMaximumEvidenceSpans,
+                        excludingSourceIDs: excluded, episodeLease: episodeLease, operationIsNested: true)
+                    report = global.report; globalSemanticAudit = global.audit
+                } else {
+                    report = try semanticIndex.search(query: semanticInput, lexicalQuery: lexical ?? "", projectID: projectID,
+                        limit: ContextAssembler.componentMaximumEvidenceSpans, excludingSourceIDs: excluded, includeLiteral: false,
+                        episodeLease: episodeLease, operationIsNested: true)
+                }
             } catch {
                 if error is EpisodeBudgetError || error is MeteredRetrievalError || error is MemoryError || error is ContextError { throw error }
                 if let semanticError = error as? SemanticError {
@@ -236,6 +245,7 @@ enum ChatContextPreparation {
             }
             audit["primary_completion"] = completed.audit
             audit["exchange_expansion"] = expanded.audit
+            if let globalSemanticAudit { audit["semantic_search"] = semanticSearch.mode.rawValue; audit["global_semantic"] = globalSemanticAudit }
             try appendAudit(to: &result, fields: audit)
             try appendQueryTrace(to: &result, formulation: formulation, prompt: prompt, input: lexicalInput, range: lexicalQueryUTF8Range,
                     semanticInput: semanticInput, semanticRange: semanticQueryUTF8Range)

@@ -71,6 +71,8 @@ The four known misses have two different causes ([adversarial review](reviews/JU
 
 Exit: R2 at or above 90 percent on the development cohort, all four known misses reported individually, and the 100,000-event standalone latency profile rerun against L1 and Gate 3. The literal search endpoint, at 3.0 seconds p95, already fails Gate 3's one-second target.
 
+Status, October 8, 2026: steps 1 and 2 implemented as opt-in policies; see [the step 1-2 record](P2-EXCHANGE-QUERY.md). Development R2: full-question exchange query 61/90, with anchor-adjacent packing 62/90, against lexical 60 and hybrid 50; regression 10/12. Three of the four known misses are delivered; `1a1907b4` is not. Of step 1's 40 missed turns, 15 are budget-skipped and 25 are ranking misses, at least 11 cases with no question term in the positive block. The default is unchanged. Step 3 and step 4 are in progress.
+
 ### P3 Latency and cost of the investigation route
 
 The investigation loop accepted three of three answers but misses L1 and L2 by an order of magnitude. Reduce it before any broader quality run:

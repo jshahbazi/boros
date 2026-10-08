@@ -86,6 +86,10 @@ enum DeliveryHarness {
         }
         return limits
     }
+    /// P2 step 4 arms: the hybrid strategy with an explicitly selected
+    /// semantic population and fusion (GlobalSemanticSearch.swift).
+    static let globalArms: [String: SemanticSearchSelection.Mode] = [
+        "global_hybrid": .globalReciprocalRank, "global_fill": .globalLexicalFill]
     static func key(_ project: String, _ conversation: String) -> String { project + "|" + conversation }
 
     static func main() {
@@ -101,7 +105,7 @@ enum DeliveryHarness {
             guard input.version == 1 else { throw Failure.invalid }
             if args[0] == "select" {
                 guard input.declared_source_ids == nil, !input.arms.isEmpty,
-                      input.arms.allSatisfy({ ["recent_only", "lexical", "hybrid"].contains($0) || exchangeLimits($0) != nil }) else { throw Failure.invalid }
+                      input.arms.allSatisfy({ ["recent_only", "lexical", "hybrid"].contains($0) || exchangeLimits($0) != nil || globalArms[$0] != nil }) else { throw Failure.invalid }
             } else {
                 guard let ids = input.declared_source_ids, !ids.isEmpty, input.arms == ["declared_sources"] else { throw Failure.invalid }
             }
@@ -233,7 +237,7 @@ enum DeliveryHarness {
                     attributes: [.posixPermissions: 0o700])
                 try FileManager.default.copyItem(at: baselineURL, to: attempt)
                 let owner = try MemoryStore(directory: attempt)
-                let semantic: SemanticIndex? = arm == "hybrid" ? try SemanticIndex(store: owner) : nil
+                let semantic: SemanticIndex? = arm == "hybrid" || globalArms[arm] != nil ? try SemanticIndex(store: owner) : nil
                 DispatchQueue.main.async { self.attempt(arm: arm, owner: owner, semantic: semantic, directory: attempt, started: armStart) }
             } catch {
                 results.append(["arm": arm, "failure_stage": "setup", "failure": "attempt_setup_failed"])
@@ -255,6 +259,7 @@ enum DeliveryHarness {
                 retrievalStrategy: arm == "recent_only" ? .recentOnly : .hybrid, limits: exchangeLimits(arm),
                 lexicalQueryUTF8Range: queryRange(question), semanticQueryUTF8Range: queryRange(question),
                 evidenceSourceIDs: arm == "declared_sources" ? input.declared_source_ids : nil,
+                semanticSearch: globalArms[arm].map { SemanticSearchSelection($0) } ?? .shipped,
                 runner: runner,
                 onStage: { stage, preparation in
                     // Stop at the answering boundary: the GUI Stop path. The
@@ -272,6 +277,7 @@ enum DeliveryHarness {
                         item["preparation_milliseconds"] = completion.timing.preparationMilliseconds as Any? ?? NSNull()
                         if let preparation = captured {
                             try self.describe(preparation, episodeID: completion.identifiers.episodeID, owner: owner, into: &item)
+                            self.describeSemantic(preparation, arm: arm, semantic: semantic, into: &item)
                         }
                     } catch { item["failure"] = "harness_metadata_failed"; item["failure_stage"] = "metadata" }
                     item["attempt_milliseconds"] = milliseconds(since: started)
@@ -354,6 +360,35 @@ enum DeliveryHarness {
             } else if retrieval["selection_trace_omitted"] != nil {
                 item["trace_omitted"] = true
             }
+        }
+
+        /// P2 step 4 diagnostics, content-free: primary order, exchange
+        /// expansion decisions, and each semantic result's retrieval paths and
+        /// ranks. The shipped manifest is replayed from the attempt's sidecar.
+        func describeSemantic(_ preparation: AnswerAttemptPreparation, arm: String, semantic: SemanticIndex?,
+                              into item: inout [String: Any]) {
+            guard let audit = try? JSONSerialization.jsonObject(with: preparation.contextAudit) as? [String: Any],
+                  let retrieval = audit["retrieval"] as? [String: Any] else { item["semantic_diagnostics"] = "unavailable"; return }
+            var value: [String: Any] = [:]
+            if let primaries = (retrieval["primary_completion"] as? [String: Any])?["decisions"] as? [[String: Any]] {
+                value["primaries"] = primaries.map { ["e": $0["event_id"] ?? NSNull(), "d": $0["disposition"] ?? NSNull()] }
+            }
+            if let expansion = (retrieval["exchange_expansion"] as? [String: Any])?["decisions"] as? [[String: Any]] {
+                value["expansion"] = expansion.map { ["a": $0["anchor_event_id"] ?? NSNull(), "n": $0["neighbor_event_id"] ?? NSNull(),
+                    "d": $0["disposition"] ?? NSNull()] }
+            } else if retrieval["exchange_expansion_omitted"] != nil { value["expansion_omitted"] = true }
+            for name in ["vector_candidates_inspected", "vector_continuation_available", "semantic_search", "global_semantic"] {
+                if let field = retrieval[name] { value[name] = field }
+            }
+            if arm == "hybrid", let semantic, let manifestID = retrieval["manifest_id"] as? String,
+               let replay = try? semantic.replay(manifestID: manifestID, projectID: project(input.question.project_id)) {
+                value["shipped_results"] = replay.manifest.results.map {
+                    ["e": $0.source.eventID, "p": $0.retrievalPaths.joined(separator: "+"), "f": $0.fusedScore,
+                     "c": $0.cosineScore as Any? ?? NSNull(), "o": $0.offset, "b": $0.byteCount]
+                }
+                value["shipped_query_disposition"] = replay.manifest.queryDisposition
+            }
+            item["semantic_diagnostics"] = value
         }
 
         func finish() {
