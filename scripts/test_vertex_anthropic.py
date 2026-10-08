@@ -149,6 +149,50 @@ class Contracts(unittest.TestCase):
         with patch.object(v.subprocess, "run", side_effect=FileNotFoundError("gcloud")), self.assertRaises(v.VertexError):
             v.AccessTokens()()
 
+    def test_opus_remains_the_default_for_existing_callers(self):
+        self.assertEqual(v.MODEL, "claude-opus-5-5")
+        self.assertEqual(v.MODELS, ("claude-opus-5-5", "claude-sonnet-5-5"))
+        messages = [{"role": "user", "content": "x"}]
+        self.assertEqual(v.generation_url(), v.generation_url(model="claude-opus-5-5"))
+        self.assertEqual(v.count_payload(messages), v.count_payload(messages, model="claude-opus-5-5"))
+        self.assertEqual(v.configuration(), v.configuration(model="claude-opus-5-5"))
+        self.assertEqual(v.parse_response(reply()), v.parse_response(reply(), model="claude-opus-5-5"))
+
+    def test_sonnet_is_selected_per_run_with_the_same_contract(self):
+        sonnet = "claude-sonnet-5-5"
+        self.assertEqual(v.generation_url(model=sonnet), "https://aiplatform.googleapis.com/v1/projects/"
+                         "llm-train-482420/locations/global/publishers/anthropic/models/claude-sonnet-5-5:rawPredict")
+        self.assertTrue(v.is_vertex_url(v.generation_url(model=sonnet)))
+        self.assertEqual(v.configuration(model=sonnet)["model"], sonnet)
+        self.assertEqual(v.configuration(model=sonnet)["sampling"], "provider-default")
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        self.assertEqual(v.count_payload(messages, model=sonnet)["model"], sonnet)
+        body = v.payload(messages, 32)
+        self.assertTrue({"temperature", "top_p", "top_k", "thinking", "model"}.isdisjoint(body))
+        self.assertEqual(v.parse_response(reply(model=sonnet), model=sonnet)[0], "answer")
+        self.assertEqual(v.parse_response(reply(model=sonnet + "@20260901"), model=sonnet)[0], "answer")
+        for raw, model in ((reply(model=sonnet), "claude-opus-5-5"), (reply(), sonnet),
+                           (reply(model=sonnet + "-extra"), sonnet)):
+            with self.assertRaisesRegex(v.VertexError, "model_identity_mismatch"):
+                v.parse_response(raw, model=model)
+        opener = Opener(reply(model=sonnet))
+        with patch.object(v, "build_opener", return_value=opener):
+            v.post(v.generation_url(model=sonnet), v.payload(messages, 8), "synthetic-token")
+        self.assertEqual(opener.requests[0].full_url, v.generation_url(model=sonnet))
+
+    def test_unknown_models_are_refused_before_any_opener(self):
+        with patch.object(v, "build_opener", side_effect=AssertionError("network")) as opener:
+            for model in ("claude-haiku-5-5", "claude-opus-5-5 ", "", None):
+                for call in (lambda: v.generation_url(model=model), lambda: v.configuration(model=model),
+                             lambda: v.count_payload([{"role": "user", "content": "x"}], model=model),
+                             lambda: v.parse_response(reply(), model=model)):
+                    with self.subTest(model=model), self.assertRaisesRegex(v.VertexError, "model_not_supported"):
+                        call()
+            other = v.generation_url().replace("claude-opus-5-5", "claude-haiku-5-5")
+            with self.assertRaisesRegex(v.VertexError, "endpoint_refused"):
+                v.post(other, {}, "synthetic-token")
+            self.assertFalse(opener.called)
+
     def test_pricing_is_declared_and_rounds_up(self):
         pricing = v.Pricing("5", "25")
         self.assertEqual(pricing.microusd(1000, 100), 7500)

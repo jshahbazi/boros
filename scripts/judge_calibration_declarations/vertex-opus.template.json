@@ -40,9 +40,12 @@
     "item_count": "REQUIRED"
   },
   "prompts": {
-    "version": "boros-judge-calibration-prompts-v1",
-    "sha256": "cc41c72e0ce74b22d52713a77379f9ab48fef17624414e48a93ded94d5d0080f",
-    "source": "scripts/judge_calibration.py JUDGE_PROMPTS"
+    "version": "boros-judge-calibration-prompts-v2",
+    "sha256": "1cce15660c8a730df03f5654926356715842e5c5bdbb64709a4a1c6cd1990221",
+    "verdict_sha256": "85fa445ad2cda3f103a89828f126834795beffafce991bf676b90531ffc2b40c",
+    "sufficiency_sha256": "c604485853f65670fa54599aceb06f5d152a8798b03dc518cca6de73ec76b857",
+    "upstream_protocol_sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
+    "source": "scripts/judge_calibration.py JUDGE_PROMPTS (verdict: unchanged upstream LongMemEval QA prompt; sufficiency: new prompt)"
   },
   "pricing": {
     "input_usd_per_million_tokens": "REQUIRED",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vertex AI adapter for Claude Opus in the GCP llm-train project, for evaluation tooling only.
+"""Vertex AI adapter for Claude models in the GCP llm-train project, for evaluation tooling only.
 
 Authentication uses Google Application Default Credentials through the gcloud
 CLI. No API key is stored, read or passed, and the short-lived access token
@@ -8,6 +8,10 @@ workstation's default gcloud project is a different one. Errors carry fixed
 codes; response and error bodies are never printed. The Boros application
 does not import this module and still processes text only through local
 model servers.
+
+The model is chosen per run from MODELS. Every function that depends on the
+model takes a `model` keyword whose default is MODEL (Opus), so existing callers
+keep their Opus behavior unchanged.
 """
 from __future__ import annotations
 
@@ -23,7 +27,11 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 PROJECT_ID = "llm-train-482420"  # display name "llm-train"
 LOCATION = "global"
-MODEL = "claude-opus-5-5"
+MODEL = "claude-opus-5-5"  # default for existing callers
+# Models a run may select. Sonnet is treated exactly like Opus: no sampling
+# parameter and no extended thinking. Whether Sonnet 5.5 would accept
+# `temperature` was not tested; the adapter never sends it.
+MODELS = ("claude-opus-5-5", "claude-sonnet-5-5")
 ANTHROPIC_VERSION = "vertex-2023-10-16"
 # Opus 5.5 rejects `temperature` (HTTP 400, "deprecated for this model"; observed
 # October 8, 2026), so sampling is the provider default and replies are not pinned.
@@ -31,7 +39,12 @@ SAMPLING = "provider-default"
 MAXIMUM_RESPONSE_BYTES = 2 * 1024 * 1024
 TOKEN_REFRESH_SECONDS = 15 * 60
 REQUEST_TIMEOUT_SECONDS = 120
-_MODEL_ECHO = re.compile(re.escape(MODEL) + r"(?:@[0-9A-Za-z._-]+|-[0-9]{8})?\Z")
+
+
+def model_echo(model=MODEL):
+    """Accepted response `model` values: the exact ID, optionally with a version or date suffix."""
+    require_model(model)
+    return re.compile(re.escape(model) + r"(?:@[0-9A-Za-z._-]+|-[0-9]{8})?\Z")
 
 
 class VertexError(Exception):
@@ -41,6 +54,10 @@ class VertexError(Exception):
 def require(condition, code):
     if not condition:
         raise VertexError(code)
+
+
+def require_model(model):
+    require(type(model) is str and model in MODELS, "model_not_supported")
 
 
 def canonical(value):
@@ -56,6 +73,7 @@ def host(location=LOCATION):
 
 
 def generation_url(location=LOCATION, model=MODEL, project=PROJECT_ID):
+    require_model(model)
     return (f"https://{host(location)}/v1/projects/{project}/locations/{location}"
             f"/publishers/anthropic/models/{model}:rawPredict")
 
@@ -66,12 +84,13 @@ def count_url(location=LOCATION, project=PROJECT_ID):
 
 
 def is_vertex_url(url):
-    return url in (generation_url(), count_url())
+    return url == count_url() or url in {generation_url(model=model) for model in MODELS}
 
 
-def configuration():
+def configuration(model=MODEL):
     """Declaration fields that pin the remote route for a run."""
-    return {"provider": "vertex-ai", "project_id": PROJECT_ID, "location": LOCATION, "model": MODEL,
+    require_model(model)
+    return {"provider": "vertex-ai", "project_id": PROJECT_ID, "location": LOCATION, "model": model,
             "anthropic_version": ANTHROPIC_VERSION, "sampling": SAMPLING,
             "authentication": "google-application-default-credentials", "api_key": False}
 
@@ -155,10 +174,11 @@ def payload(messages, max_tokens):
     return body
 
 
-def count_payload(messages):
+def count_payload(messages, model=MODEL):
     """Token-count body for exactly the input a generation payload would send."""
+    require_model(model)
     system, turns = _split(messages)
-    body = {"anthropic_version": ANTHROPIC_VERSION, "model": MODEL, "messages": turns}
+    body = {"anthropic_version": ANTHROPIC_VERSION, "model": model, "messages": turns}
     if system:
         body["system"] = system
     return body
@@ -202,13 +222,14 @@ def parse_usage(value):
             "total_tokens": prompt + completion}
 
 
-def parse_response(raw):
-    """Accept only a complete assistant message; returns (text, usage)."""
+def parse_response(raw, model=MODEL):
+    """Accept only a complete assistant message from `model`; returns (text, usage)."""
+    echo = model_echo(model)
     require(type(raw) is bytes and len(raw) <= MAXIMUM_RESPONSE_BYTES, "response_bound_exceeded")
     value = _strict_json(raw)
     require(isinstance(value, dict) and value.get("type") == "message" and value.get("role") == "assistant",
             "response_shape_invalid")
-    require(isinstance(value.get("model"), str) and _MODEL_ECHO.match(value["model"]), "model_identity_mismatch")
+    require(isinstance(value.get("model"), str) and echo.match(value["model"]), "model_identity_mismatch")
     usage = parse_usage(value)
     stop = value.get("stop_reason")
     require(stop != "refusal", "refusal_or_output_invalid")

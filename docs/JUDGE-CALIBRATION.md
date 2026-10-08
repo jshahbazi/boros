@@ -2,11 +2,11 @@
 
 Prepared October 8, 2026 for work package P4 of the [design repair plan](DESIGN-REPAIR-PLAN.md#p4-judge-calibration). This record separates three kinds of statement:
 
-- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form, scoring, declaration check), `scripts/test_judge_calibration.py` (17 synthetic contracts) and two Vertex declaration templates under `scripts/judge_calibration_declarations/`.
-- **Measured:** the inventory counts below and the composition of the assembled set. They are metadata counts. No answer has been adjudicated and no judge has run, so no judge error rate exists yet.
-- **Proposed:** the adjudication protocol, the judge prompts, the self-preference handling and the run declarations. None of them has been exercised against a model.
+- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form, scoring, declaration check, frozen judge prompts), `scripts/test_judge_calibration.py` (17 synthetic contracts), the [judge runner](#judge-runner-implemented-not-run) `scripts/judge_calibration_run.py` with `scripts/test_judge_calibration_run.py` (17 synthetic contracts), `scripts/vertex_anthropic.py` parameterized by model (13 synthetic contracts), and four declaration templates under `scripts/judge_calibration_declarations/`.
+- **Measured:** the inventory counts below, the composition of the assembled set, and the runner's dry-run counts over that set. They are metadata counts. No answer has been adjudicated and no judge has run, so no judge error rate exists yet.
+- **Proposed:** the adjudication protocol, the self-preference handling and the filled run declarations. The runner and its prompts have been exercised only against fake transports, never against a model.
 
-No generation, judge, token-count, access-probe or local model server call was made. No question, reference, evidence, answer or note text appears in this document, in test fixtures or in command output. The tool prints counts, identifiers and hashes only.
+No generation, judge, token-count, access-probe, MCP or local model server call was made, including during the dry runs. No question, reference, evidence, answer or note text appears in this document, in test fixtures or in command output. The tools print counts, identifiers and hashes only.
 
 ## Inventory of saved answers
 
@@ -191,11 +191,11 @@ At 50 items, a rate near 50 percent has a Wilson half-width of about 13 to 14 po
 
 | Judge | Route | State |
 |---|---|---|
-| `jevk5-mcp` | Local `JevK5-4B-v0.3-Q8_0` through the supplied mcpme slot ([record](JEVK5-SAVED-QA.md)) | The saved-answer adapter exists for the orientation report only. Rejudging the set needs an adapter over `items.json`. Local model calls need the user's go-ahead. |
-| `qwen-local` | Local selected Qwen server | The existing graders bind to specific run reports. Rejudging the set needs an adapter over `items.json`. |
-| `vertex-opus` | Vertex AI, `llm-train-482420`, `global`, `claude-opus-5-5` | Adapter `scripts/vertex_anthropic.py` exists. Template `scripts/judge_calibration_declarations/vertex-opus.template.json`. A set runner is not built. |
-| `vertex-sonnet` | Vertex AI, `llm-train-482420`, `global`, `claude-sonnet-5-5` (enabled per the user; not verified here) | Template `scripts/judge_calibration_declarations/vertex-sonnet.template.json`. The adapter pins `MODEL = "claude-opus-5-5"` and its model-echo check, so a Sonnet run first needs the adapter parameterized by model, with synthetic tests. |
-| `jev-hosted` | Hosted Jev from typesafe.ai | Not usable yet; see below. |
+| `jevk5-mcp` | Local `JevK5-4B-v0.3-Q8_0` through the supplied mcpme slot ([record](JEVK5-SAVED-QA.md)) | Runner judge `jevk5`, template `jevk5.template.json`. Built and tested with a fake MCP client; not run. |
+| `qwen-local` | Selected Qwen model on the loopback mlx-serve endpoint | Runner judge `qwen-local`, template `qwen-local.template.json`. Built and tested with a fake endpoint; not run. |
+| `vertex-opus` | Vertex AI, `llm-train-482420`, `global`, `claude-opus-5-5` | Runner judge `vertex-opus`, template `vertex-opus.template.json`. Built and tested with a fake transport; not run. |
+| `vertex-sonnet` | Vertex AI, `llm-train-482420`, `global`, `claude-sonnet-5-5` (enabled per the user; not verified here) | Runner judge `vertex-sonnet`, template `vertex-sonnet.template.json`. The adapter now takes the model per run. Sonnet access, its model echo and its handling of an omitted temperature are unverified without a live call. |
+| `jev-hosted` | Hosted Jev from typesafe.ai | Not usable yet and out of the runner's scope; see below. |
 
 ### Hosted Jev
 
@@ -212,35 +212,124 @@ Before hosted Jev can be used:
 
 Family note: JevK5 and hosted Jev likely share a model family. The score's family relation treats them as one family, `jev`. Neither has authored answers, so this affects only future sets.
 
-## Vertex run declarations (templates)
+## Judge prompts (implemented, frozen in code)
 
-`scripts/judge_calibration_declarations/vertex-opus.template.json` and `vertex-sonnet.template.json` contain no private data.
+Two tasks per item, defined in `JUDGE_PROMPTS` in `scripts/judge_calibration.py` (version `boros-judge-calibration-prompts-v2`). Every declaration pins the hashes below, and `check-declaration` refuses a declaration whose hashes differ from the code.
 
-Fixed fields:
+| Task | Definition | SHA-256 |
+|---|---|---|
+| Answer verdict | The unchanged upstream LongMemEval category QA prompt (`get_anscheck_prompt` in `src/evaluation/evaluate_qa.py`), the one the earlier Qwen local QA and JevK5 graders used, so labels stay comparable with theirs. Only the hash-pinned pure function executes. Reply `yes` or `no`, mapped to accept or reject. | Upstream file `ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251`; verdict definition `85fa445ad2cda3f103a89828f126834795beffafce991bf676b90531ffc2b40c` |
+| Pack sufficiency | New prompt: a system instruction plus the question, its date, the unanswerable-by-design flag, the reference and the evidence, never the answer. Reply exactly `{"sufficiency": "sufficient"}` or `{"sufficiency": "insufficient"}`. | `c604485853f65670fa54599aceb06f5d152a8798b03dc518cca6de73ec76b857` |
+| Whole prompt set | Both definitions, including JevK5's structured-choice wrapping | `1cce15660c8a730df03f5654926356715842e5c5bdbb64709a4a1c6cd1990221` |
+
+Consequences of these choices:
+
+- **The verdict judge never sees the evidence.** The upstream prompt is reference-only, so the fair comparison for every runner judge is the score's *reference-only* variant. The grounded variant still applies to the product question of whether a reference-only judge suffices. The upstream prompt also builds in the temporal off-by-one and preference tolerances listed under the open rubric decision above.
+- **Parsing is strict and failures are recorded, never coerced.** A verdict reply is normalized only by trimming whitespace, lowercasing and removing one trailing period, then must be exactly `yes` or `no`. A sufficiency reply must be exactly the JSON object above; a code fence, an extra key or `unsure` is a parse failure. JevK5 answers through its structured choice tool with options `yes` and `no` for both tasks; the verdict request is byte-for-byte the earlier JevK5 saved-answer request shape.
+- **Replaced proposal.** The earlier proposed prompt set `boros-judge-calibration-prompts-v1` (SHA-256 `cc41c72e…080f`), which had an evidence-aware verdict prompt, is superseded. The assembled set's manifest still records that earlier hash as a non-binding field; nothing checks it.
+
+## Judge runner (implemented, not run)
+
+`scripts/judge_calibration_run.py` runs one judge per invocation over the frozen set. Hosted Jev is out of scope.
+
+| Judge | Route | Transport |
+|---|---|---|
+| `vertex-opus`, `vertex-sonnet` | `vertex_anthropic.py` with the model chosen per run | Application Default Credentials through gcloud; pinned endpoint, no proxy, no redirect |
+| `jevk5` | `StdioMCP` from `jevk5_saved_qa.py`: the supplied `mcpme connect --slot` command, `jevk5_decide` tool | Model identity (ID, SHA-256, profile, context) checked on connect and in every decision; the mcpme executable hash must equal the declared one before connecting |
+| `qwen-local` | `http://127.0.0.1:11234/v1/chat/completions`, model `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` | Loopback only, no proxy, no redirect; temperature 0, thinking off, model echo checked. Model-instance identity is unobservable through mlx-serve, as recorded in [provider admission](PROVIDER-ADMISSION.md). |
+
+Contract:
+
+- **Input.** `items.json` from `assemble`, verified against the manifest's items hash, set ID and item count, plus a declaration whose `calibration_set` matches the manifest. The runner never opens `key.json`; the tests run it with the key file deleted. Requests are rendered only from the item's question, date, category, unanswerable flag, reference, evidence and answer. The item ID, model identity, run, arm and prior labels are never sent.
+- **Two gates.** `--execute` refuses unless `check-declaration` reports no problem (exit code 2, nothing dispatched). Without `--execute` the command is a dry run: it validates the set and declaration, renders every request in memory, writes nothing and prints counts only. The dry run makes no network, Vertex token-count, gcloud, MCP or model-server call.
+- **Order and replicates.** Deterministic order: replicate, then item ID, then sufficiency before verdict. Each replicate re-sends the identical request. Vertex replicates sample at the provider default; Qwen replicates at temperature 0 are close to deterministic; JevK5 reports a cache for identical requests, so its replicates can be cache hits, and the report counts them.
+- **Vertex cost fence.** Per session: one unbilled access probe (an empty generation body must be refused with HTTP 400; 404 halts as no access), then a free counting pass over every pending request, then a refusal of the whole session if the earlier reservations plus counted input and maximum output for every pending request, at the declared prices, exceed the cap. Before each generation the counted cost is reserved again and the request is refused if the cumulative reservation would exceed the cap. Reservations never decrease, including for failed and interrupted requests, and they carry across resumed sessions.
+- **Limits and stops.** Declared request limits are cumulative across sessions. A request whose model-visible prompt exceeds a local judge's declared `max_prompt_characters` is recorded as not dispatched. Infrastructure failures (any HTTP status, transport failure, MCP failure) stop the session when `stop_on_first_infrastructure_failure` is true, which every template sets; otherwise they are recorded. Automatic retries happen only up to the declared `automatic_retries`, which is 0 in every template and must be 0 for Vertex. A model identity mismatch always stops the session.
+- **Failures are labels of nothing.** A parse failure, refusal, truncated reply or tool error is recorded per request with a fixed code, and the label stays empty. It is never mapped to accept or reject.
+- **Captures and resume.** Each attempt writes `request`, `intent`, `response` and `receipt` files (0600, in 0700 directories) under the run directory. A destination must be fresh unless `--resume` is given, and a resume requires the same declaration hash, set, prompts and request plan. On resume, every earlier attempt is re-authenticated by hash and by re-deriving its label from the captured response; any mismatch refuses the resume. Completed, unparseable and not-dispatched requests are reused, never re-sent. Requests that failed on infrastructure or were interrupted after dispatch are sent again as a new attempt, which counts against the limits and the cap. Declare request limits with headroom above the plan if resumed failures should be possible.
+- **Outputs.** Per session: `labels-session-NN.json` and `report-session-NN.json` in the run directory. When every request is terminal, the labels are also written to the declared `outputs.labels_path`, which must be under `.build` and must not exist. Labels use format `boros-judge-calibration-labels-v1` with one `{verdict, sufficiency}` entry per replicate and `judge` set to the score column name (`jevk5-mcp` for the `jevk5` runner judge). Items with no definite label are omitted. The report holds counts by status and stage, fixed failure codes, call counts, token and cost totals, the probe result and hashes; no text. Requests run sequentially, within every template's concurrency limit.
+
+`git check-ignore` confirms that `.build/` is ignored (`.gitignore:2`), so run directories, labels and filled declarations stay out of Git.
+
+### Commands
+
+Run from the checkout whose `.build/judge-calibration/` holds the set. The set was assembled in worktree `agent-a442acfa839e12f30`; copy it with modes preserved (`cp -Rp`) into the checkout that will run the judges. The default `--protocol` is `.build/longmemeval-protocol-20261006/src/evaluation/evaluate_qa.py`, present in the primary checkout; elsewhere pass its path explicitly.
+
+Dry run, per judge (no network, nothing written):
+
+```sh
+python3 scripts/judge_calibration_run.py --set .build/judge-calibration/set-v1-20261008 \
+  --declaration .build/judge-calibration/declarations/JUDGE.json \
+  --output .build/judge-calibration/runs/JUDGE-set-v1
+```
+
+Check, then execute (dispatches; needs the user's authorization for that judge):
+
+```sh
+python3 scripts/judge_calibration.py check-declaration .build/judge-calibration/declarations/JUDGE.json \
+  --set .build/judge-calibration/set-v1-20261008
+python3 scripts/judge_calibration_run.py --set .build/judge-calibration/set-v1-20261008 \
+  --declaration .build/judge-calibration/declarations/JUDGE.json \
+  --output .build/judge-calibration/runs/JUDGE-set-v1 --execute
+```
+
+Replace `JUDGE` with `vertex-opus`, `vertex-sonnet`, `jevk5` or `qwen-local`. To continue a halted run of the same declaration, repeat the execute command with `--resume`. Then score, for example:
+
+```sh
+python3 scripts/judge_calibration.py score --set .build/judge-calibration/set-v1-20261008 \
+  --adjudications .build/judge-calibration/adjudications-jc-9adfaeeb572b8380.json \
+  --labels vertex-opus=.build/judge-calibration/labels-vertex-opus.json \
+  --labels jevk5-mcp=.build/judge-calibration/labels-jevk5.json
+```
+
+### Dry-run counts over the private set (measured)
+
+Run October 8, 2026 against set `jc-9adfaeeb572b8380` (items SHA-256 `44c998ea…f833`), with each unfilled template as the declaration, from a copy of the set without its key file. Every dry run reported zero network calls and zero files written. Characters are the model-visible prompt characters per request; for JevK5 they include the choice instructions.
+
+| Judge | Items | Replicates | Requests | Distinct requests | Sufficiency chars p50 / max | Verdict chars p50 / max | Largest body (bytes) | Over declared character bound |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `vertex-opus` | 50 | 3 | 300 | 100 | 27,088 / 59,778 | 1,022 / 3,879 | 60,582 | no bound declared |
+| `vertex-sonnet` | 50 | 3 | 300 | 100 | 27,088 / 59,778 | 1,022 / 3,879 | 60,582 | no bound declared |
+| `jevk5` | 50 | 3 | 300 | 100 | 27,377 / 60,067 | 1,299 / 4,156 | 60,841 | 31 of 50 sufficiency requests (93 of 300) over 24,000 |
+| `qwen-local` | 50 | 3 | 300 | 100 | 27,088 / 59,778 | 1,022 / 3,879 | 60,640 | none over 96,000 |
+
+Each Vertex run also needs 100 free count requests, one per distinct request. The templates were reported incomplete, as expected: they lack the fields listed below, and their empty `calibration_set` does not match the manifest.
+
+JevK5 finding: its context is 8,192 tokens, and the template bound of 24,000 characters is an estimate of about three characters per token, not a measured tokenizer ratio. Under that bound, 31 of the 50 sufficiency requests would be recorded as not dispatched, so JevK5 could produce sufficiency labels for at most 19 items. All 50 verdict requests fit. The real token counts are unverified; JevK5 reports input tokens only after a call.
+
+## Run declarations (templates)
+
+Four templates under `scripts/judge_calibration_declarations/` contain no private data. Copy a template to `.build/judge-calibration/declarations/` before filling it, because a filled declaration holds the user's authorization record.
+
+Fixed in the Vertex templates (`vertex-opus`, `vertex-sonnet`):
 
 | Area | Value |
 |---|---|
 | Route | Project `llm-train-482420`, location `global`, the model ID, `anthropic_version vertex-2023-10-16` |
 | Authentication | Application Default Credentials, no API key |
 | Sampling | Provider default: no temperature or other sampling parameter, no extended thinking |
-| Counting and cost gate | Count tokens before generation; refuse if counted input times declared prices exceeds the cap |
-| Access probe | One unbilled access probe before the first generation |
+| Counting and cost gate | Count tokens before generation; refuse if counted input and maximum output at the declared prices exceed the cap |
+| Access probe | One unbilled access probe per session before the first generation |
 | Retries and stops | No automatic retries; stop on the first infrastructure failure |
-| Requests | Two stages per item (sufficiency without the answer, then verdict); 3 replicates; at most 256 output tokens per request; 2 concurrent requests |
-| Prompts | Hash of the frozen judge prompts (`boros-judge-calibration-prompts-v1`, SHA-256 `cc41c72e0ce74b22d52713a77379f9ab48fef17624414e48a93ded94d5d0080f`) |
+| Requests | Two stages per item (sufficiency without the answer, then verdict); 3 replicates; at most 256 output tokens per request |
+| Prompts | Prompt set `boros-judge-calibration-prompts-v2`, hashes as above |
 
-Required fields the user fills:
+Fixed in the local templates (`jevk5`, `qwen-local`): the pinned provider block (JevK5 command, tool and model identity from `jevk5_saved_qa.py`; the Qwen endpoint, model, temperature 0 and thinking off), no automatic retries, stop on the first infrastructure failure, 3 replicates, the prompt hashes, and a `max_prompt_characters` bound (24,000 for JevK5, 96,000 for Qwen, both estimates). Qwen also fixes 16 output tokens per request.
 
-- Authorizer and date.
-- Calibration set ID, items hash and item count.
-- Input and output prices per million tokens, with their source and verification date.
-- Spending cap.
-- Maximum generation and count requests.
-- Labels output path.
+Fields the user fills:
 
-`python3 scripts/judge_calibration.py check-declaration FILE --set .build/judge-calibration/set-v1-20261008` lists every unfilled or inconsistent field. It refuses any `temperature`, `top_p`, `top_k` or `seed` key, a changed route or model, a disabled count gate or cost gate, retries, a non-positive cap or price, a prompt hash that differs from the code, and a set that differs from the manifest. Copy the template to `.build/` before filling it, because a filled declaration holds the user's authorization record.
+| Field | Vertex | JevK5 | Qwen |
+|---|---|---|---|
+| `authorization.authorized_by`, `authorized_on` | yes | yes | yes |
+| `calibration_set`: set ID `jc-9adfaeeb572b8380`, items hash, item count 50 | yes | yes | yes |
+| `outputs.labels_path` under `.build/`, ending `.json` | yes | yes | yes |
+| Prices per million input and output tokens, their source and verification date | yes | | |
+| `budget.spending_cap_usd` | yes | | |
+| `budget.max_generation_requests` (at least 300 for 3 replicates) and `max_count_requests` (at least 100) | yes | | |
+| `request_limits.max_requests` (at least 300 for 3 replicates) | | yes | yes |
+| `provider.executable_sha256`: SHA-256 of the mcpme executable named in the template's command | | yes | |
 
-Scale, not a cost estimate: the 50 items render to about 1.6 MB of sufficiency requests and 1.7 MB of verdict requests per replicate, with a largest request of 60 KB. Exact token counts come only from the free count endpoint at run time, and prices must be declared, not assumed.
+`python3 scripts/judge_calibration.py check-declaration FILE --set .build/judge-calibration/set-v1-20261008` lists every unfilled or inconsistent field with a fixed code. It refuses any `temperature`, `top_p`, `top_k` or `seed` key, a changed route, model or local provider pin, a disabled count or cost gate, Vertex retries, replicates outside 1 to 10, a non-positive cap, price or limit, a request limit below the plan, prompt hashes that differ from the code, a labels path outside `.build`, and a set that differs from the manifest.
 
 ## Self-preference
 
@@ -264,14 +353,24 @@ To start P4 adjudication now (no model calls):
 1. Decide the two open rubric points: the temporal off-by-one and preference tolerances, and whether to adjudicate the two-item correct-plus-unsupported stratum as is or add reviewer-constructed items.
 2. Open `.build/judge-calibration/set-v1-20261008/adjudication-form.html` locally, adjudicate the 50 items, and export the decisions into `.build/judge-calibration/`. A designated reviewer may do this instead; the export records the adjudicator name.
 
-To run judges (each needs separate authorization; none is built to run yet):
+To run judges, each run needs its own authorization. The runners are built; none has run. For every judge: copy its template to `.build/judge-calibration/declarations/`, fill the fields in the table above, run the dry run, run `check-declaration` until it reports `"complete": true`, then authorize and run the execute command.
 
-1. **Vertex Opus.** Authorize a set runner on `vertex_anthropic.py` (not built). Fill and check the Opus declaration (prices, cap, request limits, set hashes), then authorize the run, including its unbilled access probe and free counting pass.
-2. **Vertex Sonnet.** Authorize parameterizing the adapter by model, with tests, before the same steps with the Sonnet declaration.
-3. **JevK5 MCP and Qwen local.** Authorize set adapters for both and their local model calls, so all candidates are measured on identical items.
-4. **Hosted Jev.** Move the key into the Keychain. Approve a plan amendment admitting the provider. Authorize the adapter, its contract and tests, and the data-terms review. Then authorize a declared, capped run.
+1. **Vertex Opus.** Declare current Vertex AI prices for `claude-opus-5-5` with their source and date, a spending cap, and request limits of at least 300 generations and 100 counts. Authorizing the run authorizes one unbilled access probe per session, the free counting pass of 100 count requests, and up to the declared number of billed generations.
+2. **Vertex Sonnet.** The same, with prices for `claude-sonnet-5-5`. Sonnet access in `llm-train-482420` is reported by the user and not verified here; the access probe checks it before any billed call.
+3. **JevK5 MCP.** Fill the mcpme executable SHA-256 (`shasum -a 256` of the command's first element) and a request limit of at least 300. Decide whether the 24,000-character estimate bound is acceptable, knowing it leaves at most 19 items with JevK5 sufficiency labels, or authorize a different bound. Authorizing the run authorizes starting the mcpme slot process and up to the declared number of local decisions.
+4. **Qwen local.** Fill a request limit of at least 300, and make sure the selected Qwen model is the one loaded in mlx-serve on port 11234. Authorizing the run authorizes up to the declared number of local generation requests.
+5. **Hosted Jev.** Out of the runner's scope. Move the key into the Keychain. Approve a plan amendment admitting the provider. Authorize the adapter, its contract and tests, and the data-terms review. Then authorize a declared, capped run.
 
-After labels exist, `score` produces the rates. P4 step 3 then selects the judge or ensemble with the lowest grounded error, and the earlier LongMemEval local labels are annotated with their judge's measured rates.
+After labels exist, `score` produces the rates. P4 step 3 then selects the judge or ensemble with the lowest error, and the earlier LongMemEval local labels are annotated with their judge's measured rates. Because the verdict prompt is reference-only, compare runner judges on the reference-only variant and report the grounded variant beside it.
+
+### Unverified without a live call
+
+- Whether Opus and Sonnet reply to the upstream prompt with a bare `yes` or `no` and to the sufficiency prompt with bare JSON. Any other shape is recorded as a parse failure, so a high parse-failure rate is possible and would show in the report.
+- Sonnet access, its response model echo (`claude-sonnet-5-5`, optionally with a version or date suffix), and whether Sonnet would reject `temperature` as Opus does. The adapter never sends it.
+- Token counts and therefore cost. Prices are not assumed anywhere in code.
+- JevK5 token counts for long sufficiency requests, its behavior on requests near its context limit, and whether its cache makes replicates identical.
+- That the running mlx-serve still serves the pinned Qwen model, and Qwen's adherence to the bare-JSON sufficiency reply.
+- The real `StdioMCP`, `vertex.post` and loopback transports inside the runner. Their own synthetic contracts pass, and the runner was exercised only with fakes.
 
 ## Verification
 
@@ -285,7 +384,23 @@ After labels exist, `score` produces the rates. P4 step 3 then selects the judge
   - the form's network-free policy and script-injection escaping;
   - Wilson interval values, kappa and majority vote;
   - false-accept, false-reject, reference-only, replicate, sufficiency and self-preference scoring, and refusal of mismatched inputs;
-  - sufficiency prompts that omit the answer;
-  - both declaration templates and their checks;
+  - sufficiency prompts that omit the answer, and verdict prompts from the upstream function;
+  - both Vertex declaration templates and their checks;
   - native byte-range resolution with digest verification.
+- `python3 scripts/test_judge_calibration_run.py`: 17 synthetic contracts with fake transports for all four judges, all passing. They cover:
+  - prompt hash pinning in code and in all four templates, and refusal of a changed prompt;
+  - refusal of an upstream protocol file that does not match its pin;
+  - blinding: with the key file deleted, no key-only string (run, arm, answerer model, question ID, prior judge names) and no item ID reaches any request, and sufficiency requests never contain the answer;
+  - dry runs for all four judges with sockets, `vertex.post`, gcloud tokens, `StdioMCP`, the loopback client and every transport patched to fail: zero calls, nothing written;
+  - the CLI gates: dry run without `--execute`, exit 2 with no transport constructed when the declaration is incomplete, and `--resume` refused without `--execute`;
+  - the Vertex projected cost refusal before any generation, and the per-generation cap check;
+  - stop on the first HTTP 429, a request limit reached on resume, and an authenticated resume that reuses completed requests and counts and re-sends only the failed one;
+  - refusal of a resume with a tampered response capture or a different declaration;
+  - parse failures recorded with empty labels, never coerced;
+  - model identity mismatch halts for Qwen and Vertex, and the JevK5 executable pin halts before connecting;
+  - replicate counts and order, labels accepted by `score` for JevK5, Qwen and Vertex, and JevK5 cache-hit counting;
+  - local request limits, character bounds, private file modes, and reports free of item text;
+  - local and Vertex declaration checks.
+- `python3 scripts/test_vertex_anthropic.py`: 13 synthetic contracts, all passing, including Opus as the unchanged default, Sonnet selected per run with the same no-sampling contract and its own model-echo check, and refusal of unsupported models before any connection. The adapter's existing callers (`evaluate_answerer_controls.py`, `run_memory_investigation.py`, `evaluate_orientation_zoom.py`) default to Opus and their synthetic suites pass unchanged. Runs that capture `vertex_anthropic.py` as a pinned dependency will record the new file hash.
+- `python3 scripts/check.py` runs both calibration suites and the adapter suite.
 - The form's reveal gate, change-after-reveal record, navigation, autosave and export format were exercised in a browser against a synthetic set, which was then deleted. The private set was not opened in a browser by this preparation.

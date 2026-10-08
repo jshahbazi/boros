@@ -303,7 +303,10 @@ class Contracts(unittest.TestCase):
         c = candidate("r", "q0000011", "hybrid", None, answer="UNIQUE-ANSWER-TOKEN")
         item, _ = jc.blind_item(c, "item-001")
         sufficiency = json.dumps(jc.judge_messages(item, "sufficiency"))
-        verdict = json.dumps(jc.judge_messages(item, "verdict"))
+
+        def upstream(task, question, answer, response, abstention=False):  # synthetic stand-in
+            return f"{task} {question} {answer} {response} {abstention}"
+        verdict = json.dumps(jc.judge_messages(item, "verdict", upstream))
         self.assertNotIn("UNIQUE-ANSWER-TOKEN", sufficiency)
         self.assertIn("UNIQUE-ANSWER-TOKEN", verdict)
         self.assertNotIn("temperature", sufficiency + verdict)
@@ -320,6 +323,8 @@ class Contracts(unittest.TestCase):
             self.assertIn("unfilled:pricing.input_usd_per_million_tokens", problems)
             filled = json.loads(json.dumps(template).replace('"REQUIRED"', '"1"'))
             filled["calibration_set"]["item_count"] = 50
+            filled["budget"].update(max_generation_requests=300, max_count_requests=100)
+            filled["outputs"]["labels_path"] = f".build/judge-calibration/labels-{judge}.json"
             self.assertEqual(jc.check_declaration(filled), [])
             for mutate, code in ((lambda d: d["execution"].update(temperature=0), "forbidden_field:execution.temperature"),
                                  (lambda d: d["execution"].update(count_tokens_before_generation=False), "token_counting"),

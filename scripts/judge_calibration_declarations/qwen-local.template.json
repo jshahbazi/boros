@@ -1,38 +1,36 @@
 {
-  "format": "boros-judge-calibration-vertex-declaration-v1",
-  "judge": "vertex-sonnet",
+  "format": "boros-judge-calibration-local-declaration-v1",
+  "judge": "qwen-local",
   "status": "template; not authorized; no call has been made",
   "authorization": {
     "authorized_by": "REQUIRED",
     "authorized_on": "REQUIRED",
-    "scope": "P4 judge calibration labels over the frozen calibration set only"
+    "scope": "P4 judge calibration labels over the frozen calibration set only; local model calls only"
   },
   "provider": {
-    "provider": "vertex-ai",
-    "project_id": "llm-train-482420",
-    "location": "global",
-    "model": "claude-sonnet-5-5",
-    "anthropic_version": "vertex-2023-10-16",
-    "sampling": "provider-default",
-    "authentication": "google-application-default-credentials",
-    "api_key": false,
-    "model_version_echo_required": true
+    "provider": "local-mlx-serve",
+    "endpoint": "http://127.0.0.1:11234/v1/chat/completions",
+    "model": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+    "sampling": "temperature-0",
+    "thinking": false,
+    "remote": false,
+    "model_instance_identity": "unobservable"
   },
   "execution": {
-    "count_tokens_before_generation": true,
-    "refuse_if_counted_cost_exceeds_cap": true,
-    "unbilled_access_probe_before_first_generation": true,
-    "extended_thinking": false,
-    "sampling_parameters_sent": [],
     "automatic_retries": 0,
+    "stop_on_first_infrastructure_failure": true,
     "stages_per_item": [
       "sufficiency",
       "verdict"
     ],
     "replicates": 3,
-    "max_output_tokens_per_request": 256,
-    "max_concurrent_requests": 2,
-    "stop_on_first_infrastructure_failure": true
+    "max_concurrent_requests": 1
+  },
+  "request_limits": {
+    "max_requests": "REQUIRED",
+    "max_output_tokens_per_request": 16,
+    "max_prompt_characters": 96000,
+    "max_prompt_characters_basis": "estimate of about 3 characters per token against the 32,768-token context; unverified; longer requests are recorded as not dispatched"
   },
   "calibration_set": {
     "set_id": "REQUIRED",
@@ -47,22 +45,10 @@
     "upstream_protocol_sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
     "source": "scripts/judge_calibration.py JUDGE_PROMPTS (verdict: unchanged upstream LongMemEval QA prompt; sufficiency: new prompt)"
   },
-  "pricing": {
-    "input_usd_per_million_tokens": "REQUIRED",
-    "output_usd_per_million_tokens": "REQUIRED",
-    "source": "REQUIRED",
-    "verified_on": "REQUIRED",
-    "cached_input_discount_applied": false
-  },
-  "budget": {
-    "spending_cap_usd": "REQUIRED",
-    "max_generation_requests": "REQUIRED",
-    "max_count_requests": "REQUIRED"
-  },
   "privacy": {
     "captures": "private, 0600 in 0700 directories under .build; never committed",
     "stdout": "counts, hashes and fixed codes only",
-    "access_token_written": false
+    "remote": false
   },
   "outputs": {
     "labels_format": "boros-judge-calibration-labels-v1",

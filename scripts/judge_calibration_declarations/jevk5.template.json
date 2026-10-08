@@ -1,0 +1,68 @@
+{
+  "format": "boros-judge-calibration-local-declaration-v1",
+  "judge": "jevk5",
+  "status": "template; not authorized; no call has been made",
+  "authorization": {
+    "authorized_by": "REQUIRED",
+    "authorized_on": "REQUIRED",
+    "scope": "P4 judge calibration labels over the frozen calibration set only; local model calls only"
+  },
+  "provider": {
+    "provider": "local-mcp-slot",
+    "command": [
+      "/Users/johnshahbazian/.codex/worktrees/a5db/mcpme/dist/mcpme-Pi-left-aligned.app/Contents/MacOS/mcpme",
+      "--state-dir",
+      "/Users/johnshahbazian/Library/Application Support/mcpme",
+      "connect",
+      "--slot",
+      "87576cb2-cc02-4225-a13d-42fa684f99fb"
+    ],
+    "tool": "jevk5_decide",
+    "model": {
+      "id": "JevK5-4B-v0.3-Q8_0",
+      "sha256": "aea433883bc7ed399f2fbd539e53d2eac7caf71a946fe6650995a413979d4a30",
+      "profile": "m5-benchmark-v1",
+      "context_tokens": 8192
+    },
+    "remote": false,
+    "executable_sha256": "REQUIRED"
+  },
+  "execution": {
+    "automatic_retries": 0,
+    "stop_on_first_infrastructure_failure": true,
+    "stages_per_item": [
+      "sufficiency",
+      "verdict"
+    ],
+    "replicates": 3,
+    "max_concurrent_requests": 1,
+    "replicate_note": "JevK5 reports a cache for identical requests; replicates may be cache hits and are recorded per request"
+  },
+  "request_limits": {
+    "max_requests": "REQUIRED",
+    "max_prompt_characters": 24000,
+    "max_prompt_characters_basis": "estimate of about 3 characters per token against the 8,192-token context; unverified; longer requests are recorded as not dispatched"
+  },
+  "calibration_set": {
+    "set_id": "REQUIRED",
+    "items_sha256": "REQUIRED",
+    "item_count": "REQUIRED"
+  },
+  "prompts": {
+    "version": "boros-judge-calibration-prompts-v2",
+    "sha256": "1cce15660c8a730df03f5654926356715842e5c5bdbb64709a4a1c6cd1990221",
+    "verdict_sha256": "85fa445ad2cda3f103a89828f126834795beffafce991bf676b90531ffc2b40c",
+    "sufficiency_sha256": "c604485853f65670fa54599aceb06f5d152a8798b03dc518cca6de73ec76b857",
+    "upstream_protocol_sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
+    "source": "scripts/judge_calibration.py JUDGE_PROMPTS (verdict: unchanged upstream LongMemEval QA prompt; sufficiency: new prompt)"
+  },
+  "privacy": {
+    "captures": "private, 0600 in 0700 directories under .build; never committed",
+    "stdout": "counts, hashes and fixed codes only",
+    "remote": false
+  },
+  "outputs": {
+    "labels_format": "boros-judge-calibration-labels-v1",
+    "labels_path": "REQUIRED"
+  }
+}
