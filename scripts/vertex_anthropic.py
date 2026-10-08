@@ -25,7 +25,9 @@ PROJECT_ID = "llm-train-482420"  # display name "llm-train"
 LOCATION = "global"
 MODEL = "claude-opus-5-5"
 ANTHROPIC_VERSION = "vertex-2023-10-16"
-TEMPERATURE = 0
+# Opus 5.5 rejects `temperature` (HTTP 400, "deprecated for this model"; observed
+# October 8, 2026), so sampling is the provider default and replies are not pinned.
+SAMPLING = "provider-default"
 MAXIMUM_RESPONSE_BYTES = 2 * 1024 * 1024
 TOKEN_REFRESH_SECONDS = 15 * 60
 REQUEST_TIMEOUT_SECONDS = 120
@@ -70,7 +72,7 @@ def is_vertex_url(url):
 def configuration():
     """Declaration fields that pin the remote route for a run."""
     return {"provider": "vertex-ai", "project_id": PROJECT_ID, "location": LOCATION, "model": MODEL,
-            "anthropic_version": ANTHROPIC_VERSION, "temperature": TEMPERATURE,
+            "anthropic_version": ANTHROPIC_VERSION, "sampling": SAMPLING,
             "authentication": "google-application-default-credentials", "api_key": False}
 
 
@@ -144,11 +146,10 @@ def _split(messages):
 
 
 def payload(messages, max_tokens):
-    """Generation body. The model is in the URL; no extended thinking is requested."""
+    """Generation body. The model is in the URL; no extended thinking or sampling parameter is sent."""
     require(type(max_tokens) is int and max_tokens > 0, "output_limit_invalid")
     system, turns = _split(messages)
-    body = {"anthropic_version": ANTHROPIC_VERSION, "messages": turns, "max_tokens": max_tokens,
-            "temperature": TEMPERATURE}
+    body = {"anthropic_version": ANTHROPIC_VERSION, "messages": turns, "max_tokens": max_tokens}
     if system:
         body["system"] = system
     return body

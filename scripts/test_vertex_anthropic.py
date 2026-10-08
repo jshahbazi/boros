@@ -51,8 +51,8 @@ class Contracts(unittest.TestCase):
         self.assertTrue(v.count_url().endswith("/publishers/anthropic/models/count-tokens:rawPredict"))
         self.assertEqual(v.host("us-east5"), "us-east5-aiplatform.googleapis.com")
         configuration = v.configuration()
-        self.assertEqual((configuration["authentication"], configuration["api_key"]),
-                         ("google-application-default-credentials", False))
+        self.assertEqual((configuration["authentication"], configuration["api_key"], configuration["sampling"]),
+                         ("google-application-default-credentials", False, "provider-default"))
 
     def test_payload_extracts_system_and_merges_consecutive_turns(self):
         messages = [{"role": "system", "content": "a"}, {"role": "system", "content": "b"},
@@ -62,8 +62,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(body["system"], "a\n\nb")
         self.assertEqual([turn["role"] for turn in body["messages"]], ["user", "assistant", "user"])
         self.assertEqual(len(body["messages"][0]["content"]), 2)
-        self.assertEqual((body["max_tokens"], body["temperature"], body["anthropic_version"]),
-                         (64, v.TEMPERATURE, v.ANTHROPIC_VERSION))
+        self.assertEqual((body["max_tokens"], body["anthropic_version"]), (64, v.ANTHROPIC_VERSION))
+        self.assertTrue({"temperature", "top_p", "top_k", "thinking"}.isdisjoint(body))
         self.assertNotIn("model", body)
         count = v.count_payload(messages)
         self.assertEqual((count["model"], count["system"], count["messages"]), (v.MODEL, body["system"], body["messages"]))
