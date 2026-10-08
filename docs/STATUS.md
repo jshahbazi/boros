@@ -4,6 +4,8 @@ Updated October 8, 2026. Development branch: `main`, which consolidates `codex/b
 
 **Retrieval baseline (P1), October 8, 2026:** the [offline retrieval harness](RETRIEVAL-HARNESS.md) runs the ordinary selected-Qwen path with pinned offline token counts and no generation. On the 90 answerable development questions, ordinary hybrid delivers every annotated turn in 50 cases (R2 55.6 percent) and lexical alone in 60 (66.7 percent), against the plan's 90 percent interim target. Every miss is a ranking miss: token fitting removed no evidence. The harness reproduces the earlier fourteen-history result (hybrid 14/18 turns, 8/12 cases) without model calls.
 
+**Remote evaluation provider:** future remote evaluation calls (judging, reference reading, registered comparisons) use Vertex AI in the GCP `llm-train` project with Application Default Credentials; see [the repair plan](DESIGN-REPAIR-PLAN.md#remote-evaluation-provider). The OpenAI route is retired for evaluations, and the earlier OpenAI results remain as records.
+
 This is the planning index for Boros: available features, implementation gaps, recorded evidence, remaining design, and dependencies between next steps. Detailed contracts remain in the linked documents. TraceChat is the historical name of the original design and review.
 
 Start with [next work](#6-dependency-ordered-next-work) and [open decisions](#8-decisions-before-selecting-work). Use [the feature inventory](#2-feature-inventory) and [recorded evidence](#4-recorded-evidence) to check the basis for a choice.

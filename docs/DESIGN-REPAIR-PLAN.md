@@ -35,9 +35,15 @@ LongMemEval positive-turn annotations are a proxy for the plan's sufficient sour
 
 LongMemEval S cannot satisfy the plan's statistical design on its own. It has 30 abstention and 30 preference questions in total, at least 17 abstentions and 11 preference questions are already used, and it has no immediate-follow-up or scoped instruction and lifecycle cases. LongMemEval M reuses the same 500 questions. See P6.
 
+### Remote evaluation provider
+
+Remote model calls made for evaluation, such as judging, reference reading and the registered comparison, go through Vertex AI in the GCP project `llm-train` (project ID `llm-train-482420`; the Vertex AI API is enabled there). Authenticate with Google Application Default Credentials (`gcloud auth application-default login`) and pass the project ID explicitly on every request, because the workstation's default gcloud project is a different one. No API key is stored, read or passed. Each run's frozen declaration pins the region, the publisher model and version, and a spending cap, and each run still needs its own authorization. The earlier OpenAI route is retired for evaluations; its records stay as history. This provider applies to offline evaluation tooling only. The application still processes text only through local model servers.
+
+No evaluation script calls Vertex yet. The existing remote runners were written for the OpenAI route and need a Vertex adapter before P4.
+
 ## Work packages
 
-Dependencies: P0 before everything; P1 before P2; P3 and P4 can run beside P1 and P2; P5 after P4; P6 after P2, P3 and P5; P7 after P6. P1 and P2 make no generation calls. P3 uses only the local model server. P4 (Sol as judge), P5 (Sol as reference reader) and P6 make remote or paid requests and each needs its own authorization and spending cap. Every model run also needs a frozen declaration, as the earlier local runs had.
+Dependencies: P0 before everything; P1 before P2; P3 and P4 can run beside P1 and P2; P5 after P4; P6 after P2, P3 and P5; P7 after P6. P1 and P2 make no generation calls. P3 uses only the local model server. P4 (a remote judge), P5 (a remote reference reader) and P6 make paid remote requests through [Vertex AI](#remote-evaluation-provider) and each needs its own authorization and spending cap. Every model run also needs a frozen declaration, as the earlier local runs had.
 
 ### P0 Consolidate branches
 
@@ -81,7 +87,7 @@ Exit: investigation p95 added latency and cost on the three-case repeat plus `51
 Before any model-involved quality claim:
 
 1. Assemble a blinded calibration set of at least 50 saved answers across accepted, rejected, abstention, incomplete evidence and correct-plus-unsupported cases, adjudicated by the user or a reviewer they designate against the reference and the delivered evidence. Adjudicate pack sufficiency separately from the answer; Qwen gave the `51c32626` pack opposite sufficiency labels depending on the answer it judged.
-2. Measure false-accept and false-reject rates for JevK5, Qwen as judge and Sol as judge against that adjudication, per category. At 50 items a rate near 50 percent has a 95 percent interval of roughly 14 points either way; report intervals and enlarge the set if they cannot separate the candidates.
+2. Measure false-accept and false-reject rates for JevK5, Qwen as judge and a Vertex-hosted judge against that adjudication, per category. At 50 items a rate near 50 percent has a 95 percent interval of roughly 14 points either way; report intervals and enlarge the set if they cannot separate the candidates.
 3. Select the judge or ensemble with the lowest error, record the rates, and report every later acceptance with those rates attached.
 4. Keep answerability cues out of every model-visible identifier; the version-8 opaque projection is the required baseline for all cohorts.
 
@@ -89,7 +95,7 @@ Exit: recorded judge error rates with intervals; the earlier LongMemEval local l
 
 ### P5 Reader decision
 
-A1 needs sufficient packs, not P2's selector. Build them from annotations as the source controls did, keep only those P4 adjudicates sufficient, and measure A1 on identical packs for the selected Qwen, at least one larger locally runnable model, and Sol as an upper reference. Compare direct answering with the investigation route's quote-extraction step. Repeat on P2's delivered packs once P2 exits. Decide the default reader on A1, latency and the remote-processing boundary. A remote default requires the plan's egress and disclosure contracts first; this package only produces the measurement that would justify that work.
+A1 needs sufficient packs, not P2's selector. Build them from annotations as the source controls did, keep only those P4 adjudicates sufficient, and measure A1 on identical packs for the selected Qwen, at least one larger locally runnable model, and a Vertex-hosted model as an upper reference. Compare direct answering with the investigation route's quote-extraction step. Repeat on P2's delivered packs once P2 exits. Decide the default reader on A1, latency and the remote-processing boundary. A remote default requires the plan's egress and disclosure contracts first; this package only produces the measurement that would justify that work.
 
 Exit: A1 per reader on the development cohort, three replicates.
 

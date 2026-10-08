@@ -1,6 +1,6 @@
 # OpenAI and Qwen answerer controls
 
-The user authorized an OpenAI API diagnostic on October 6, 2026, requesting `gpt-6.1-sol`. An authenticated metadata request verified access to that exact model. The [OpenAI Docs skill](/Users/johnshahbazian/.codex/skills/.system/openai-docs/SKILL.md) was used to verify the API/model contract. This diagnostic follows the [architecture reassessment](reviews/ARCHITECTURE-REASSESSMENT-20261006.md); it does not enable remote processing in the Boros application.
+The user authorized an OpenAI API diagnostic on October 6, 2026, requesting `gpt-6.1-sol`. A metadata request verified access to that exact model. The [OpenAI Docs skill](/Users/johnshahbazian/.codex/skills/.system/openai-docs/SKILL.md) was used to verify the API/model contract. This diagnostic follows the [architecture reassessment](reviews/ARCHITECTURE-REASSESSMENT-20261006.md); it does not enable remote processing in the Boros application.
 
 ## Question and inputs
 
@@ -10,11 +10,11 @@ The cases are the three diagnosed missing-target failures (`51c32626`, `1b9b7252
 
 The five candidate packs contain 66 complete original messages and 68,197 UTF-8 bytes. Each has at most sixteen sources; every source is at most 4,096 bytes. Independent original-source reconstruction verifies all seven annotated positive turns, roles, order, original date metadata, source hashes and question/reference pins. The selected sources form original-order complete sessions or contiguous session prefixes. Semantic sufficiency remains unverified before generation.
 
-Answering inputs contain only questions, original dates and selected original sources. Scorer references and annotations are stored separately and never enter answerer requests. Private files use `0600`, within `0700` directories. The credential is read from the user-designated external file at execution and used only in the Authorization header for `https://api.openai.com`. It is excluded from captures, declarations, output and Git.
+Answering inputs contain only questions, original dates and selected original sources. Scorer references and annotations are stored separately and never enter answerer requests. Private files use `0600`, within `0700` directories.
 
 ## Execution contract
 
-`scripts/evaluate_answerer_controls.py` uses the standard library and four fixed endpoints: OpenAI Responses/counting, and loopback Qwen chat/tokenization. TLS uses default certificate verification; redirects and environment proxies are refused. Captured request bodies exclude credentials. HTTP error messages are discarded because they can echo credential fragments. Response bodies are bounded; failures preserve dispatch state, any observed usage and explicit unknown usage.
+`scripts/evaluate_answerer_controls.py` uses the standard library and four fixed endpoints: OpenAI Responses/counting, and loopback Qwen chat/tokenization. TLS uses default certificate verification; redirects and environment proxies are refused. HTTP error messages are discarded. Response bodies are bounded; failures preserve dispatch state, any observed usage and explicit unknown usage.
 
 Each provider processes the five cases in the same fixed order, with at most two independent provider workers. The logical comparison has ten declared answer attempts and twenty declared source-aware judge attempts. A fresh complete execution permits at most forty count requests and seventy HTTP attempts. There are no automatic retries or changes of model, reasoning, prompt or caps. Before generation, the runner freezes all answer requests, input/scorer hashes, its own source hash and the common message-content hashes. It checks those pins around provider calls and binds each judge request to the saved answer bytes/hash.
 
@@ -57,7 +57,7 @@ Report the two-by-two answerer/judge matrix, all field disagreements and suffici
 
 ## Verification and receipts
 
-Eleven portable synthetic tests cover strict output parsing, malformed nested provider shapes, usage preservation on failed responses, reasoning/formatting bounds, source/scorer separation, evidence rendering, credential-destination refusal and rejection of an altered or falsy reuse parent before network access. Independent source review checked the repaired runner before API execution. Independent terminal review reconstructs every answer, judge and count request, original-source closure, copied capture, response/answer hash, provider usage and count equation, spending inventory and reported label comparison. Both attempts' artifact inventories remain unchanged during review. This authenticates the execution and labels; independent semantic adjudication remains unrun. The native experimental 3,887-check receipt remains separate and predates the unbuilt v1-default gating edit.
+Eleven portable synthetic tests cover strict output parsing, malformed nested provider shapes, usage preservation on failed responses, reasoning/formatting bounds, source/scorer separation, evidence rendering, destination refusal and rejection of an altered or falsy reuse parent before network access. Independent source review checked the repaired runner before API execution. Independent terminal review reconstructs every answer, judge and count request, original-source closure, copied capture, response/answer hash, provider usage and count equation, spending inventory and reported label comparison. Both attempts' artifact inventories remain unchanged during review. This authenticates the execution and labels; independent semantic adjudication remains unrun. The native experimental 3,887-check receipt remains separate and predates the unbuilt v1-default gating edit.
 
 | Frozen artifact | SHA-256 |
 |---|---|
@@ -112,15 +112,8 @@ For the five answer calls alone, generation-operation elapsed time has a median 
 
 Sol performs better on this small diagnostic under both judges. Evidence selection remains a demonstrated problem, and clean evidence also reveals answerer and judging limitations. More retrieval hits cannot by themselves establish reliable answering. Next work should authenticate sufficient complete-exchange packs, retain disagreement cases for independent semantic calibration, and test relevance/token-aware exchange selection on fresh cases. An OpenAI production adapter, broader architecture, optional trees and further scoped-policy work remain outside this diagnostic.
 
-To reproduce the frozen diagnostic with fresh destinations:
+This diagnostic is a record. The OpenAI route is retired for evaluations; future remote answering or judging runs use [Vertex AI in the `llm-train` project](DESIGN-REPAIR-PLAN.md#remote-evaluation-provider), which needs a Vertex adapter before this runner can be reused. The synthetic contracts still run offline:
 
 ```sh
-python3 scripts/evaluate_answerer_controls.py \
-  --inputs /absolute/path/to/frozen/answering-inputs.json \
-  --scorer /absolute/path/to/frozen/scorer-only.json \
-  --output /absolute/path/to/boros/.build/evaluation/new-run \
-  --api-key-file /absolute/path/to/credential-file
 python3 scripts/test_answerer_controls.py
 ```
-
-To reproduce the explicit amended attempt without regenerating the saved Sol answers, add `--reuse-openai-run /absolute/path/to/boros/.build/evaluation/openai-answerer-controls-v1-20261006`. This option accepts only the exact pinned parent; altered or empty reports are refused before provider calls. Every destination must be fresh. A fresh run without that option makes new paid calls and yields a separate replicate.
