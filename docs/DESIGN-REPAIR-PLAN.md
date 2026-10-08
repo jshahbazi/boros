@@ -57,7 +57,7 @@ Cache ingested stores by projection hash so iteration reruns only selection. Lex
 
 Exit: R1 and R2 for the current `v1/16` default on the development cohort and the fourteen-history regression set, with budget-feasibility labels and the cohort manifest hash. This becomes the baseline every retrieval change is compared against.
 
-Status, October 8, 2026: done; see [the harness record](RETRIEVAL-HARNESS.md). Development cohort R2: hybrid 50/90, lexical 60/90; all 90 cases budget-feasible. R1 equals R2 in every arm because token fitting removed no evidence at v1/16, so a packing change alone cannot raise R2 until the candidate window widens; the measured losses are in the query and ranking that steps 1, 2 and 4 address. Semantic fusion currently costs ten cases against lexical alone, which is the comparison step 4 must decide. The `check.py` recall floor remains open.
+Status, October 8, 2026: done; see [the harness record](RETRIEVAL-HARNESS.md). Development cohort R2: hybrid 50/90, lexical 60/90; all 90 cases budget-feasible. R1 equals R2 in every arm because token fitting removed no evidence at v1/16, so a packing change alone cannot raise R2 until the candidate window widens; the measured losses are in the query and ranking that steps 1, 2 and 4 address. Semantic fusion currently costs ten cases against lexical alone, which is the comparison step 4 must decide. The `check.py` recall floor is in place (`scripts/retrieval_floor.py`): it runs the regression cohort and fails on any drop in case- or turn-level R1 or R2 per arm, or a changed manifest or denominator, and skips visibly when the pinned dataset or tokenizer is absent. It adds about 60 to 75 seconds with a warm cache.
 
 ### P2 Retrieval repair
 
@@ -111,7 +111,7 @@ Only after P6: authority lifecycle, deletion and restore fencing, service and MC
 
 ## Testing changes
 
-- Add the P1 harness to `scripts/check.py` with a recall floor set from the last accepted result. `check.py` runs without a model server, so the floor uses R1 at the declared depth, or R2 only if P1 pins an offline tokenizer. A build that lowers recall fails the check, in the same way a broken ledger does today.
+- Add the P1 harness to `scripts/check.py` with a recall floor set from the last accepted result. `check.py` runs without a model server, so the floor uses R1 at the declared depth, or R2 only if P1 pins an offline tokenizer. A build that lowers recall fails the check, in the same way a broken ledger does today. Done October 8, 2026 for the regression cohort, using R1 and R2 because P1 pins the tokenizer. Raise the floor with `retrieval_floor.py --update` when an accepted retrieval change improves it; the script refuses to lower it without `--allow-lower`.
 - Move `*Checks.swift` out of the shipped binary into a separate test executable sharing the sources. The product bundle should not carry 7,500 lines of fixtures.
 - Report in STATUS.md one table of the six gate numbers with cohort size, replicates, judge error rate and source capture hash. Retire check-count headlines.
 - Require every quality document to state which stage it measures. A delivered-turn number is not an answer number, and an accepted-answer number without a judge error rate is a model opinion.
