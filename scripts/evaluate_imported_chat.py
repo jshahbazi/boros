@@ -370,6 +370,11 @@ def compile_harness(scratch: Path):
     strategy = "Sources/Boros/ContextRetrievalStrategy.swift"
     if (ROOT / strategy).exists():
         relatives.append(strategy)
+    # ChatContextPreparation references the P2 step 4 evaluation-only search
+    # selection; the imported-chat protocols never select it.
+    global_semantic = "Sources/Boros/GlobalSemanticSearch.swift"
+    if (ROOT / global_semantic).exists():
+        relatives.append(global_semantic)
     hashes = {}
     captured = scratch / "source"
     for relative in relatives:

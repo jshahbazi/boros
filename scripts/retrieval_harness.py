@@ -48,7 +48,10 @@ INGESTION_SOURCES = ("MemoryStore.swift", "SemanticIndex.swift", "BackgroundInde
     "BackgroundIndexWorker.swift", "BackgroundIndexJournal.swift", "EventSourceTime.swift", "SourceTimeSchema.swift",
     "EpisodeAccountingJournal.swift", "ContextComponentJournal.swift", "AuthoritySchemaFive.swift",
     "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "AuthoritySchemaNine.swift")
-ARMS = ("recent_only", "lexical", "hybrid")
+# P2 step 4 arms (docs/P2-SEMANTIC-DECISION.md): hybrid strategy with every
+# eligible chunk searched, under the shipped fusion or lexical-first fill.
+GLOBAL_ARMS = ("global_hybrid", "global_fill")
+ARMS = ("recent_only", "lexical", "hybrid") + GLOBAL_ARMS
 PRIMARY_ARM = "hybrid"
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
@@ -518,6 +521,34 @@ def summarize(rows):
     return summary
 
 
+def diagnostic(attempt):
+    """Content-free per-arm detail for the P2 step 4 diagnosis: ranked candidate
+    identities and byte ranges, delivered ranges, primary order, expansion
+    decisions and semantic paths and ranks."""
+    if not attempt or not attempt.get("preparation_completed"):
+        return None
+    return {"candidates": [[item.get("event_id"), item.get("offset"), item.get("bytes")] for item in attempt.get("candidates", [])],
+            "evidence": [[item["event_id"], item["offset"], item["bytes"]] for item in attempt.get("evidence", [])],
+            "semantic": attempt.get("semantic_diagnostics")}
+
+
+def global_semantic_summary(rows):
+    """Latency and population of the explicitly selected global search arms."""
+    result = {}
+    for arm in GLOBAL_ARMS:
+        audits = [((row.get("diagnostics") or {}).get(arm) or {}).get("semantic") or {} for row in rows]
+        audits = [item.get("global_semantic") for item in audits if isinstance(item, dict) and item.get("global_semantic")]
+        timing = {name: [a["milliseconds"][name] for a in audits] for name in ("lexical", "encode", "vector_scan", "vector_loop", "fuse", "read", "total")}
+        vectors = [a["eligible_vector_rows"] for a in audits]
+        result[arm] = {"searches": len(audits), "eligible_vector_rows_p50": percentile(vectors, 0.5),
+                       "eligible_vector_rows_max": max(vectors) if vectors else None,
+                       "vector_bytes_scanned_max": max((a["vector_bytes_scanned"] for a in audits), default=None),
+                       "milliseconds": {name: {"p50": percentile(values, 0.5), "p95": percentile(values, 0.95),
+                                               "max": max(values) if values else None} for name, values in timing.items()},
+                       "parameters_sha256": sorted({a["parameters_sha256"] for a in audits})}
+    return result
+
+
 def known_miss_rows(rows):
     result = {}
     for row in rows:
@@ -578,7 +609,8 @@ def run(args):
                 "semantic": cache.get("semantic"),
                 "runner_started": any(item.get("runner_started") for item in attempts.values())
                     or any(item.get("runner_started") for item in ((control or {}).get("attempts") or [])),
-                "arms": {arm: score_attempt(attempts.get(arm), case) for arm in ARMS}})
+                "arms": {arm: score_attempt(attempts.get(arm), case) for arm in ARMS},
+                "diagnostics": {arm: diagnostic(attempts.get(arm)) for arm in ARMS if arm != "recent_only"}})
         parity = endpoint.parity(args.live_tokenizer)
     finally:
         endpoint.stop()
@@ -592,7 +624,9 @@ def run(args):
             | {"system_sha256": digest(configuration["system"].encode())},
         "component_policy": "ContextComponentPolicy.currentSelectedQwen (v1/16)",
         "arms": {"recent_only": "recent_only strategy", "lexical": "hybrid strategy without a semantic index",
-                 "hybrid": "hybrid strategy with the history's semantic index, as ordinary Send"},
+                 "hybrid": "hybrid strategy with the history's semantic index, as ordinary Send",
+                 "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
+                 "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)"},
         "definitions": {
             "r1": f"every annotated positive turn is delivered, in recent context, or among the first {DECLARED_CANDIDATE_DEPTH} ranked candidates traced before span and token limits",
             "r2": "every annotated positive turn is delivered whole (union of delivered byte ranges covers the source) after component token fitting and admission",
@@ -602,6 +636,7 @@ def run(args):
         "endpoint_counters": endpoint.counters,
         "implementation": implementation,
         "summary": summary, "known_misses": known_miss_rows(rows),
+        "global_semantic": global_semantic_summary(rows),
         "semantic_index": {"histories": len(semantic),
             "construction_failures": sum(bool(item.get("failure")) for item in semantic),
             "paused": sum(item.get("pause_reason") not in (None,) for item in semantic if "pause_reason" in item),

@@ -85,6 +85,7 @@ enum SemanticChecks {
         checks.merge(try asynchronousChecks(store: store!)) { _, new in new }
         checks.merge(try nativeAdapterChecks()) { _, new in new }
         checks.merge(try meteredSearchChecks(store: store!)) { _, new in new }
+        checks.merge(try GlobalSemanticSearchChecks.run()) { _, new in new }
         return checks
     }
 
