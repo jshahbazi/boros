@@ -70,13 +70,41 @@ class PilotChecks(unittest.TestCase):
     def test_reserve_fits_declared_context(self):
         self.assertEqual(pilot.CONFIG["foreground_input_tokens"] + pilot.CONFIG["foreground_output_reserve"], 32768)
 
+    @staticmethod
+    def vertex_reply(**updates):
+        value = {"type": "message", "role": "assistant", "model": pilot.vertex.MODEL, "stop_reason": "end_turn",
+                 "content": [{"type": "text", "text": "public answer"}], "usage": {"input_tokens": 5, "output_tokens": 3}}
+        value.update(updates)
+        return pilot.canonical(value)
+
     def test_response_model_mismatch(self):
+        self.assertEqual(pilot.parse_response(self.vertex_reply(), 1024)[0], "public answer")
         with self.assertRaises(pilot.Error):
-            pilot.parse_response(pilot.canonical({"model": "wrong", "status": "completed"}), 1024)
+            pilot.parse_response(self.vertex_reply(model="wrong"), 1024)
 
     def test_unknown_usage_is_not_completed_output(self):
         with self.assertRaises(pilot.Error):
-            pilot.parse_response(pilot.canonical({"model": pilot.client.OPENAI_MODEL, "status": "completed", "error": None}), 1024)
+            pilot.parse_response(self.vertex_reply(usage=None), 1024)
+
+    def test_visible_output_limit_is_enforced(self):
+        with self.assertRaises(pilot.Error):
+            pilot.parse_response(self.vertex_reply(usage={"input_tokens": 5, "output_tokens": 1025}), 1024)
+
+    def test_api_uses_pinned_vertex_endpoints_and_never_captures_the_token(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            calls = []
+            def http(url, payload, token):
+                calls.append((url, token))
+                return pilot.canonical({"input_tokens": 7}) if url == pilot.vertex.count_url() else self.vertex_reply(
+                    usage={"input_tokens": 7, "output_tokens": 3})
+            api = pilot.API(output, {}, tokens=lambda: "synthetic-token", http_fn=http)
+            api.frozen = lambda: None
+            text, usage = api.call([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], "public")
+            self.assertEqual((text, usage["input_tokens"]), ("public answer", 7))
+            self.assertEqual([url for url, _ in calls], [pilot.vertex.count_url(), pilot.vertex.generation_url()])
+            for path in output.iterdir():
+                self.assertNotIn("synthetic-token", path.read_text())
 
     def test_json_private_files_no_clobber(self):
         with tempfile.TemporaryDirectory() as root:

@@ -3,6 +3,8 @@
 
 No production remote adapter or native selection change is enabled. Output is
 metadata only. Original records and all model traffic remain in ignored files.
+Remote calls use Claude Opus on Vertex AI in the llm-train project with
+Application Default Credentials; no API key is read.
 """
 from __future__ import annotations
 
@@ -22,13 +24,14 @@ import local_longmemeval_qa as qa
 import longmemeval_cases as original
 import orientation_zoom as memory
 import orientation_zoom_judging as judging
+import vertex_anthropic as vertex
 
-VERSION = "orientation-zoom-pilot-v1"
+VERSION = "orientation-zoom-pilot-v2"
 DOMAIN = "boros-orientation-zoom-development-v1"
 ARMS = ("lexical_exchange", "inspection", "orientation_inspection")
 SLOTS = ("abstention",) * 5 + tuple(t for t in qa.CASE_TYPES[:6] for _ in range(4)) + ("multi-session",)
 CASE_IDS = tuple("0ddfec37_abs,29f2956b_abs,6aeb4375_abs,80ec1f4f_abs,ba358f49_abs,e493bb7c,184da446,0f05491a,9ea5eabc,8979f9ec,gpt4_ab202e7f,gpt4_59c863d7,5a7937c8,ceb54acb,f523d9fe,41275add,7a8d0b71,6b7dfb22,75832dbd,0edc2aef,1c0ddc50,ccb36322,36580ce8,577d4d32,f8c5f88b,gpt4_f420262d,2ebe6c90,gpt4_fa19884d,c8090214,6cb6f249".split(","))
-CONFIG = {"model": client.OPENAI_MODEL, "reasoning_effort": "low", "maximum_tool_actions": 2,
+CONFIG = {"model": vertex.MODEL, "remote": vertex.configuration(), "maximum_tool_actions": 2,
           "recent_tokens": 8000, "evidence_tokens": 12000, "orientation_tokens": 8000,
           "foreground_input_tokens": 24576, "foreground_output_reserve": 8192,
           "visible_answer_tokens": 1024, "summary_input_tokens": 262000,
@@ -38,7 +41,8 @@ CONFIG = {"model": client.OPENAI_MODEL, "reasoning_effort": "low", "maximum_tool
           "added_memory_p95_target_seconds": 0.5, "added_episode_p95_target_ratio": 0.1}
 DEPENDENCIES = ("evaluate_orientation_zoom.py", "orientation_zoom.py", "orientation_zoom_judging.py",
                 "evaluate_answerer_controls.py", "longmemeval_independent_cases.py", "local_longmemeval_qa.py",
-                "longmemeval_cases.py", "evaluate_longmemeval.py", "evaluate_answers.py", "evaluation_fixtures.py", "import_chat.py")
+                "longmemeval_cases.py", "evaluate_longmemeval.py", "evaluate_answers.py", "evaluation_fixtures.py", "import_chat.py",
+                "vertex_anthropic.py")
 Error = client.DiagnosticError
 require = client.require
 canonical = client.canonical
@@ -115,26 +119,17 @@ def prepare(source, output):
 
 
 def parse_response(raw, visible_limit):
-    value = client.strict_json(raw)
-    require(value.get("model") == client.OPENAI_MODEL and value.get("status") == "completed"
-            and value.get("error") is None, "model_or_completion_invalid")
-    usage = client.parse_usage("openai", value)
-    parts = []
-    for item in value.get("output", []):
-        if item.get("type") == "reasoning":
-            continue
-        require(item.get("type") == "message" and item.get("role") == "assistant" and item.get("status") == "completed", "output_invalid")
-        for part in item.get("content", []):
-            require(part.get("type") == "output_text" and isinstance(part.get("text"), str), "refusal_or_output_invalid")
-            parts.append(part["text"])
-    text = "\n".join(parts)
-    require(bool(text.strip()) and usage["nonreasoning_output_upper_bound"] <= visible_limit, "visible_output_invalid")
+    text, usage = vertex.parse_response(raw)
+    require(usage["nonreasoning_output_upper_bound"] <= visible_limit, "visible_output_invalid")
     return text, usage
 
 
 class API:
-    def __init__(self, output, key, declaration, protocol=None):
-        self.output, self.key, self.declaration = output, key, declaration
+    """Vertex AI requests with private captures. Access tokens are never captured."""
+    def __init__(self, output, declaration, protocol=None, *, tokens=None, http_fn=None):
+        self.output, self.declaration = output, declaration
+        self.tokens = tokens or vertex.AccessTokens()
+        self.http = http_fn or vertex.post
         self.lock = threading.Lock()
         self.operations, self.counts = {}, {}
         self.generation_calls = self.http_calls = 0
@@ -157,10 +152,10 @@ class API:
             if kind == "generation":
                 require(self.generation_calls < CONFIG["maximum_generation_calls"] and
                         self.reserved_input + reserved_input <= CONFIG["maximum_observed_input_tokens"] and
-                        self.reserved_output + payload["max_output_tokens"] <= CONFIG["maximum_observed_output_tokens"], "generation_budget_exhausted")
+                        self.reserved_output + payload["max_tokens"] <= CONFIG["maximum_observed_output_tokens"], "generation_budget_exhausted")
                 self.generation_calls += 1
                 self.reserved_input += reserved_input
-                self.reserved_output += payload["max_output_tokens"]
+                self.reserved_output += payload["max_tokens"]
             self.http_calls += 1
             self.operations[name] = {"name": name, "kind": kind, "prepared": True, "dispatched": False, "received": False}
         client.private_write(self.output / (name + "-request.json"), canonical(payload))
@@ -168,20 +163,22 @@ class API:
         operation["request_sha256"] = digest(canonical(payload))
         start = time.monotonic()
         try:
-            endpoint = "https://api.openai.com/v1/responses" + ("/input_tokens" if kind == "count" else "")
+            endpoint = vertex.count_url() if kind == "count" else vertex.generation_url()
+            token = self.tokens()
             operation["dispatched"] = True
-            raw = client.http(endpoint, payload, self.key)
+            raw = self.http(endpoint, payload, token)
+            require(token.encode() not in raw, "credential_echo_refused")
             client.private_write(self.output / (name + "-response.json"), raw)
             operation.update(received=True, response_sha256=digest(raw))
             if kind == "generation":
                 try:
-                    usage = client.parse_usage("openai", client.strict_json(raw))
+                    usage = vertex.parse_usage(client.strict_json(raw))
                     operation["usage"] = usage
                     with self.lock:
                         self.observed_input += usage["input_tokens"]
                         self.observed_output += usage["output_tokens"]
                         self.reserved_input += usage["input_tokens"] - reserved_input
-                        self.reserved_output += usage["output_tokens"] - payload["max_output_tokens"]
+                        self.reserved_output += usage["output_tokens"] - payload["max_tokens"]
                 except Error:
                     operation["usage_unknown"] = True
             self.frozen()
@@ -197,15 +194,13 @@ class API:
             private_json(self.output / (name + "-operation.json"), operation)
 
     def count(self, messages, name):
-        body = {"model": client.OPENAI_MODEL, "input": messages}
+        body = vertex.count_payload(messages)
         identity = digest(canonical(body))
         with self.lock:
             known = self.counts.get(identity)
         if known is not None:
             return known
-        value = client.strict_json(self.request(name + "-count", "count", body))
-        result = value.get("input_tokens")
-        require(value.get("object") == "response.input_tokens" and type(result) is int and result > 0, "count_invalid")
+        result = vertex.parse_count(self.request(name + "-count", "count", body))
         with self.lock:
             self.counts[identity] = result
         return result
@@ -214,8 +209,7 @@ class API:
         count = self.count(messages, name)
         limit = CONFIG["summary_input_tokens"] if summary else CONFIG["foreground_input_tokens"]
         require(count <= limit, "input_budget_exceeded")
-        payload = client.payload_for("openai", messages)
-        payload["max_output_tokens"] = CONFIG["summary_output_reserve"] if summary else CONFIG["foreground_output_reserve"]
+        payload = vertex.payload(messages, CONFIG["summary_output_reserve"] if summary else CONFIG["foreground_output_reserve"])
         text, usage = parse_response(self.request(name, "generation", payload, reserved_input=count), 16384 if summary else 1024)
         require(usage["input_tokens"] == count, "input_count_mismatch")
         return text, usage
@@ -410,7 +404,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--api-key-file", type=Path)
     parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
@@ -421,12 +414,7 @@ def main():
     print(json.dumps({"prepared": 30, "declared_attempts": 90, "declaration_sha256": digest(canonical(declaration))}), flush=True)
     if not args.execute:
         return
-    require(args.api_key_file is not None, "credential_missing")
-    key = args.api_key_file.read_text().strip()
-    if key.startswith("OPENAI_API_KEY="):
-        key = key.split("=", 1)[1].strip().strip("\"'")
-    require(bool(key) and "\n" not in key and "\r" not in key, "credential_invalid")
-    api = API(args.output, key, declaration, args.protocol)
+    api = API(args.output, declaration, args.protocol)
     cases = client.strict_json((args.output / "inputs.json").read_bytes())["cases"]
     scorers = {r["question_id"]: r for r in client.strict_json((args.output / "scorer.json").read_bytes())["cases"]}
     results = []

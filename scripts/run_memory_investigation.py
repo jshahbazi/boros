@@ -2,6 +2,8 @@
 """Prepare a private single-case investigation; provider execution is explicit.
 
 Import and the default CLI mode do not read credentials or call a provider.
+Execution uses Claude Opus on Vertex AI in the llm-train project with
+Application Default Credentials; no API key is read.
 There is no cohort selection, scoring, answer reference or label input. Existing
 experiment captures are never reused or altered by this runner.
 """
@@ -18,11 +20,10 @@ import time
 
 import evaluate_answerer_controls as client
 import orientation_zoom as originals
+import vertex_anthropic as vertex
 
-VERSION = "memory-investigation-runner-v1"
-MODEL = "gpt-6.1-sol"
-INPUT_RATE_MICROUSD = 2
-OUTPUT_RATE_MICROUSD = 10
+VERSION = "memory-investigation-runner-v2"
+MODEL = vertex.MODEL
 MAXIMUM_INPUT_BYTES = 64 * 1024 * 1024
 MAXIMUM_REQUEST_BYTES = 2 * 1024 * 1024
 MAXIMUM_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -30,7 +31,8 @@ MAXIMUM_PROVIDER_ADMISSION_SECONDS = 300
 STAGE_BOUNDS = {"plan": 1024, "extract": 2048, "answer": 1024}
 PLAN_STAGE = re.compile(r"plan_([0-9]{1,2})\Z")
 DEPENDENCIES = ("run_memory_investigation.py", "memory_investigation.py",
-                "history_navigation.py", "evaluate_answerer_controls.py", "orientation_zoom.py")
+                "history_navigation.py", "evaluate_answerer_controls.py", "orientation_zoom.py",
+                "vertex_anthropic.py")
 SAFE_CODE = re.compile(r"[a-z][a-z0-9_]{0,95}\Z")
 Error = client.DiagnosticError
 require = client.require
@@ -137,8 +139,12 @@ def create_output(output):
     return output
 
 
-def prepare(input_path, output, maximum_cost_usd=None):
-    """Freeze originals and implementation and render a private offline map."""
+def prepare(input_path, output, maximum_cost_usd=None, pricing=None):
+    """Freeze originals and implementation and render a private offline map.
+
+    `pricing` is a vertex.Pricing with rates declared for this run; the code
+    assumes no price. It is required only for execution.
+    """
     from history_navigation import NavigationHistory
     from memory_investigation import InvestigationLimits
 
@@ -170,21 +176,17 @@ def prepare(input_path, output, maximum_cost_usd=None):
                     ("input-original.json", "case.json", "navigation-preview.json", "identity-manifest.json")}
     frozen_files.update({"source-capture/" + name: expected for name, expected in pins.items()})
     declaration = {
-        "version": VERSION, "model": MODEL, "reasoning_effort": "low",
+        "version": VERSION, "model": MODEL, "remote": vertex.configuration(),
         "input_path": str(input_path), "input_sha256": client.digest(raw),
         "dependencies": pins, "frozen_files": frozen_files, "limits": limits,
         "maximum_cost_microusd": cap,
         "maximum_provider_admission_seconds": MAXIMUM_PROVIDER_ADMISSION_SECONDS,
         "in_flight_transport_timeout_seconds": 120,
-        "preflight_maximum_reserved_cost_usd": usd(
-            limits["reserved_input_tokens"] * INPUT_RATE_MICROUSD
-            + limits["reserved_output_tokens"] * OUTPUT_RATE_MICROUSD),
+        "preflight_maximum_reserved_cost_usd": usd(pricing.microusd(
+            limits["reserved_input_tokens"], limits["reserved_output_tokens"])) if pricing else None,
         "preflight_is_upper_bound_not_actual_price": True,
         "spending_cap_may_terminate_before_answer": True,
-        "pricing": {"input_microusd_per_token": INPUT_RATE_MICROUSD,
-                    "output_microusd_per_token": OUTPUT_RATE_MICROUSD,
-                    "cached_input_discount_applied": False,
-                    "full_output_reserve_includes_reasoning": True},
+        "pricing": pricing.declaration() if pricing else None,
         "execution_default": False, "has_scoring_inputs": False,
         "counts": {"source_records": len(case["sources"]),
                    "source_sessions": len({row["session_index"] for row in case["sources"]})},
@@ -216,48 +218,30 @@ def verify_prepared(output, declaration):
 
 
 def parse_response(raw, expected_input, maximum_output, visible_output):
-    """Accept only complete, bounded Sol replies with a complete usage receipt."""
+    """Accept only complete, bounded Opus replies with a complete usage receipt."""
     require(type(raw) is bytes and len(raw) <= MAXIMUM_RESPONSE_BYTES, "response_bound_exceeded")
-    value = client.strict_json(raw)
-    require(isinstance(value, dict) and value.get("model") == MODEL
-            and value.get("status") == "completed" and value.get("error") is None,
-            "model_or_completion_invalid")
-    usage = client.parse_usage("openai", value)
+    content, usage = vertex.parse_response(raw)
     require(usage["input_tokens"] == expected_input, "generation_count_mismatch")
     require(usage["output_tokens"] <= maximum_output
             and usage["nonreasoning_output_upper_bound"] <= visible_output,
             "stage_output_bound_exceeded")
-    output = value.get("output")
-    require(isinstance(output, list), "output_invalid")
-    parts = []
-    for item in output:
-        require(isinstance(item, dict), "output_invalid")
-        if item.get("type") == "reasoning":
-            continue
-        require(item.get("type") == "message" and item.get("role") == "assistant"
-                and item.get("status") == "completed" and isinstance(item.get("content"), list),
-                "output_invalid")
-        for part in item["content"]:
-            require(isinstance(part, dict) and part.get("type") == "output_text"
-                    and isinstance(part.get("text"), str), "refusal_or_output_invalid")
-            parts.append(part["text"])
-    content = "\n".join(parts)
-    require(bool(content.strip()), "empty_output")
     require(len(content.encode()) <= visible_output * 32, "stage_output_byte_bound_exceeded")
     canonical(content)
     return content, usage
 
 
-class OpenAIProvider:
-    """Serial provider with immutable captures and irreversible call fences.
+class VertexProvider:
+    """Serial Vertex AI provider with immutable captures and irreversible call fences.
 
     Reservations never decrease, including after observed usage. This bounds
-    both successful requests and unknown charged work at conservative rates.
-    The transport and frozen check are injectable only for synthetic tests.
+    both successful requests and unknown charged work at the declared rates.
+    The transport, token source and frozen check are injectable only for
+    synthetic tests. Access tokens are never captured.
     """
-    def __init__(self, output, key, declaration, *, http_fn=None, frozen_check=None, clock_fn=None):
-        self.output, self.key, self.declaration = Path(output), key, declaration
-        self.http = http_fn or client.http
+    def __init__(self, output, declaration, *, http_fn=None, token_fn=None, frozen_check=None, clock_fn=None):
+        self.output, self.declaration = Path(output), declaration
+        self.http = http_fn or vertex.post
+        self.tokens = token_fn or vertex.AccessTokens()
         self.check_frozen = frozen_check or (lambda: verify_prepared(self.output, self.declaration))
         self.clock = clock_fn or time.monotonic
         self.started = self.clock()
@@ -266,8 +250,10 @@ class OpenAIProvider:
                 "admission_deadline_invalid")
         self.maximum_cost = declaration.get("maximum_cost_microusd")
         require(type(self.maximum_cost) is int and self.maximum_cost > 0, "cost_cap_required")
-        require(isinstance(key, str) and key and "\n" not in key and "\r" not in key,
-                "credential_format_invalid")
+        pricing = declaration.get("pricing")
+        require(isinstance(pricing, dict), "pricing_required")
+        self.pricing = vertex.Pricing(pricing.get("input_usd_per_million_tokens"),
+                                      pricing.get("output_usd_per_million_tokens"))
         self.limits = declaration["limits"]
         self.fenced = False
         self.failure = None
@@ -308,8 +294,8 @@ class OpenAIProvider:
             self.count_calls += 1
         else:
             require(self.generation_calls < self._limit("max_generation_calls", 9), "generation_budget_exhausted")
-            output = payload["max_output_tokens"]
-            reserve = expected_input * INPUT_RATE_MICROUSD + output * OUTPUT_RATE_MICROUSD
+            output = payload["max_tokens"]
+            reserve = self.pricing.microusd(expected_input, output)
             require(self.reserved_cost + reserve <= self.maximum_cost, "cost_cap_exhausted")
             require(self.reserved_input + expected_input <= self._limit("reserved_input_tokens", 150000)
                     and self.reserved_output + output <= self._limit("reserved_output_tokens", 16384),
@@ -326,20 +312,20 @@ class OpenAIProvider:
                      "request_sha256": client.digest(raw_request), "dispatched": False,
                      "response_received": False, "usage_status": "unknown" if kind == "generation" else "not_applicable",
                      "reserved_input_tokens": expected_input,
-                     "reserved_output_tokens": payload.get("max_output_tokens", 0),
-                     "reserved_cost_microusd": expected_input * INPUT_RATE_MICROUSD
-                         + payload.get("max_output_tokens", 0) * OUTPUT_RATE_MICROUSD}
+                     "reserved_output_tokens": payload.get("max_tokens", 0),
+                     "reserved_cost_microusd": self.pricing.microusd(expected_input, payload.get("max_tokens", 0))}
         self.operations.append(operation)
         started = time.monotonic()
         try:
             private_write(self.output / (name + "-request.json"), raw_request)
             # Capture itself may have taken time; pin again immediately before dispatch.
             self._check()
-            endpoint = "https://api.openai.com/v1/responses" + ("/input_tokens" if kind == "count" else "")
+            endpoint = vertex.count_url() if kind == "count" else vertex.generation_url()
+            token = self.tokens()
             operation["dispatched"] = True
-            raw = self.http(endpoint, payload, self.key)
+            raw = self.http(endpoint, payload, token)
             require(type(raw) is bytes and len(raw) <= MAXIMUM_RESPONSE_BYTES, "response_bound_exceeded")
-            require(self.key.encode() not in raw, "credential_echo_refused")
+            require(token.encode() not in raw, "credential_echo_refused")
             operation["response_received"] = True
             operation["response_sha256"] = client.digest(raw)
             private_write(self.output / (name + "-response.json"), raw)
@@ -347,20 +333,17 @@ class OpenAIProvider:
             if kind == "generation":
                 # Preserve independently valid usage even if stage parsing fails.
                 # The full admission reservation remains held either way.
-                usage = client.parse_usage("openai", client.strict_json(raw))
+                usage = vertex.parse_usage(client.strict_json(raw))
                 operation.update(usage_status="observed_provider_receipt", usage=usage)
                 self.observed_input += usage["input_tokens"]
                 self.observed_output += usage["output_tokens"]
-                self.observed_cost += usage["input_tokens"] * INPUT_RATE_MICROUSD + usage["output_tokens"] * OUTPUT_RATE_MICROUSD
+                self.observed_cost += self.pricing.microusd(usage["input_tokens"], usage["output_tokens"])
                 stage_kind = "plan" if PLAN_STAGE.fullmatch(stage) else stage
-                content, _ = parse_response(raw, expected_input, payload["max_output_tokens"], STAGE_BOUNDS[stage_kind])
+                content, _ = parse_response(raw, expected_input, payload["max_tokens"], STAGE_BOUNDS[stage_kind])
                 return content
-            value = client.strict_json(raw)
-            require(isinstance(value, dict) and value.get("object") == "response.input_tokens"
-                    and type(value.get("input_tokens")) is int and value["input_tokens"] > 0,
-                    "count_invalid")
-            operation["input_tokens"] = value["input_tokens"]
-            return value["input_tokens"]
+            counted = vertex.parse_count(raw)
+            operation["input_tokens"] = counted
+            return counted
         except (Exception, KeyboardInterrupt) as error:
             self.fenced, self.failure = True, safe_failure(error, "request_failed")
             operation["failure"] = self.failure
@@ -379,8 +362,7 @@ class OpenAIProvider:
             self._messages(messages)
             identity = client.digest(canonical(messages))
             if identity not in self.count_cache:
-                payload = {"model": MODEL, "input": messages}
-                self.count_cache[identity] = self._dispatch("count", payload)
+                self.count_cache[identity] = self._dispatch("count", vertex.count_payload(messages))
             return self.count_cache[identity]
         except (Exception, KeyboardInterrupt) as error:
             self.fenced, self.failure = True, safe_failure(error, "count_failed")
@@ -397,9 +379,7 @@ class OpenAIProvider:
                     and 0 < max_output_tokens <= STAGE_BOUNDS[stage_kind], "stage_output_limit_invalid")
             count = self.count(messages)
             require(count <= self._limit("input_tokens", 24576), "input_token_budget_exceeded")
-            payload = client.payload_for("openai", messages)
-            require(payload["model"] == MODEL, "model_identity_mismatch")
-            payload["max_output_tokens"] = max_output_tokens
+            payload = vertex.payload(messages, max_output_tokens)
             return self._dispatch("generation", payload, expected_input=count, stage=stage)
         except (Exception, KeyboardInterrupt) as error:
             self.fenced, self.failure = True, safe_failure(error, "generation_failed")
@@ -421,28 +401,20 @@ class OpenAIProvider:
                     and op["usage_status"] == "unknown" for op in self.operations)}
 
 
-def read_key(path):
-    raw = read_bytes(path, 16_384, "credential_read_failed")
-    try:
-        key = raw.decode().strip()
-    except UnicodeError:
-        raise Error("credential_format_invalid") from None
-    if key.startswith("OPENAI_API_KEY="):
-        key = key.split("=", 1)[1].strip().strip("\"'")
-    require(key and "\n" not in key and "\r" not in key, "credential_format_invalid")
-    return key
-
-
 def run(args):
+    pricing = None
     if args.execute:
-        require(args.api_key_file and args.max_cost_usd is not None, "execution_arguments_required")
+        require(args.max_cost_usd is not None and args.input_usd_per_mtok is not None
+                and args.output_usd_per_mtok is not None, "execution_arguments_required")
         cost_cap_microusd(args.max_cost_usd)
+        pricing = vertex.Pricing(args.input_usd_per_mtok, args.output_usd_per_mtok)
     else:
-        require(args.api_key_file is None, "credential_argument_requires_execution")
-    declaration = prepare(args.input, args.output, args.max_cost_usd)
+        require(args.input_usd_per_mtok is None and args.output_usd_per_mtok is None,
+                "pricing_arguments_require_execution")
+    declaration = prepare(args.input, args.output, args.max_cost_usd, pricing)
     if not args.execute:
         return {"status": "prepared", "provider_calls": 0, **declaration["counts"]}
-    # There is intentionally no default credential path or automatic continuation.
+    # There is intentionally no automatic continuation.
     from history_navigation import NavigationHistory
     from memory_investigation import InvestigationLimits, MemoryInvestigation
     output = Path(args.output)
@@ -451,8 +423,7 @@ def run(args):
     history = None
     try:
         verify_prepared(output, declaration)
-        key = read_key(args.api_key_file)
-        provider = OpenAIProvider(output, key, declaration)
+        provider = VertexProvider(output, declaration)
         case = validate_case(read_bytes(output / "case.json", MAXIMUM_INPUT_BYTES, "frozen_read_failed"))
         history = NavigationHistory(case["sources"])
         engine = MemoryInvestigation(history, provider, limits=InvestigationLimits(), cancelled=provider.cancelled)
@@ -489,8 +460,9 @@ def main(argv=None):
     parser.add_argument("--input", required=True, help="single case with question, question_date and sources only")
     parser.add_argument("--output", required=True, help="fresh absolute directory under .build/evaluation")
     parser.add_argument("--execute", action="store_true", help="explicit provider execution; requires authorization and spending cap")
-    parser.add_argument("--api-key-file", help="credential file read only with --execute")
     parser.add_argument("--max-cost-usd", help="positive finite hard cap; required with --execute")
+    parser.add_argument("--input-usd-per-mtok", help="declared Vertex input price per million tokens; required with --execute")
+    parser.add_argument("--output-usd-per-mtok", help="declared Vertex output price per million tokens; required with --execute")
     args = parser.parse_args(argv)
     try:
         summary = run(args)

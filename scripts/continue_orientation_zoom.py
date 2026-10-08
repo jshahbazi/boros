@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Continue the exact frozen pilot in a new private directory, without retries.
 
-Preparation is offline by default. --execute enables missing requests;
---fill-unreceived additionally authorizes one fresh dispatch for a prior request
-that has no authenticated successful response. Original failures remain intact.
-Only content-free metadata is printed. Captured responses are not fresh latency.
+Preparation is offline. Live continuation is retired: the parent run used the
+retired OpenAI route, and finishing it on another model would mix two models
+in one result. --execute and --fill-unreceived are refused; new remote runs
+use Vertex AI through a fresh declaration. The replay and reporting code stays
+for offline verification of the parent captures. Only content-free metadata
+is printed. Captured responses are not fresh latency.
 """
 from __future__ import annotations
 
 import argparse
 from collections import Counter, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import copy
 import hashlib
 import importlib.abc
@@ -408,59 +409,18 @@ def main():
     parser.add_argument("--parent", type=Path, default=Path(__file__).resolve().parents[1] / ".build/evaluation/orientation-zoom-v1-20261006")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--protocol", type=Path, required=True)
-    parser.add_argument("--api-key-file", type=Path)
-    parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--fill-unreceived", action="store_true")
+    parser.add_argument("--execute", action="store_true", help="refused: live continuation is retired")
+    parser.add_argument("--fill-unreceived", action="store_true", help="refused: live continuation is retired")
     args = parser.parse_args()
+    require(not args.execute and not args.fill_unreceived, "live_continuation_retired")
     sys.dont_write_bytecode = True
     parent_report, declaration = validate_parent(args.parent)
     pilot = load_execution(args.parent, declaration)
     replay = ReplayIndex(args.parent, parent_report, pilot)
     provenance = prepare(args.parent, args.output, args.protocol, parent_report, declaration,
-        execute=args.execute, fill_unreceived=args.fill_unreceived)
+        execute=False, fill_unreceived=False)
     print(json.dumps({"prepared": True, "parent_report_sha256": provenance["parent_report_sha256"],
         "controller_sha256": provenance["controller_sha256"], "declared_attempts": 90}), flush=True)
-    if not args.execute:
-        return
-    require(args.api_key_file is not None, "credential_missing")
-    try:
-        key = read_file(args.api_key_file).decode().strip()
-    except UnicodeError:
-        raise ContinuationError("credential_invalid") from None
-    if key.startswith("OPENAI_API_KEY="):
-        key = key.split("=", 1)[1].strip().strip("\"'")
-    require(bool(key) and "\n" not in key and "\r" not in key, "credential_invalid")
-    api = ReplayAPI(pilot, args.output, key, declaration, args.output / "qa-protocol.py", replay,
-        fill_unreceived=args.fill_unreceived, controller_path=Path(__file__), controller_sha=provenance["controller_sha256"],
-        provenance=provenance)
-    cases = strict_json(read_file(args.output / "inputs.json"))["cases"]
-    scorers = {row["question_id"]: row for row in strict_json(read_file(args.output / "scorer.json"))["cases"]}
-    require(tuple(case["question_id"] for case in cases) == pilot.CASE_IDS and set(scorers) == set(pilot.CASE_IDS), "case_inventory_invalid")
-    results = []
-    with ThreadPoolExecutor(max_workers=1) as workers:
-        futures = {workers.submit(pilot.execute_case, api, case, scorers[case["question_id"]], args.output / "qa-protocol.py"): case["question_id"] for case in cases}
-        for future in as_completed(futures):
-            qid = futures[future]
-            try:
-                results.extend(future.result())
-            except Exception:
-                for arm in pilot.ARMS:
-                    path = args.output / f"{qid}-{arm}-result.json"
-                    if path.exists():
-                        results.append(strict_json(read_file(path)))
-                        continue
-                    row = {"case": qid, "arm": arm, "operational_complete": False, "qa": "unknown", "sufficiency": "unknown",
-                        "support": "unknown", "citation_support": "unknown", "tool_actions": 0, "failure": "case_failed_or_dispatch_unavailable",
-                        "positive_turns": len(scorers[qid]["positive_ids"]), "gold_sessions": len(scorers[qid]["gold_sessions"]),
-                        "full_positive_turns_delivered": 0, "gold_sessions_delivered": 0}
-                    private_write(path, canonical(row)); results.append(row)
-    api.frozen()
-    results.sort(key=lambda row: (pilot.CASE_IDS.index(row["case"]), pilot.ARMS.index(row["arm"])))
-    require(len(results) == 90, "terminal_denominator_invalid")
-    final = terminal_report(api, results, parent_report, provenance)
-    private_write(args.output / "report.json", canonical(final))
-    print(json.dumps({"terminal": True, "summaries": final["summaries"], "new_http_calls": api.http_calls,
-        "new_generation_calls": api.generation_calls, "dispatch_halted": api.halted, "report_sha256": digest(canonical(final))}), flush=True)
 
 
 if __name__ == "__main__":

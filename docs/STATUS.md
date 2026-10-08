@@ -1,6 +1,6 @@
 # Boros status and roadmap
 
-Updated October 8, 2026. Development branch: `main`, which consolidates `codex/boros-foundation` (including the bounded neighborhood experiment) and `codex/native-investigation`. The consolidated build passes 4,271 `scripts/check.py` checks. Ordinary selection defaults to `v1/16`; the neighborhood policy and native investigation remain explicit opt-in experiments. The [design repair plan](DESIGN-REPAIR-PLAN.md) sets the next work order.
+Updated October 8, 2026. Development branch: `main`, which consolidates `codex/boros-foundation` (including the bounded neighborhood experiment) and `codex/native-investigation`. The consolidated build passes 4,281 `scripts/check.py` checks. Ordinary selection defaults to `v1/16`; the neighborhood policy and native investigation remain explicit opt-in experiments. The [design repair plan](DESIGN-REPAIR-PLAN.md) sets the next work order.
 
 **Retrieval baseline (P1), October 8, 2026:** the [offline retrieval harness](RETRIEVAL-HARNESS.md) runs the ordinary selected-Qwen path with pinned offline token counts and no generation. On the 90 answerable development questions, ordinary hybrid delivers every annotated turn in 50 cases (R2 55.6 percent) and lexical alone in 60 (66.7 percent), against the plan's 90 percent interim target. Every miss is a ranking miss: token fitting removed no evidence. The harness reproduces the earlier fourteen-history result (hybrid 14/18 turns, 8/12 cases) without model calls.
 

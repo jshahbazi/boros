@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthetic, offline runner contracts. No real keys, histories or HTTP calls."""
+"""Synthetic, offline runner contracts. No real tokens, histories or HTTP calls."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +18,13 @@ import run_memory_investigation as runner
 from memory_investigation import InvestigationLimits
 
 
-SYNTHETIC_KEY = "synthetic-credential-for-tests"
+SYNTHETIC_TOKEN = "synthetic-access-token-for-tests"
+PRICING = {"input_usd_per_million_tokens": "2", "output_usd_per_million_tokens": "10"}
+COUNT = runner.canonical({"input_tokens": 20})
+
+
+def is_count(endpoint):
+    return endpoint == runner.vertex.count_url()
 
 
 def case():
@@ -33,14 +39,10 @@ def case():
                  "content": "Cedar is recorded.", "source_time": None}]}
 
 
-def reply(text="synthetic reply", input_tokens=20, output_tokens=3, reasoning_tokens=0, **updates):
-    value = {"model": runner.MODEL, "status": "completed", "error": None,
-             "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens,
-                       "total_tokens": input_tokens + output_tokens,
-                       "input_tokens_details": {"cached_tokens": 0},
-                       "output_tokens_details": {"reasoning_tokens": reasoning_tokens}},
-             "output": [{"type": "message", "role": "assistant", "status": "completed",
-                         "content": [{"type": "output_text", "text": text}]}]}
+def reply(text="synthetic reply", input_tokens=20, output_tokens=3, **updates):
+    value = {"id": "msg_synthetic", "type": "message", "role": "assistant", "model": runner.MODEL,
+             "content": [{"type": "text", "text": text}], "stop_reason": "end_turn", "stop_sequence": None,
+             "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}}
     value.update(updates)
     return runner.canonical(value)
 
@@ -59,22 +61,22 @@ class RunnerContracts(unittest.TestCase):
         self.temp.cleanup()
 
     def prepare(self):
-        return runner.prepare(self.input, self.output, "0.10")
+        return runner.prepare(self.input, self.output, "0.10", runner.vertex.Pricing("2", "10"))
 
     def provider(self, cap="0.10", transport=None, limits=None, frozen=None, clock=None):
         self.output.mkdir(mode=0o700, parents=True)
-        declaration = {"maximum_cost_microusd": runner.cost_cap_microusd(cap),
+        declaration = {"maximum_cost_microusd": runner.cost_cap_microusd(cap), "pricing": PRICING,
                        "limits": limits or asdict(InvestigationLimits())}
         calls = []
         def http(endpoint, payload, key):
             calls.append((endpoint, payload, key))
             if transport:
                 return transport(endpoint, payload, key)
-            if endpoint.endswith("input_tokens"):
-                return runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
+            if is_count(endpoint):
+                return COUNT
             return reply()
-        provider = runner.OpenAIProvider(self.output, SYNTHETIC_KEY, declaration,
-                                         http_fn=http, frozen_check=frozen or (lambda: None), clock_fn=clock)
+        provider = runner.VertexProvider(self.output, declaration, http_fn=http, token_fn=lambda: SYNTHETIC_TOKEN,
+                                         frozen_check=frozen or (lambda: None), clock_fn=clock)
         return provider, calls
 
     def messages(self):
@@ -91,9 +93,9 @@ class RunnerContracts(unittest.TestCase):
 
     def test_offline_default_never_reads_credentials_or_calls_http(self):
         args = argparse.Namespace(input=str(self.input), output=str(self.output), execute=False,
-                                  api_key_file=None, max_cost_usd=None)
-        with mock.patch.object(runner, "read_key", side_effect=AssertionError("credential read")), \
-             mock.patch.object(runner.client, "http", side_effect=AssertionError("HTTP call")):
+                                  max_cost_usd=None, input_usd_per_mtok=None, output_usd_per_mtok=None)
+        with mock.patch.object(runner.vertex, "AccessTokens", side_effect=AssertionError("credential read")), \
+             mock.patch.object(runner.vertex, "post", side_effect=AssertionError("HTTP call")):
             result = runner.run(args)
         self.assertEqual(result, {"status": "prepared", "provider_calls": 0, "source_records": 2, "source_sessions": 1})
         declaration = runner.client.strict_json((self.output / "declaration.json").read_bytes())
@@ -122,7 +124,7 @@ class RunnerContracts(unittest.TestCase):
         declaration = self.prepare()
         self.input.write_bytes(runner.canonical({**case(), "question": "Changed synthetic question."}))
         calls = []
-        provider = runner.OpenAIProvider(self.output, SYNTHETIC_KEY, declaration,
+        provider = runner.VertexProvider(self.output, declaration, token_fn=lambda: SYNTHETIC_TOKEN,
                                          http_fn=lambda *args: calls.append(args))
         with self.assertRaisesRegex(runner.Error, "input_changed"):
             provider.count(self.messages())
@@ -132,7 +134,7 @@ class RunnerContracts(unittest.TestCase):
         declaration = self.prepare()
         (self.output / "navigation-preview.json").write_bytes(b"{}")
         calls = []
-        provider = runner.OpenAIProvider(self.output, SYNTHETIC_KEY, declaration,
+        provider = runner.VertexProvider(self.output, declaration, token_fn=lambda: SYNTHETIC_TOKEN,
                                          http_fn=lambda *args: calls.append(args))
         with self.assertRaisesRegex(runner.Error, "frozen_artifact_changed"):
             provider.count(self.messages())
@@ -141,7 +143,7 @@ class RunnerContracts(unittest.TestCase):
     def test_implementation_pin_tampering_fences_before_http(self):
         declaration = self.prepare()
         calls = []
-        provider = runner.OpenAIProvider(self.output, SYNTHETIC_KEY, declaration,
+        provider = runner.VertexProvider(self.output, declaration, token_fn=lambda: SYNTHETIC_TOKEN,
                                          http_fn=lambda *args: calls.append(args))
         with mock.patch.object(runner, "dependency_pins", return_value={}):
             with self.assertRaisesRegex(runner.Error, "implementation_changed"):
@@ -164,25 +166,24 @@ class RunnerContracts(unittest.TestCase):
         with self.assertRaises(runner.Error):
             runner.validate_case(b'{"question":NaN,"question_date":"date","sources":[]}')
 
-    def test_execution_requires_cap_and_explicit_key_path_before_preparation(self):
-        for cap, key in ((None, "synthetic-path"), ("0.01", None)):
+    def test_execution_requires_cap_and_declared_prices_before_preparation(self):
+        for cap, rate_in, rate_out in ((None, "2", "10"), ("0.01", None, "10"), ("0.01", "2", None)):
             args = argparse.Namespace(input=str(self.input), output=str(self.output), execute=True,
-                                      api_key_file=key, max_cost_usd=cap)
-            with mock.patch.object(runner, "read_key", side_effect=AssertionError("read")):
+                                      max_cost_usd=cap, input_usd_per_mtok=rate_in, output_usd_per_mtok=rate_out)
+            with mock.patch.object(runner.vertex, "AccessTokens", side_effect=AssertionError("read")):
                 with self.assertRaisesRegex(runner.Error, "execution_arguments_required"):
                     runner.run(args)
             self.assertFalse(self.output.exists())
 
     def test_synthetic_execution_failure_retains_engine_accounting(self):
         args = argparse.Namespace(input=str(self.input), output=str(self.output), execute=True,
-                                  api_key_file="synthetic-never-read", max_cost_usd="0.50")
+                                  max_cost_usd="0.50", input_usd_per_mtok="2", output_usd_per_mtok="10")
         calls = []
         def http(endpoint, payload, key):
             calls.append(endpoint)
-            return (runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
-                    if endpoint.endswith("input_tokens") else reply(text="synthetic invalid plan"))
-        with mock.patch.object(runner, "read_key", return_value=SYNTHETIC_KEY), \
-             mock.patch.object(runner.client, "http", side_effect=http):
+            return COUNT if is_count(endpoint) else reply(text="synthetic invalid plan")
+        with mock.patch.object(runner.vertex, "AccessTokens", return_value=lambda: SYNTHETIC_TOKEN), \
+             mock.patch.object(runner.vertex, "post", side_effect=http):
             result = runner.run(args)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["generation_calls"], 1)
@@ -192,17 +193,17 @@ class RunnerContracts(unittest.TestCase):
         self.assertEqual(receipt["generation_calls"], 1)
         self.assertEqual(receipt["reserved_output_tokens"], 1024)
         self.assertFalse((self.output / "result.json").exists())
-        self.assertEqual(sum(not url.endswith("input_tokens") for url in calls), 1)
+        self.assertEqual(sum(not is_count(url) for url in calls), 1)
 
     def test_synthetic_execution_preserves_transport_failure_code(self):
         args = argparse.Namespace(input=str(self.input), output=str(self.output), execute=True,
-                                  api_key_file="synthetic-never-read", max_cost_usd="0.50")
+                                  max_cost_usd="0.50", input_usd_per_mtok="2", output_usd_per_mtok="10")
         def http(endpoint, payload, key):
-            if endpoint.endswith("input_tokens"):
-                return runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
+            if is_count(endpoint):
+                return COUNT
             raise runner.Error("http_status_429")
-        with mock.patch.object(runner, "read_key", return_value=SYNTHETIC_KEY), \
-             mock.patch.object(runner.client, "http", side_effect=http):
+        with mock.patch.object(runner.vertex, "AccessTokens", return_value=lambda: SYNTHETIC_TOKEN), \
+             mock.patch.object(runner.vertex, "post", side_effect=http):
             result = runner.run(args)
         self.assertEqual(result["failure"], "provider_generation_failed")
         self.assertEqual(result["provider_failure"], "http_status_429")
@@ -212,7 +213,7 @@ class RunnerContracts(unittest.TestCase):
     def test_permission_tampering_fences_before_http(self):
         declaration = self.prepare()
         (self.output / "case.json").chmod(0o644)
-        provider = runner.OpenAIProvider(self.output, SYNTHETIC_KEY, declaration,
+        provider = runner.VertexProvider(self.output, declaration, token_fn=lambda: SYNTHETIC_TOKEN,
                                          http_fn=lambda *args: self.fail("unexpected HTTP"))
         with self.assertRaisesRegex(runner.Error, "frozen_permissions_changed"):
             provider.count(self.messages())
@@ -223,10 +224,9 @@ class RunnerContracts(unittest.TestCase):
 
     def test_known_usage_is_retained_when_stage_parser_fails(self):
         def transport(endpoint, payload, key):
-            return (runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
-                    if endpoint.endswith("input_tokens") else reply(status="incomplete"))
+            return COUNT if is_count(endpoint) else reply(stop_reason="max_tokens")
         provider, calls = self.provider(transport=transport)
-        with self.assertRaisesRegex(runner.Error, "model_or_completion_invalid"):
+        with self.assertRaisesRegex(runner.Error, "response_incomplete"):
             provider.generate("answer", self.messages(), 8)
         self.assertEqual(provider.reserved_cost, 120)
         self.assertEqual(provider.observed_cost, 70)
@@ -262,8 +262,8 @@ class RunnerContracts(unittest.TestCase):
 
     def test_429_retains_unknown_reservation_and_fences(self):
         def transport(endpoint, payload, key):
-            if endpoint.endswith("input_tokens"):
-                return runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
+            if is_count(endpoint):
+                return COUNT
             raise runner.Error("http_status_429")
         provider, calls = self.provider(transport=transport)
         with self.assertRaisesRegex(runner.Error, "http_status_429"):
@@ -275,8 +275,8 @@ class RunnerContracts(unittest.TestCase):
 
     def test_interrupt_during_generation_retains_reservation_and_fences(self):
         def transport(endpoint, payload, key):
-            if endpoint.endswith("input_tokens"):
-                return runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
+            if is_count(endpoint):
+                return COUNT
             raise KeyboardInterrupt()
         provider, calls = self.provider(transport=transport)
         with self.assertRaisesRegex(runner.Error, "investigation_cancelled"):
@@ -297,8 +297,8 @@ class RunnerContracts(unittest.TestCase):
     def test_admission_deadline_after_reply_retains_reservation(self):
         now = [0]
         def transport(endpoint, payload, key):
-            if endpoint.endswith("input_tokens"):
-                return runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
+            if is_count(endpoint):
+                return COUNT
             now[0] = 301
             return reply()
         provider, calls = self.provider(transport=transport, clock=lambda: now[0])
@@ -310,8 +310,7 @@ class RunnerContracts(unittest.TestCase):
 
     def test_missing_usage_retains_unknown_reservation(self):
         def transport(endpoint, payload, key):
-            return (runner.canonical({"object": "response.input_tokens", "input_tokens": 20})
-                    if endpoint.endswith("input_tokens") else reply(usage=None))
+            return COUNT if is_count(endpoint) else reply(usage=None)
         provider, calls = self.provider(transport=transport)
         with self.assertRaisesRegex(runner.Error, "usage_missing"):
             provider.generate("answer", self.messages(), 8)
@@ -376,17 +375,20 @@ class RunnerContracts(unittest.TestCase):
             self.assertEqual(calls, [])
             shutil.rmtree(self.output)
 
-    def test_parser_full_output_includes_reasoning(self):
+    def test_parser_output_bound_counts_all_output(self):
         with self.assertRaisesRegex(runner.Error, "stage_output_bound_exceeded"):
-            runner.parse_response(reply(output_tokens=9, reasoning_tokens=8), 20, 8, 8)
-        content, usage = runner.parse_response(reply(output_tokens=8, reasoning_tokens=7), 20, 8, 8)
+            runner.parse_response(reply(output_tokens=9), 20, 8, 8)
+        content, usage = runner.parse_response(reply(output_tokens=8), 20, 8, 8)
         self.assertEqual(content, "synthetic reply")
-        self.assertEqual(usage["reasoning_tokens"], 7)
+        self.assertEqual(usage["reasoning_tokens"], 0)
+        thinking = reply(content=[{"type": "thinking", "thinking": "synthetic"}, {"type": "text", "text": "visible"}])
+        self.assertEqual(runner.parse_response(thinking, 20, 8, 8)[0], "visible")
 
     def test_parser_rejects_unbounded_or_incomplete_outputs(self):
-        variants = [reply(input_tokens=21), reply(model="different-model"), reply(status="incomplete"),
-                    reply(output=[]), reply(output=[None]), reply(output=[{"type": "message", "role": "assistant",
-                    "status": "completed", "content": [{"type": "refusal", "text": "synthetic"}]}])]
+        variants = [reply(input_tokens=21), reply(model="different-model"), reply(stop_reason="max_tokens"),
+                    reply(stop_reason="refusal"), reply(content=[]), reply(content=[None]),
+                    reply(content=[{"type": "tool_use", "id": "synthetic", "name": "x", "input": {}}]),
+                    reply(type="error"), reply(role="user")]
         for raw in variants:
             with self.subTest(raw_hash=runner.client.digest(raw)), self.assertRaises(runner.Error):
                 runner.parse_response(raw, 20, 8, 8)
@@ -397,11 +399,11 @@ class RunnerContracts(unittest.TestCase):
         summary = json.dumps(provider.receipt())
         self.assertNotIn("Synthetic data", summary)
         self.assertNotIn("synthetic reply", summary)
-        self.assertNotIn(SYNTHETIC_KEY, summary)
+        self.assertNotIn(SYNTHETIC_TOKEN, summary)
         for receipt in self.output.glob("*-receipt.json"):
             self.assertNotIn("Synthetic data", receipt.read_text())
             self.assertNotIn("synthetic reply", receipt.read_text())
-            self.assertNotIn(SYNTHETIC_KEY, receipt.read_text())
+            self.assertNotIn(SYNTHETIC_TOKEN, receipt.read_text())
         stream = io.StringIO()
         with mock.patch.object(runner, "run", side_effect=ValueError("private source fragment")), \
              contextlib.redirect_stdout(stream):
@@ -410,8 +412,7 @@ class RunnerContracts(unittest.TestCase):
 
     def test_credential_echo_is_never_captured(self):
         def transport(endpoint, payload, key):
-            return runner.canonical({"object": "response.input_tokens", "input_tokens": 20,
-                                     "echo": SYNTHETIC_KEY})
+            return runner.canonical({"input_tokens": 20, "echo": SYNTHETIC_TOKEN})
         provider, calls = self.provider(transport=transport)
         with self.assertRaisesRegex(runner.Error, "credential_echo_refused"):
             provider.count(self.messages())

@@ -49,7 +49,7 @@ python3 scripts/run_memory_investigation.py \
 
 Output must be a new directory below ignored `.build/evaluation`, with private directory/file permissions and no overwrite. Source/dependency pins are checked before every provider dispatch. Original identities, questions, records, intermediate output, final answers and traffic stay private. Public stdout contains counts and fixed error codes.
 
-The optional standalone adapter was written for the retired OpenAI Sol route. Future authorized remote execution uses [Vertex AI in the `llm-train` project](DESIGN-REPAIR-PLAN.md#remote-evaluation-provider) and needs a Vertex adapter, `--execute` and `--max-cost-usd`. It provides no remote adapter in the native application.
+Remote execution uses Claude Opus on [Vertex AI in the `llm-train` project](DESIGN-REPAIR-PLAN.md#remote-evaluation-provider) with Application Default Credentials; no key is read. Authorized execution requires `--execute`, `--max-cost-usd`, and the declared Vertex prices `--input-usd-per-mtok` and `--output-usd-per-mtok`, which are recorded in the declaration; the code assumes no price. It provides no remote adapter in the native application.
 
 | Limit | Default |
 |---|---:|

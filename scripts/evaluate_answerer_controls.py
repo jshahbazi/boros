@@ -3,6 +3,8 @@
 
 This bypasses Boros retrieval and episode accounting. It never enables remote
 processing in the application. Only metadata is emitted to stdout/reports.
+The remote arm is Claude Opus on Vertex AI in the llm-train project, using
+Application Default Credentials; no API key is read.
 """
 from __future__ import annotations
 
@@ -16,9 +18,13 @@ import time
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-VERSION = "answerer-controls-v2"
-PARENT_REPORT_SHA = "36d0abf8f22a35fb637748f2210f03d64cfe88d2c098cf4b45c19c0d56fc9d46"
-OPENAI_MODEL = "gpt-6.1-sol"
+import vertex_anthropic as vertex
+
+VERSION = "answerer-controls-v3"
+REMOTE = "vertex"
+REMOTE_MODEL = vertex.MODEL
+OUTPUT_CAP = 1024
+PROVIDERS = ("qwen", REMOTE)
 QWEN_MODEL = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
 CASE_IDS = ("51c32626", "1b9b7252", "4baee567", "54026fce", "gpt4_70e84552")
 SOURCE_SHA = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
@@ -44,8 +50,9 @@ JUDGE_SYSTEM = ("Assess a candidate answer against the question, reference and s
                 "Use unknown when the evidence does not let you decide. Do not include explanations.")
 
 
-class DiagnosticError(Exception):
-    pass
+# One error class across this runner and the Vertex adapter; both carry
+# fixed reason codes only.
+DiagnosticError = vertex.VertexError
 
 
 def require(condition, code):
@@ -87,27 +94,23 @@ class NoRedirect(HTTPRedirectHandler):
         raise DiagnosticError("redirect_refused")
 
 
-def http(url, payload, key=None):
-    require(url in ("https://api.openai.com/v1/responses", "https://api.openai.com/v1/responses/input_tokens",
-                    "http://127.0.0.1:11234/v1/chat/completions", "http://127.0.0.1:11234/tokenize"),
+def http(url, payload):
+    """Loopback Qwen only. Remote requests go through vertex.post."""
+    require(url in ("http://127.0.0.1:11234/v1/chat/completions", "http://127.0.0.1:11234/tokenize"),
             "endpoint_refused")
-    require((key is not None) == url.startswith("https://api.openai.com/"), "credential_destination_invalid")
     headers = {"Content-Type": "application/json"}
-    if key is not None:
-        headers["Authorization"] = "Bearer " + key
     opener = build_opener(ProxyHandler({}), NoRedirect())
     try:
         with opener.open(Request(url, data=canonical(payload), headers=headers), timeout=120) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
     except HTTPError as error:
-        # Error messages can echo credential fragments. Retain status only.
+        # Error bodies can quote request material. Retain status only.
         raise DiagnosticError("http_status_" + str(error.code)) from None
     except DiagnosticError:
         raise
     except Exception:
         raise DiagnosticError("transport_failed") from None
     require(len(raw) <= 2 * 1024 * 1024, "response_bound_exceeded")
-    require(key is None or key.encode() not in raw, "credential_echo_refused")
     return raw
 
 
@@ -140,9 +143,8 @@ def messages_for(case):
 
 
 def payload_for(provider, messages, judge=False):
-    if provider == "openai":
-        return {"model": OPENAI_MODEL, "input": messages, "store": False, "truncation": "disabled",
-                "reasoning": {"effort": "low"}, "max_output_tokens": 8192}
+    if provider == REMOTE:
+        return vertex.payload(messages, OUTPUT_CAP)
     require(provider == "qwen", "provider_invalid")
     return {"model": QWEN_MODEL, "messages": messages, "stream": False, "max_tokens": 1024,
             "temperature": 0, "seed": 104202601, "enable_thinking": False,
@@ -150,19 +152,15 @@ def payload_for(provider, messages, judge=False):
 
 
 def parse_usage(provider, value):
+    if provider == REMOTE:
+        return vertex.parse_usage(value)
     require(isinstance(value, dict), "response_shape_invalid")
     usage = value.get("usage")
     require(isinstance(usage, dict), "usage_missing")
-    if provider == "openai":
-        prompt, completion, total = (usage.get(key) for key in ("input_tokens", "output_tokens", "total_tokens"))
-        output_details, input_details = usage.get("output_tokens_details"), usage.get("input_tokens_details", {})
-        require(isinstance(output_details, dict) and isinstance(input_details, dict), "usage_invalid")
-        reasoning, cached = output_details.get("reasoning_tokens"), input_details.get("cached_tokens", 0)
-    else:
-        prompt, completion, total = (usage.get(key) for key in ("prompt_tokens", "completion_tokens", "total_tokens"))
-        output_details, input_details = usage.get("completion_tokens_details", {}), usage.get("prompt_tokens_details", {})
-        require(isinstance(output_details, dict) and isinstance(input_details, dict), "usage_invalid")
-        reasoning, cached = output_details.get("reasoning_tokens", 0), input_details.get("cached_tokens", 0)
+    prompt, completion, total = (usage.get(key) for key in ("prompt_tokens", "completion_tokens", "total_tokens"))
+    output_details, input_details = usage.get("completion_tokens_details", {}), usage.get("prompt_tokens_details", {})
+    require(isinstance(output_details, dict) and isinstance(input_details, dict), "usage_invalid")
+    reasoning, cached = output_details.get("reasoning_tokens", 0), input_details.get("cached_tokens", 0)
     require(all(type(n) is int and n >= 0 for n in (prompt, completion, total, reasoning, cached))
             and prompt + completion == total and reasoning <= completion and cached <= prompt, "usage_invalid")
     return {"input_tokens": prompt, "output_tokens": completion, "reasoning_tokens": reasoning,
@@ -170,27 +168,13 @@ def parse_usage(provider, value):
 
 
 def parse_response(provider, raw):
-    value = strict_json(raw)
-    require(isinstance(value, dict), "response_shape_invalid")
-    require(value.get("model") == (OPENAI_MODEL if provider == "openai" else QWEN_MODEL), "model_identity_mismatch")
-    usage = parse_usage(provider, value)
-    if provider == "openai":
-        require(value.get("status") == "completed" and value.get("error") is None, "response_incomplete")
-        require(isinstance(value.get("output"), list), "output_invalid")
-        text = []
-        for item in value["output"]:
-            require(isinstance(item, dict), "output_item_invalid")
-            if item.get("type") == "reasoning":
-                continue
-            require(item.get("type") == "message" and item.get("role") == "assistant"
-                    and item.get("status") == "completed", "output_item_invalid")
-            require(isinstance(item.get("content"), list), "output_invalid")
-            for part in item["content"]:
-                require(isinstance(part, dict), "output_invalid")
-                require(part.get("type") == "output_text" and isinstance(part.get("text"), str), "refusal_or_output_invalid")
-                text.append(part["text"])
-        content = "\n".join(text)
+    if provider == REMOTE:
+        content, usage = vertex.parse_response(raw)
     else:
+        value = strict_json(raw)
+        require(isinstance(value, dict), "response_shape_invalid")
+        require(value.get("model") == QWEN_MODEL, "model_identity_mismatch")
+        usage = parse_usage(provider, value)
         choices = value.get("choices")
         require(isinstance(choices, list) and len(choices) == 1, "choices_invalid")
         choice = choices[0]
@@ -202,7 +186,7 @@ def parse_response(provider, raw):
         require(message.get("role") == "assistant" and isinstance(message.get("content"), str), "output_invalid")
         content = message["content"]
     require(content.strip(), "empty_answer")
-    require(usage["nonreasoning_output_upper_bound"] <= 1024, "nonreasoning_output_bound_exceeded")
+    require(usage["nonreasoning_output_upper_bound"] <= OUTPUT_CAP, "nonreasoning_output_bound_exceeded")
     return content, usage
 
 
@@ -227,73 +211,36 @@ def run(args):
     private_root = Path(__file__).resolve().parents[1] / ".build" / "evaluation"
     require(out.is_absolute() and not out.is_symlink() and out.resolve().is_relative_to(private_root.resolve()), "output_path_refused")
     out.mkdir(mode=0o700)
-    key = Path(args.api_key_file).read_text().strip()
-    if key.startswith("OPENAI_API_KEY="):
-        key = key.split("=", 1)[1].strip().strip("\"'")
-    require(key and "\n" not in key and "\r" not in key, "credential_format_invalid")
+    tokens = vertex.AccessTokens()
     script_raw = Path(__file__).read_bytes()
-    parent_path = Path(args.reuse_openai_run) if args.reuse_openai_run else None
-    parent_raw = (parent_path / "report.json").read_bytes() if parent_path else None
-    parent = None
-    if parent_path is not None:
-        require(digest(parent_raw) == PARENT_REPORT_SHA, "parent_report_pin_mismatch")
-        parent = strict_json(parent_raw)
-        require(isinstance(parent, dict) and bool(parent), "parent_report_shape_invalid")
+    adapter_raw = Path(vertex.__file__).read_bytes()
     def frozen():
         require(inputs_path.read_bytes() == inputs_raw and scorer_path.read_bytes() == scorer_raw
-                and Path(__file__).read_bytes() == script_raw, "inputs_or_runner_changed")
-        if parent_path:
-            require((parent_path / "report.json").read_bytes() == parent_raw, "parent_report_changed")
+                and Path(__file__).read_bytes() == script_raw and Path(vertex.__file__).read_bytes() == adapter_raw,
+                "inputs_or_runner_changed")
     rows, operations = [], {}
     messages = {case["question_id"]: messages_for(case) for case in cases}
-    if parent:
-        old_declaration_raw = (parent_path / "declaration.json").read_bytes()
-        old_declaration = strict_json(old_declaration_raw)
-        require(digest(old_declaration_raw) == parent["declaration_sha256"]
-                and old_declaration["inputs_sha256"] == INPUT_SHA and old_declaration["scorer_sha256"] == SCORER_SHA
-                and old_declaration["prompt_sha256"] == {k: digest(canonical(v)) for k, v in messages.items()}
-                and old_declaration["judge_system_sha256"] == digest(JUDGE_SYSTEM.encode())
-                and old_declaration["openai_total_output_cap"] == 8192 and old_declaration["openai_reasoning"] == "low",
-                "reuse_contract_mismatch")
-        for operation in parent["operation_receipts"]:
-            if operation["provider"] != "openai":
-                continue
-            name = operation["name"]
-            for suffix, field in (("request", "request_sha256"), ("response", "response_sha256")):
-                raw = (parent_path / (name + "-" + suffix + ".json")).read_bytes()
-                require(digest(raw) == operation[field], "reuse_capture_changed")
-                private_write(out / (name + "-" + suffix + ".json"), raw)
-        require(sum(r["provider"] == "openai" and r["status"] == "completed" for r in parent["answers"]) == 5
-                and sum(r["answer_provider"] == "openai" and r["judge_provider"] == "openai"
-                        and r["status"] == "completed" for r in parent["judgments"]) == 5, "reuse_inventory_invalid")
-        for case in CASE_IDS:
-            row = next(r for r in parent["answers"] if r["case"] == case and r["provider"] == "openai")
-            answer = (parent_path / (case + "-openai-answer.txt")).read_bytes()
-            require(len(answer) == row["answer_bytes"] and digest(answer) == row["answer_sha256"], "reuse_answer_changed")
-            decoded, usage = parse_response("openai", (out / (case + "-openai-answer-response.json")).read_bytes())
-            require(decoded.encode() == answer and usage == row["usage"], "reuse_answer_mismatch")
-            private_write(out / (case + "-openai-answer.txt"), answer)
     declaration = {"version": VERSION, "cases": list(CASE_IDS), "answer_attempts": 10,
-                   "judge_attempts": 20, "maximum_count_requests": 25 if parent else 40,
-                   "maximum_http_attempts": 45 if parent else 70, "new_generation_attempts": 20 if parent else 30,
-                   "reused_answers": 5 if parent else 0, "reused_judgments": 5 if parent else 0,
-                   "parent_report_sha256": PARENT_REPORT_SHA if parent else None,
+                   "judge_attempts": 20, "maximum_count_requests": 40,
+                   "maximum_http_attempts": 70, "new_generation_attempts": 30,
                    "replicates": 1, "retries": 0,
                    "inputs_sha256": INPUT_SHA, "scorer_sha256": SCORER_SHA, "source_sha256": SOURCE_SHA,
-                   "runner_sha256": digest(script_raw), "prompt_sha256": {k: digest(canonical(v)) for k, v in messages.items()},
-                   "provider_case_order": {provider: list(CASE_IDS) for provider in ("qwen", "openai")},
+                   "runner_sha256": digest(script_raw), "remote_adapter_sha256": digest(adapter_raw),
+                   "prompt_sha256": {k: digest(canonical(v)) for k, v in messages.items()},
+                   "provider_case_order": {provider: list(CASE_IDS) for provider in PROVIDERS},
                    "cross_provider_concurrency": 2,
-                   "models": [QWEN_MODEL, OPENAI_MODEL], "openai_reasoning": "low", "openai_total_output_cap": 8192,
+                   "models": [QWEN_MODEL, REMOTE_MODEL], "remote": vertex.configuration(),
+                   "remote_output_cap": OUTPUT_CAP,
                    "qwen_output_cap": 1024, "nonreasoning_output_upper_bound_cap": 1024,
                    "evidence_cap": 12000, "whole_prompt_cap": 32768, "safety": 256,
                    "judge_system_sha256": digest(JUDGE_SYSTEM.encode()), "judge_fields": list(FIELDS),
-                   "judge_case_order": [[case, arm] for case in CASE_IDS for arm in ("qwen", "openai")],
+                   "judge_case_order": [[case, arm] for case in CASE_IDS for arm in PROVIDERS],
                    "semantic_pack_sufficiency_before_generation": "unverified", "human_judge_calibration": "unrun",
                    "native_application_path": False, "exact_previous_context_available": False,
-                   "remote_authorized_by_user": True, "openai_store": False}
+                   "remote_authorized_by_user": True}
     private_write(out / "declaration.json", canonical(declaration))
     for case in CASE_IDS:
-        for provider in ("qwen", "openai"):
+        for provider in PROVIDERS:
             path = out / (case + "-" + provider + "-answer-request.json")
             body = canonical(payload_for(provider, messages[case]))
             if path.exists():
@@ -312,7 +259,7 @@ def run(args):
                  "call_started": True, "response_received": False, "usage_status": "unknown" if kind == "generation" else "not_applicable"}
         start = time.monotonic()
         try:
-            raw = http(url, body, key if provider == "openai" else None)
+            raw = vertex.post(url, body, tokens()) if provider == REMOTE else http(url, body)
             private_write(out / (name + "-response.json"), raw)
             state.update(response_received=True, response_sha256=digest(raw), transport_status="completed")
             if kind == "generation":
@@ -334,16 +281,15 @@ def run(args):
             private_write(out / (name + "-operation.json"), canonical(state))
     def count(provider, msg, name, evidence_only=False):
         frozen()
-        if provider == "openai":
-            url, body = "https://api.openai.com/v1/responses/input_tokens", {"model": OPENAI_MODEL, "input": msg}
+        if provider == REMOTE:
+            url, body = vertex.count_url(), vertex.count_payload(msg)
         else:
             url, body = "http://127.0.0.1:11234/tokenize", {"model": QWEN_MODEL, "content": qwen_render(msg, not evidence_only)}
         raw = capture(provider, url, body, name, "count")
         value = strict_json(raw)
         require(isinstance(value, dict), "count_invalid")
-        if provider == "openai":
-            result = value.get("input_tokens")
-            require(value.get("object") == "response.input_tokens" and type(result) is int and result > 0, "count_invalid")
+        if provider == REMOTE:
+            result = vertex.parse_count(raw)
         else:
             tokens = value.get("tokens")
             require(isinstance(tokens, list) and tokens and all(type(token) is int and 0 <= token < 248320 for token in tokens), "count_invalid")
@@ -352,16 +298,11 @@ def run(args):
     def call(provider, msg, name):
         frozen()
         body = payload_for(provider, msg)
-        url = "https://api.openai.com/v1/responses" if provider == "openai" else "http://127.0.0.1:11234/v1/chat/completions"
+        url = vertex.generation_url() if provider == REMOTE else "http://127.0.0.1:11234/v1/chat/completions"
         raw = capture(provider, url, body, name, "generation")
         return parse_response(provider, raw)
     # Providers run independently; each provider's case order is fixed.
     def answers(provider):
-        if parent and provider == "openai":
-            reused = [dict(row, reused_from_report_sha256=PARENT_REPORT_SHA) for row in parent["answers"] if row["provider"] == "openai"]
-            for row in reused:
-                private_write(out / (row["case"] + "-openai-answer-result.json"), canonical(row))
-            return reused
         arm = []
         for case in CASE_IDS:
             start = time.monotonic()
@@ -370,7 +311,7 @@ def run(args):
                 evidence_count = count(provider, [messages[case][1]], case + "-" + provider + "-evidence-count", evidence_only=True)
                 full_count = count(provider, messages[case], case + "-" + provider + "-whole-count")
                 row.update(evidence_tokens=evidence_count, whole_prompt_tokens=full_count)
-                reserve = 8192 if provider == "openai" else 1024
+                reserve = OUTPUT_CAP if provider == REMOTE else 1024
                 require(evidence_count <= 12000 and full_count + reserve + 256 <= 32768, "context_budget_exceeded")
                 content, usage = call(provider, messages[case], case + "-" + provider + "-answer")
                 require(usage["input_tokens"] == full_count, "generation_count_mismatch")
@@ -390,28 +331,14 @@ def run(args):
             print(json.dumps({"phase": "answer", "case": case, "provider": provider, "status": row["status"]}), flush=True)
         return arm
     with ThreadPoolExecutor(max_workers=2) as executor:
-        jobs = [executor.submit(answers, provider) for provider in ("qwen", "openai")]
+        jobs = [executor.submit(answers, provider) for provider in PROVIDERS]
         rows = [row for job in jobs for row in job.result()]
     private_write(out / "answers-summary.json", canonical(rows))
     def judgments(judge_provider):
         result = []
         for case in CASE_IDS:
-            for answer_provider in ("qwen", "openai"):
+            for answer_provider in PROVIDERS:
                 name = case + "-" + answer_provider + "-judge-" + judge_provider
-                if parent and answer_provider == "openai" and judge_provider == "openai":
-                    prior = next(r for r in parent["judgments"] if r["case"] == case and r["answer_provider"] == "openai" and r["judge_provider"] == "openai")
-                    text, usage = parse_response("openai", (out / (name + "-response.json")).read_bytes())
-                    require(parse_judge(text) == prior["labels"] and usage == prior["usage"], "reuse_judgment_mismatch")
-                    data = {"question": next(c for c in cases if c["question_id"] == case)["question"],
-                            "question_date": next(c for c in cases if c["question_id"] == case)["question_date"],
-                            "reference": scorer_map[case]["reference"], "candidate_answer": (out / (case + "-openai-answer.txt")).read_text(),
-                            "original_records": next(c for c in cases if c["question_id"] == case)["sources"]}
-                    msg = [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": canonical(data).decode()}]
-                    require((out / (name + "-request.json")).read_bytes() == canonical(payload_for("openai", msg)), "reuse_judgment_request_mismatch")
-                    row = dict(prior, reused_from_report_sha256=PARENT_REPORT_SHA)
-                    private_write(out / (name + "-result.json"), canonical(row))
-                    result.append(row)
-                    continue
                 row = {"case": case, "answer_provider": answer_provider, "judge_provider": judge_provider, "status": "unscored"}
                 answer_row = next(r for r in rows if r["case"] == case and r["provider"] == answer_provider)
                 if answer_row["status"] == "completed":
@@ -427,7 +354,7 @@ def run(args):
                                 "original_records": next(c for c in cases if c["question_id"] == case)["sources"]}
                         msg = [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": canonical(data).decode()}]
                         full_count = count(judge_provider, msg, name + "-whole-count")
-                        reserve = 8192 if judge_provider == "openai" else 1024
+                        reserve = OUTPUT_CAP if judge_provider == REMOTE else 1024
                         require(full_count + reserve + 256 <= 32768, "judge_context_budget_exceeded")
                         judgment, usage = call(judge_provider, msg, name)
                         require(answer_path.read_bytes() == answer_raw, "answer_changed")
@@ -448,13 +375,11 @@ def run(args):
                                   "judge_provider": judge_provider, "status": row["status"]}), flush=True)
         return result
     with ThreadPoolExecutor(max_workers=2) as executor:
-        jobs = [executor.submit(judgments, provider) for provider in ("qwen", "openai")]
+        jobs = [executor.submit(judgments, provider) for provider in PROVIDERS]
         judges = [row for job in jobs for row in job.result()]
     frozen()
     report = {"version": VERSION, "declaration_sha256": digest(canonical(declaration)), "answers": rows,
               "judgments": judges, "operation_receipts": list(operations.values()), "implementation_continuity": True,
-              "parent_report_sha256": PARENT_REPORT_SHA if parent else None,
-              "parent_operation_receipts": parent["operation_receipts"] if parent else [],
               "limits": ["five_selected_known_failures_one_replicate", "oracle_selected_candidate_packs",
                          "semantic_sufficiency_is_model_judgment", "each_model_also_judges_own_answers",
                          "no_human_or_independent_judge_calibration", "different_renderers_tokenizers_and_reasoning_compute",
@@ -469,8 +394,6 @@ if __name__ == "__main__":
     parser.add_argument("--inputs", required=True)
     parser.add_argument("--scorer", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--api-key-file", required=True)
-    parser.add_argument("--reuse-openai-run", help="Reuse only the exact completed OpenAI captures from the pinned v1 attempt.")
     try:
         run(parser.parse_args())
     except DiagnosticError as error:

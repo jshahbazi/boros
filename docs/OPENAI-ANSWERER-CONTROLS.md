@@ -112,8 +112,12 @@ For the five answer calls alone, generation-operation elapsed time has a median 
 
 Sol performs better on this small diagnostic under both judges. Evidence selection remains a demonstrated problem, and clean evidence also reveals answerer and judging limitations. More retrieval hits cannot by themselves establish reliable answering. Next work should authenticate sufficient complete-exchange packs, retain disagreement cases for independent semantic calibration, and test relevance/token-aware exchange selection on fresh cases. An OpenAI production adapter, broader architecture, optional trees and further scoped-policy work remain outside this diagnostic.
 
-This diagnostic is a record. The OpenAI route is retired for evaluations; future remote answering or judging runs use [Vertex AI in the `llm-train` project](DESIGN-REPAIR-PLAN.md#remote-evaluation-provider), which needs a Vertex adapter before this runner can be reused. The synthetic contracts still run offline:
+This diagnostic is a record. The OpenAI route is retired for evaluations. The runner, now version 3, answers and judges with Claude Opus on [Vertex AI in the `llm-train` project](DESIGN-REPAIR-PLAN.md#remote-evaluation-provider) in place of Sol, so a new run is a different diagnostic, not a replicate of this one. It authenticates with Application Default Credentials and reads no key:
 
 ```sh
+python3 scripts/evaluate_answerer_controls.py \
+  --inputs /absolute/path/to/frozen/answering-inputs.json \
+  --scorer /absolute/path/to/frozen/scorer-only.json \
+  --output /absolute/path/to/boros/.build/evaluation/new-run
 python3 scripts/test_answerer_controls.py
 ```

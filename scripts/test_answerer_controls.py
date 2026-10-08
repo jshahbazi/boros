@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Portable contracts for the content-free answerer diagnostic."""
 import copy
-import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -29,24 +28,39 @@ class Contracts(unittest.TestCase):
             with self.assertRaises(a.DiagnosticError):
                 a.parse_judge(json.dumps(bad))
 
-    def test_openai_usage_bounds_reasoning_separately(self):
-        raw = {"model": a.OPENAI_MODEL, "status": "completed", "error": None,
-               "output": [{"type": "reasoning", "status": "completed"},
-                          {"type": "message", "role": "assistant", "status": "completed",
-                           "content": [{"type": "output_text", "text": "answer"}]}],
-               "usage": {"input_tokens": 10, "output_tokens": 1200, "total_tokens": 1210,
-                         "output_tokens_details": {"reasoning_tokens": 400},
-                         "input_tokens_details": {"cached_tokens": 2}}}
-        content, usage = a.parse_response("openai", json.dumps(raw).encode())
+    def vertex_reply(self, **updates):
+        value = {"id": "msg_synthetic", "type": "message", "role": "assistant", "model": a.REMOTE_MODEL,
+                 "content": [{"type": "text", "text": "answer"}], "stop_reason": "end_turn", "stop_sequence": None,
+                 "usage": {"input_tokens": 10, "output_tokens": 800,
+                           "cache_creation_input_tokens": 0, "cache_read_input_tokens": 2}}
+        value.update(updates)
+        return value
+
+    def test_vertex_response_usage_and_output_bound(self):
+        content, usage = a.parse_response(a.REMOTE, json.dumps(self.vertex_reply()).encode())
         self.assertEqual(content, "answer")
+        self.assertEqual((usage["input_tokens"], usage["cached_input_tokens"]), (12, 2))
         self.assertEqual(usage["nonreasoning_output_upper_bound"], 800)
-        for mutation in (lambda x: x["usage"].update(total_tokens=1),
-                         lambda x: x["usage"].update(output_tokens_details={"reasoning_tokens": 1300}),
-                         lambda x: x["usage"].update(input_tokens=True),
-                         lambda x: x.update(model="other")):
-            bad = copy.deepcopy(raw); mutation(bad)
+        for mutation in (lambda x: x["usage"].update(input_tokens=True),
+                         lambda x: x["usage"].update(output_tokens=a.OUTPUT_CAP + 1),
+                         lambda x: x.update(model="other"),
+                         lambda x: x.update(stop_reason="max_tokens"),
+                         lambda x: x.update(stop_reason="refusal")):
+            bad = copy.deepcopy(self.vertex_reply()); mutation(bad)
             with self.assertRaises(a.DiagnosticError):
-                a.parse_response("openai", json.dumps(bad).encode())
+                a.parse_response(a.REMOTE, json.dumps(bad).encode())
+
+    def test_vertex_payloads_extract_system_and_match_count_input(self):
+        messages = [{"role": "system", "content": "system"}, {"role": "user", "content": "evidence"},
+                    {"role": "user", "content": "question"}]
+        body = a.payload_for(a.REMOTE, messages)
+        count = a.vertex.count_payload(messages)
+        self.assertNotIn("model", body)
+        self.assertEqual(body["system"], "system")
+        self.assertEqual(body["messages"], [{"role": "user", "content": [{"type": "text", "text": "evidence"},
+                                                                         {"type": "text", "text": "question"}]}])
+        self.assertEqual(body["max_tokens"], a.OUTPUT_CAP)
+        self.assertEqual((count["system"], count["messages"], count["model"]), (body["system"], body["messages"], a.REMOTE_MODEL))
 
     def test_qwen_usage_and_incomplete_response_refused(self):
         raw = {"model": a.QWEN_MODEL, "choices": [{"finish_reason": "stop",
@@ -63,19 +77,13 @@ class Contracts(unittest.TestCase):
                 a.parse_response("qwen", json.dumps(bad).encode())
 
     def test_nested_output_and_usage_shapes_are_refused(self):
-        valid_openai = {"model": a.OPENAI_MODEL, "status": "completed", "error": None,
-                        "output": [{"type": "message", "role": "assistant", "status": "completed",
-                                    "content": [{"type": "output_text", "text": "answer"}]}],
-                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
-                                  "output_tokens_details": {"reasoning_tokens": 0},
-                                  "input_tokens_details": {"cached_tokens": 0}}}
-        for mutation in (lambda x: x["output"].append("bad"),
-                         lambda x: x["output"][0].update(content="bad"),
-                         lambda x: x["output"][0]["content"][0].update(type="refusal"),
-                         lambda x: x["usage"].update(output_tokens_details=[])):
-            bad = copy.deepcopy(valid_openai); mutation(bad)
+        for mutation in (lambda x: x["content"].append("bad"),
+                         lambda x: x.update(content="bad"),
+                         lambda x: x["content"][0].update(type="tool_use"),
+                         lambda x: x.update(usage=[])):
+            bad = copy.deepcopy(self.vertex_reply()); mutation(bad)
             with self.assertRaises(a.DiagnosticError):
-                a.parse_response("openai", json.dumps(bad).encode())
+                a.parse_response(a.REMOTE, json.dumps(bad).encode())
         valid_qwen = {"model": a.QWEN_MODEL, "choices": [{"finish_reason": "stop",
                      "message": {"role": "assistant", "content": "answer", "refusal": None}}],
                      "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
@@ -89,15 +97,11 @@ class Contracts(unittest.TestCase):
                 a.parse_response("qwen", json.dumps(bad).encode())
 
     def test_usage_parser_preserves_valid_usage_before_response_rejection(self):
-        value = {"usage": {"input_tokens": 3, "output_tokens": 1300, "total_tokens": 1303,
-                            "output_tokens_details": {"reasoning_tokens": 400},
-                            "input_tokens_details": {"cached_tokens": 1}}}
-        usage = a.parse_usage("openai", value)
-        self.assertEqual(usage["nonreasoning_output_upper_bound"], 900)
-        incomplete = {"model": a.OPENAI_MODEL, "status": "incomplete", "error": None,
-                      "output": [], **value}
+        value = self.vertex_reply(stop_reason="max_tokens")
+        usage = a.parse_usage(a.REMOTE, value)
+        self.assertEqual(usage["output_tokens"], 800)
         with self.assertRaises(a.DiagnosticError):
-            a.parse_response("openai", json.dumps(incomplete).encode())
+            a.parse_response(a.REMOTE, json.dumps(value).encode())
 
     def test_evidence_only_qwen_render_omits_generation_prefix(self):
         messages = [{"role": "system", "content": "system"}, {"role": "user", "content": "evidence"}]
@@ -127,47 +131,34 @@ class Contracts(unittest.TestCase):
         self.assertNotIn("has_answer", encoded)
         self.assertIn("synthetic-record", encoded)
 
-    def test_endpoint_and_key_preflight_happens_before_opener(self):
+    def test_endpoint_preflight_happens_before_opener(self):
         with patch.object(a, "build_opener", side_effect=AssertionError("network")) as opener:
-            for url, key in (("http://example.com/v1", None),
-                             ("https://api.openai.com/v1/responses", None),
-                             ("http://127.0.0.1:11234/v1/tokenize", "secret")):
+            for url in ("http://example.com/v1", "https://api.openai.com/v1/responses", a.vertex.generation_url(),
+                        "http://127.0.0.1:11234/v1/tokenize"):
                 with self.assertRaises(a.DiagnosticError):
-                    a.http(url, {}, key)
+                    a.http(url, {})
+            self.assertFalse(opener.called)
+        with patch.object(a.vertex, "build_opener", side_effect=AssertionError("network")) as opener:
+            for url in ("https://example.com/v1", "https://api.openai.com/v1/responses",
+                        a.vertex.generation_url().replace(a.vertex.PROJECT_ID, "other-project")):
+                with self.assertRaises(a.DiagnosticError):
+                    a.vertex.post(url, {}, "synthetic-token")
             self.assertFalse(opener.called)
 
-    def test_reuse_rejects_altered_parent_before_transport(self):
-        """A mismatched parent pin must fail before any provider opener is built."""
-        case_ids = ("synthetic-case",)
-        inputs = {"case_ids": list(case_ids), "source_sha256": "synthetic-source",
-                  "contains_reference_or_positive_labels": False,
-                  "cases": [{"question_id": case_ids[0]}]}
-        scorer = {"case_ids": list(case_ids), "cases": [{"question_id": case_ids[0]}]}
+    def test_input_pins_fail_before_credentials_or_transport(self):
         eval_root = Path(__file__).resolve().parents[1] / ".build" / "evaluation"
         eval_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=eval_root) as root_name:
             root = Path(root_name)
-            inputs_path, scorer_path, key_path = root / "inputs.json", root / "scorer.json", root / "key"
-            inputs_raw, scorer_raw = a.canonical(inputs), a.canonical(scorer)
-            inputs_path.write_bytes(inputs_raw); scorer_path.write_bytes(scorer_raw); key_path.write_text("synthetic-key")
-            old = (a.CASE_IDS, a.SOURCE_SHA, a.INPUT_SHA, a.SCORER_SHA, a.PARENT_REPORT_SHA)
-            try:
-                a.CASE_IDS = case_ids; a.SOURCE_SHA = "synthetic-source"
-                a.INPUT_SHA = hashlib.sha256(inputs_raw).hexdigest()
-                a.SCORER_SHA = hashlib.sha256(scorer_raw).hexdigest(); a.PARENT_REPORT_SHA = "0" * 64
-                with patch.object(a, "build_opener", side_effect=AssertionError("transport")) as opener:
-                    for index, report_raw in enumerate((b"{}", b"[]", b"null", b"false", b"")):
-                        parent = root / ("parent-" + str(index)); parent.mkdir()
-                        (parent / "report.json").write_bytes(report_raw)
-                        args = type("Args", (), {"inputs": str(inputs_path), "scorer": str(scorer_path),
-                            "output": str(root / ("out-" + str(index))), "api_key_file": str(key_path),
-                            "reuse_openai_run": str(parent)})()
-                        with self.assertRaisesRegex(a.DiagnosticError, "parent_report_pin_mismatch"):
-                            a.run(args)
-                self.assertFalse(opener.called)
-            finally:
-                a.CASE_IDS, a.SOURCE_SHA, a.INPUT_SHA, a.SCORER_SHA, a.PARENT_REPORT_SHA = old
-
+            inputs_path, scorer_path = root / "inputs.json", root / "scorer.json"
+            inputs_path.write_bytes(b"{}"); scorer_path.write_bytes(b"{}")
+            args = type("Args", (), {"inputs": str(inputs_path), "scorer": str(scorer_path), "output": str(root / "out")})()
+            with patch.object(a.vertex.subprocess, "run", side_effect=AssertionError("credential")) as tokens, \
+                 patch.object(a.vertex, "build_opener", side_effect=AssertionError("transport")) as opener:
+                with self.assertRaisesRegex(a.DiagnosticError, "input_pin_mismatch"):
+                    a.run(args)
+            self.assertFalse(tokens.called or opener.called)
+            self.assertFalse((root / "out").exists())
 
 if __name__ == "__main__":
     result = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(Contracts))
