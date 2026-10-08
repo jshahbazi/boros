@@ -542,7 +542,7 @@ def global_semantic_summary(rows):
         vectors = [a["eligible_vector_rows"] for a in audits]
         result[arm] = {"searches": len(audits), "eligible_vector_rows_p50": percentile(vectors, 0.5),
                        "eligible_vector_rows_max": max(vectors) if vectors else None,
-                       "vector_bytes_scanned_max": max((a["vector_bytes_scanned"] for a in audits), default=None),
+                       "vector_bytes_scanned_max": max(vectors) * 512 * 4 if vectors else None,
                        "milliseconds": {name: {"p50": percentile(values, 0.5), "p95": percentile(values, 0.95),
                                                "max": max(values) if values else None} for name, values in timing.items()},
                        "parameters_sha256": sorted({a["parameters_sha256"] for a in audits})}

@@ -49,12 +49,13 @@ def trace_ids(diagnostic):
 
 
 def semantic_paths(diagnostic, arm):
-    """Event ID -> (fused rank, paths) of the semantic stage's results."""
+    """Event ID -> (fused rank, paths) of the shipped semantic stage, replayed
+    from the hybrid attempt's sidecar manifest. Global arms keep only timing
+    and identity in their audit, so they map to an empty result here."""
     semantic = (diagnostic or {}).get("semantic") or {}
-    if arm == "hybrid":
-        results = semantic.get("shipped_results") or []
-        return {item["e"]: (position + 1, item["p"]) for position, item in enumerate(results)}
-    results = (semantic.get("global_semantic") or {}).get("results") or []
+    if arm != "hybrid":
+        return {}
+    results = semantic.get("shipped_results") or []
     return {item["e"]: (position + 1, item["p"]) for position, item in enumerate(results)}
 
 
@@ -167,19 +168,19 @@ def sidecar_events(store_root, ingestion, case):
     return events
 
 
-def displacement(rows, by_id, store_root, ingestion, arm):
-    """Which lexical primaries the fused list drops, and what takes their place.
+def displacement(rows, by_id, store_root, ingestion):
+    """Which lexical primaries the shipped fusion drops, and what takes their place.
 
-    Level "fused": the semantic stage's 16 results against lexical ranks 1-16.
-    Level "traced": primaries in the 16 traced slots after exchange expansion,
-    lexical arm against the fused arm."""
+    Level "fused": the shipped semantic stage's 16 results against lexical
+    primaries 1-16. Level "traced": lexical primaries in the 16 traced slots
+    after exchange expansion, lexical arm against hybrid arm."""
     totals = Counter()
     for row in rows:
         diagnostics = row.get("diagnostics") or {}
-        lexical, fused = diagnostics.get("lexical"), diagnostics.get(arm)
-        results = ((((fused or {}).get("semantic") or {}).get("global_semantic")) or {}).get("results")
+        lexical, fused = diagnostics.get("lexical"), diagnostics.get("hybrid")
+        results = ((fused or {}).get("semantic") or {}).get("shipped_results")
         events = sidecar_events(store_root, ingestion, by_id[row["question_id"]])
-        if not lexical or results is None or events is None:
+        if not lexical or not results or events is None or not trace_ids(fused) or not trace_ids(lexical):
             totals["skipped"] += 1
             continue
         top = primary_list(lexical)[:DEPTH]
@@ -192,9 +193,9 @@ def displacement(rows, by_id, store_root, ingestion, arm):
                 totals["fused_dropped:" + kind] += 1
         for item in results:
             role, vector = events.get(item["e"], ["unknown", 0])
-            if item.get("lr") is None:
+            if item["p"] == "semantic":
                 totals["fused_entrant:semantic_only"] += 1
-            elif item["lr"] > DEPTH:
+            elif item["e"] not in top:
                 totals["fused_entrant:lexical_rank_17_100_" + ("vector" if vector else "no_vector")] += 1
         lexical_traced = [e for e in trace_ids(lexical)[:DEPTH] if e in set(top)]
         fused_traced = set(trace_ids(fused)[:DEPTH])
@@ -228,6 +229,14 @@ def summarize_coverage(items):
 
 def same_selection(a, b):
     return bool(a) and bool(b) and a.get("candidates") == b.get("candidates") and a.get("evidence") == b.get("evidence")
+
+
+def same_evidence(a, b):
+    return bool(a) and bool(b) and sorted(map(tuple, a.get("evidence") or [])) == sorted(map(tuple, b.get("evidence") or []))
+
+
+def evidence_superset(smaller, larger):
+    return bool(smaller) and bool(larger) and set(map(tuple, smaller.get("evidence") or [])) <= set(map(tuple, larger.get("evidence") or []))
 
 
 def is_prefix(prefix, full):
@@ -266,6 +275,8 @@ def main():
                              "turns": found_turns(row, positives, arm, "lexical")})
         result["lexical_wins_over"][arm] = losses
         result["semantic_wins_over_lexical"][arm] = wins
+        if arm != "hybrid":
+            continue
         slots = Counter()
         semantic_only_primaries, results_seen = [], 0
         for row in eligible:
@@ -287,6 +298,7 @@ def main():
     if "global_hybrid" in rows[0]["arms"]:
         result["global_hybrid_equals_hybrid"] = {
             "identical_selection": sum(same_selection((r.get("diagnostics") or {}).get("hybrid"), (r.get("diagnostics") or {}).get("global_hybrid")) for r in rows),
+            "identical_evidence": sum(same_evidence((r.get("diagnostics") or {}).get("hybrid"), (r.get("diagnostics") or {}).get("global_hybrid")) for r in rows),
             "cases": len(rows),
             "shipped_vector_continuation": sum(bool((((r.get("diagnostics") or {}).get("hybrid") or {}).get("semantic") or {}).get("vector_continuation_available")) for r in rows),
             "shipped_vector_rows_max": max(((((r.get("diagnostics") or {}).get("hybrid") or {}).get("semantic") or {}).get("vector_candidates_inspected") or 0) for r in rows)}
@@ -294,9 +306,9 @@ def main():
         result["global_fill_extends_lexical"] = {
             "lexical_trace_is_prefix": sum(is_prefix((r.get("diagnostics") or {}).get("lexical"), (r.get("diagnostics") or {}).get("global_fill")) for r in rows),
             "identical_selection": sum(same_selection((r.get("diagnostics") or {}).get("lexical"), (r.get("diagnostics") or {}).get("global_fill")) for r in rows),
+            "lexical_evidence_contained": sum(evidence_superset((r.get("diagnostics") or {}).get("lexical"), (r.get("diagnostics") or {}).get("global_fill")) for r in rows),
             "cases": len(rows)}
-    if "global_hybrid" in rows[0]["arms"]:
-        result["displacement_global_hybrid"] = displacement(eligible, by_id, store_root, ingestion, "global_hybrid")
+    result["displacement_hybrid"] = displacement(eligible, by_id, store_root, ingestion)
     # Role and vector coverage of the lexical anchor behind each lost turn.
     for arm, losses in result["lexical_wins_over"].items():
         for loss in losses:
@@ -326,11 +338,6 @@ def main():
                     "primary_rank": primaries.index(e) + 1 if e in primaries else None,
                     "fused_rank": paths.get(e, (None, None))[0], "paths": paths.get(e, (None, None))[1]}
                     for e, t in zip(positives, score["turns"])]
-            detail["semantic_ranks"] = {}
-            for arm in ("global_hybrid", "global_fill"):
-                results = ((((row.get("diagnostics") or {}).get(arm) or {}).get("semantic") or {}).get("global_semantic") or {}).get("results") or []
-                ranks = {item["e"]: (item.get("lr"), item.get("sr")) for item in results}
-                detail["semantic_ranks"][arm] = [ranks.get(e) for e in positives]
             result["known_misses"][row["question_id"]] = detail
     harness.private_write(args.output.absolute(), harness.canonical(result) + b"\n")
     printable = {"cohort": result["cohort"], "losses": {k: len(v) for k, v in result["lexical_wins_over"].items()},
@@ -339,7 +346,7 @@ def main():
                  "lexical_primary_counts": result["lexical_primary_counts"],
                  "global_hybrid_equals_hybrid": result.get("global_hybrid_equals_hybrid"),
                  "global_fill_extends_lexical": result.get("global_fill_extends_lexical"),
-                 "displacement_global_hybrid": result.get("displacement_global_hybrid"),
+                 "displacement_hybrid": result.get("displacement_hybrid"),
                  "lost_turn_anchors": {arm: dict(Counter(f"{t['winner_origin']}:{t.get('anchor_role')}:{'vector' if t.get('anchor_has_vector') else 'no_vector'}"
                                                         for loss in losses for t in loss["turns"]))
                                        for arm, losses in result["lexical_wins_over"].items()},

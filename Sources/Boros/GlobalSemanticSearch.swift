@@ -252,19 +252,14 @@ enum GlobalSemanticSearch {
             let payload = try SemanticIndex.canonical(manifest)
             guard payload.count <= MemoryStore.maximumPayloadBytes else { throw SemanticError.invalid }
             func milliseconds(_ from: UInt64, _ to: UInt64) -> Double { (Double(to - from) / 1_000).rounded() / 1_000 }
-            let audit: [String: Any] = ["version": parameters.version, "mode": parameters.mode, "population": parameters.population,
-                "fusion": parameters.fusion, "rrf_constant": parameters.reciprocalRankConstant as Any? ?? NSNull(),
-                "lexical_window": window, "parameters_sha256": parameterDigest,
-                "eligible_vector_rows": scan.rows, "vector_bytes_scanned": scan.rows * encoder.dimension * 4,
-                "semantic_events": scan.events.count, "lexical_hits": lexicalOrder.count,
-                "results": selected.map { entry -> [String: Any] in
-                    ["e": entry.eventID, "p": entry.paths.sorted().joined(separator: "+"),
-                     "lr": entry.lexicalRank as Any? ?? NSNull(), "sr": entry.semanticRank as Any? ?? NSNull()]
-                },
+            // Compact on purpose: the delivery audit is capped at 32 KiB and
+            // drops the selection trace first. Per-result paths and ranks are
+            // in the returned manifest; the audit keeps identity, size, timing.
+            let audit: [String: Any] = ["parameters_sha256": parameterDigest, "eligible_vector_rows": scan.rows,
                 "milliseconds": ["lexical": milliseconds(started, lexicalDone), "encode": milliseconds(lexicalDone, encodeDone),
                     "vector_scan": milliseconds(encodeDone, scanDone), "vector_loop": milliseconds(0, scan.loopNanoseconds),
-                    "fuse": milliseconds(scanDone, fuseDone),
-                    "read": milliseconds(fuseDone, readDone), "total": milliseconds(started, readDone)]]
+                    "fuse": milliseconds(scanDone, fuseDone), "read": milliseconds(fuseDone, readDone),
+                    "total": milliseconds(started, readDone)]]
             return GlobalSemanticSearchReport(report: SemanticSearchReport(hits: hits, manifestID: SemanticIndex.digest(payload),
                 manifest: manifest), audit: audit)
         }
