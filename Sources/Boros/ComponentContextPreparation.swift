@@ -101,7 +101,8 @@ final class ComponentContextPreparationOperation {
                                     conversationID: self.conversationID, projectID: self.projectID,
                                     prompt: self.prompt, system: self.settings.system, excludingEventID: self.humanEventID,
                                     budgetBytes: self.policy.maximumMessageBytes, maximumRecentBytes: self.policy.recentBytes,
-                                    maximumRecentRows: self.policy.recentCandidates, episodeLease: self.lease)
+                                    maximumRecentRows: self.policy.recentCandidates, episodeLease: self.lease,
+                                    componentPolicy: self.policy)
                                 self.countRecent(recent, prepareEvidence: true)
                             } catch { self.finish(.failure(error)) }
                         case .failure(let error): self.finish(.failure(error))
@@ -168,7 +169,7 @@ final class ComponentContextPreparationOperation {
                                     semanticIndex: self.semanticIndex, retrievalStrategy: self.retrievalStrategy,
                                     episodeLease: self.lease, lexicalQueryUTF8Range: self.lexicalQueryUTF8Range,
                                     semanticQueryUTF8Range: self.semanticQueryUTF8Range,
-                                    evidenceSourceIDs: self.evidenceSourceIDs)
+                                    evidenceSourceIDs: self.evidenceSourceIDs, componentPolicy: self.policy)
                                 self.countEvidence(candidate, recentReceipt: receipt)
                             } else { self.countEvidence(snapshot, recentReceipt: receipt) }
                         }
@@ -234,14 +235,34 @@ final class ComponentContextPreparationOperation {
                             }
                             var audited = snapshot
                             audited.componentAuditJSON = try receipt.componentProof.map { try JSONEncoder().encode($0) }
+                            let selectionOperationID: String?
+                            if self.policy.usesBoundedNeighborhood {
+                                let operationID = UUID().uuidString
+                                audited.selectionWorkID = operationID
+                                if let reduced = try audited.fittedForDeliveryAudit() {
+                                    self.countEvidence(reduced, recentReceipt: recentReceipt)
+                                    return
+                                }
+                                // Validate the exact final proof-bearing audit,
+                                // including the ID that will actually be stored.
+                                _ = try audited.deliveryAudit()
+                                selectionOperationID = operationID
+                            } else { selectionOperationID = nil }
                             // Keep the full bounded provenance document in the
                             // existing authoritative snapshot journal. The
                             // small delivery audit links it by work ID.
                             let resources = EpisodeResources(memoryOperations: 1,
                                 metadataRows: snapshot.recentSources.count + snapshot.evidence.count + 8)
-                            let work = try self.lease.prepare(kind: .sourceRead, resources: resources,
-                                adapterIdentity: snapshot.selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion,
-                                snapshot: snapshot.selectionEvidence())
+                            let work: EpisodeWorkRecord
+                            if let selectionOperationID {
+                                work = try self.lease.prepare(kind: .sourceRead, resources: resources,
+                                    adapterIdentity: snapshot.selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion,
+                                    snapshot: snapshot.selectionEvidence(), operationID: selectionOperationID)
+                            } else {
+                                work = try self.lease.prepare(kind: .sourceRead, resources: resources,
+                                    adapterIdentity: snapshot.selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion,
+                                    snapshot: snapshot.selectionEvidence())
+                            }
                             let submitted = try self.lease.dispatch(work, start: {})
                             _ = try self.lease.settle(submitted, outcome: .completed, observed: resources)
                             audited.selectionWorkID = work.id

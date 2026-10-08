@@ -26,6 +26,9 @@ CORE_FILES = ("Sources/Boros/MemoryStore.swift", "Sources/Boros/EventSourceTime.
               "Sources/Boros/EpisodeSQLFence.swift", "Sources/Boros/MeteredRetrieval.swift",
               "Tests/Evaluation/RetrievalHarness.swift", "Sources/CSQLite/module.modulemap",
               "Sources/CSQLite/shim.h")
+# Keep the registered v4 dependency set above unchanged. Current-source
+# diagnostics need the separately versioned neighborhood implementation.
+CURRENT_CORE_FILES = (*CORE_FILES, "Sources/Boros/BoundedNeighborhoodExpansion.swift")
 PYTHON_FILES = ("scripts/evaluate_retrieval.py", "scripts/evaluation_fixtures.py", "scripts/evaluation_statistics.py")
 PROTOCOLS = ("recent_only", "current_prompt_lexical", "targeted_lexical", "gui_lexical_anyterm", "raw_source_probe")
 
@@ -38,10 +41,11 @@ def machine_value(name: str, *, integer: bool = False):
     return int(value) if integer else value
 
 
-def compile_harness(scratch: Path) -> tuple[Path, dict]:
+def compile_harness(scratch: Path, *, current_source: bool = False) -> tuple[Path, dict]:
     captured = scratch / "source"
     hashes = {}
-    for relative in (*CORE_FILES, *PYTHON_FILES):
+    core = CURRENT_CORE_FILES if current_source else CORE_FILES
+    for relative in (*core, *PYTHON_FILES):
         source = ROOT / relative
         destination = captured / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -49,7 +53,7 @@ def compile_harness(scratch: Path) -> tuple[Path, dict]:
         hashes[relative] = hashlib.sha256(destination.read_bytes()).hexdigest()
     binary = scratch / "retrieval-evaluation"
     command = ["/usr/bin/swiftc", "-I", str(captured / "Sources/CSQLite"), "-framework", "NaturalLanguage", "-o", str(binary),
-               *(str(captured / relative) for relative in CORE_FILES if relative.endswith(".swift"))]
+               *(str(captured / relative) for relative in core if relative.endswith(".swift"))]
     subprocess.run(command, check=True, capture_output=True, text=True)
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
     return binary, {"gitRevision": revision, "sourceSHA256": hashes,
@@ -159,7 +163,7 @@ def main() -> None:
         scratch = Path(temporary)
         input_path = scratch / "fixtures.json"
         input_path.write_bytes(canonical_json(fixtures))
-        binary, implementation = compile_harness(scratch)
+        binary, implementation = compile_harness(scratch, current_source=args.contract_only)
         runtime = scratch / "stores"
         profiles = {}
         if args.profile in ("warm", "both"):

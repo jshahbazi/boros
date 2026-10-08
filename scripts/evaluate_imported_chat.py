@@ -24,7 +24,7 @@ import unicodedata
 ROOT = Path(__file__).resolve().parents[1]
 CORE = tuple("Sources/Boros/" + name + ".swift" for name in (
     "MemoryStore", "EventSourceTime", "SourceTimeSchema", "AuthorityState", "AuthorityStateJournal", "AuthorityValidatedClock", "AuthorityValidationCache", "EpisodeAccountingJournal", "AuthoritySchemaSeven", "AuthoritySchemaEight", "AuthoritySchemaNine", "EpisodeTerminalCleanup", "AuthorityBindings", "AuthorityBindingJournal", "AuthorityValidation", "AuthorityPolicyRendering", "AuthorityInputProof", "BackgroundIndexBudget", "BackgroundIndexJournal", "ContextComponentJournal",
-    "QwenTextRendering", "ContextSourceFraming", "HistoricalQueryFormulation", "MeteredExchangeExpansion", "ContextAssembler", "ChatContextPreparation",
+    "QwenTextRendering", "ContextSourceFraming", "HistoricalQueryFormulation", "MeteredExchangeExpansion", "BoundedNeighborhoodExpansion", "ContextAssembler", "ChatContextPreparation",
     "SemanticIndex", "BackgroundIndexWorker", "EpisodeBudget", "EpisodeLease", "EpisodeSQLFence", "MeteredRetrieval"))
 SUPPORT = ("Tests/Evaluation/ImportedChatHarness.swift", "Sources/CSQLite/module.modulemap", "Sources/CSQLite/shim.h", "scripts/import_chat.py")
 PROTOCOLS = ("recent_only", "lexical_context", "hybrid_context", "raw_pages")

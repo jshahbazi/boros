@@ -456,6 +456,7 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
     private var componentVerifiedClock: EpisodeClockSnapshot?
     private var componentProjectID: String?
     private var componentPolicyDigest: String?
+    private var componentPolicy: ContextComponentPolicy?
     private var componentCountCompletion: ((Result<ProviderComponentCountReceipt, ProviderAdmissionError>) -> Void)?
     private var componentAdmissionCompletion: ((Result<EndpointAdmissionReceipt, ProviderAdmissionError>) -> Void)?
     private var issuedComponentReceipts: [ProviderComponentCountReceipt] = []
@@ -594,7 +595,8 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                       recentReceipt.kind == .recent, evidenceReceipt.kind == .evidence,
                       recentReceipt.renderedDigest == EndpointRequest.digest(Data(rendered.recent.utf8)),
                       evidenceReceipt.renderedDigest == EndpointRequest.digest(Data(rendered.evidence.utf8)),
-                      let output = ProviderUsage.integer(object["max_tokens"]) else { throw ProviderAdmissionError.invalidRequest }
+                      let output = ProviderUsage.integer(object["max_tokens"]),
+                      let policy = self.componentPolicy else { throw ProviderAdmissionError.invalidRequest }
                 guard
                       recentReceipt.tokens <= ProviderComponentProof.recentTokenLimit,
                       evidenceReceipt.tokens <= ProviderComponentProof.evidenceTokenLimit else { throw ProviderAdmissionError.contextOverflow }
@@ -608,9 +610,9 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                             episodeID: self.episodeLease!.episodeID, projectID: self.componentProjectID!, adapterIdentity: whole.adapterIdentity,
                             modelEpoch: self.modelEpoch, modelIdentity: self.observedModelIdentity!, thinkingEnabled: self.payload["enable_thinking"] as? Bool ?? false,
                             outputReserve: output, safetyTokens: self.safety, effectiveContextLimit: self.contextLimit,
-                            policyVersion: ContextComponentPolicy.selectedQwen.version, recentCap: ProviderComponentProof.recentTokenLimit,
-                            evidenceCap: ProviderComponentProof.evidenceTokenLimit, renderingVersion: ProviderComponentProof.rendererVersion,
-                            reductionVersion: ContextComponentPolicy.selectedQwen.reductionVersion,
+                            policyVersion: policy.version, recentCap: policy.recentTokens,
+                            evidenceCap: policy.evidenceTokens, renderingVersion: policy.rendererVersion,
+                            reductionVersion: policy.reductionVersion,
                             recent: recentReceipt, evidence: evidenceReceipt, wholePrompt: whole)
                         guard proof.accepts(body: requestBody, assignments: assignments, sourceSnapshotDigest: sourceSnapshotDigest,
                             policyDigest: policyDigest, episodeLease: self.episodeLease!, address: self.address) else {
@@ -684,6 +686,7 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                         let receipt = try lease.checkActive()
                         guard case .chat = receipt.origin else { self.finish(.failure(.episodeAccountingFailed)); return }
                         guard let policy = receipt.limits.componentPolicy else { self.finish(.failure(.episodeAccountingFailed)); return }
+                        self.componentPolicy = try policy.validated()
                         self.componentPolicyDigest = EndpointRequest.digest(try policy.canonicalData())
                         self.componentProjectID = receipt.projectID
                     }

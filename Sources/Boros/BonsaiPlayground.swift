@@ -2268,6 +2268,7 @@ private enum BonsaiPlayground {
         if CommandLine.arguments.contains("--retrieval-strategy-self-test") {
             do {
                 let checks = try RetrievalStrategyChecks.run().merging(ExchangeExpansionChecks.run()) { _, latest in latest }
+                    .merging(NeighborhoodExpansionChecks.run()) { _, latest in latest }
                 print(String(decoding: try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]), as: UTF8.self))
                 exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"retrieval_strategy_self_test\":false}"); exit(1) }

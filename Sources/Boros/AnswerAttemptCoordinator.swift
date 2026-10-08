@@ -139,7 +139,7 @@ final class AnswerAttemptCoordinator {
         self.retrievalStrategy = retrievalStrategy; self.clock = clock; self.runner = runner
         self.onStage = onStage; self.onText = onText; self.onComplete = onComplete
         var frozenLimits = limits
-        if frozenLimits.componentPolicy == nil { frozenLimits.componentPolicy = .selectedQwen }
+        if frozenLimits.componentPolicy == nil { frozenLimits.componentPolicy = .currentSelectedQwen }
         self.limits = frozenLimits
         lease = EpisodeLease(ledger: store, episodeID: identifiers.episodeID, clock: clock)
         var frozen = settings

@@ -28,6 +28,9 @@ struct ContextSelectionAudit: Codable, Equatable {
     var evidenceEnvelopeExcludedCount = 0
     var recentReductionRounds = 0
     var evidenceReductionRounds = 0
+    // Absent from every historical v1 JSON document.
+    var evidenceAuditExcludedCount: Int? = nil
+    var evidenceAuditReductionRounds: Int? = nil
 }
 
 struct ContextRecentSource: Codable {
@@ -73,6 +76,9 @@ struct ContextSnapshot {
     /// separately bound by selectionDigest(), including actual message bytes.
     var componentAuditJSON: Data?
     var selectionWorkID: String?
+    var evidenceProvenance: [ContextEvidenceProvenance]? = nil
+
+    var protectedPrimarySpanCount: Int? { evidenceProvenance?.filter { $0.origin == "primary" }.count }
 
     var messageComponents: [ContextMessageComponent] {
         [.mandatory] + Array(repeating: .recent, count: max(0, includedRecentCount))
@@ -93,6 +99,23 @@ struct ContextSnapshot {
             let expected = try ContextAssembler.evidenceMessage(evidence, selectionVersion: selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion)
             guard messages[includedRecentCount + 1].role == expected.role,
                   episodeIdentifierEqual(messages[includedRecentCount + 1].content, expected.content) else { throw ContextError.sourceMismatch }
+        }
+        if let evidenceProvenance {
+            guard selectionAudit?.version == ContextComponentPolicy.selectedQwenNeighborhood.selectionAuditVersion,
+                  evidenceProvenance.count == evidence.count, evidence.count <= BoundedNeighborhoodExpansion.maximumCandidates,
+                  let protected = protectedPrimarySpanCount, protected <= BoundedNeighborhoodExpansion.maximumPrimaryCandidates,
+                  let auditExcluded = selectionAudit?.evidenceAuditExcludedCount, auditExcluded >= 0,
+                  let auditRounds = selectionAudit?.evidenceAuditReductionRounds, auditRounds == auditExcluded else {
+                throw ContextError.sourceMismatch
+            }
+            for (rank, provenance) in evidenceProvenance.enumerated() {
+                _ = try provenance.validated()
+                guard provenance.matches(evidence[rank]), provenance.origin == (rank < protected ? "primary" : "neighbor") else {
+                    throw ContextError.sourceMismatch
+                }
+            }
+        } else if selectionAudit?.version == ContextComponentPolicy.selectedQwenNeighborhood.selectionAuditVersion {
+            throw ContextError.sourceMismatch
         }
         if let selectionBinding {
             guard ContextSourceFraming.isSupportedSelectionVersion(selectionBinding.version), selectionBinding.mandatoryMessagesSHA256 == Self.digest(try ContextAssembler.serializedMessages([messages[0], messages[messages.count - 1]])),
@@ -131,6 +154,16 @@ struct ContextSnapshot {
             "historical_sources": historicalAudit(), "omitted_recent_count": omittedRecentCount]
         if let selectionBinding { value["binding"] = try JSONSerialization.jsonObject(with: canonicalJSON(selectionBinding)) }
         if let selectionAudit { value["selection"] = try JSONSerialization.jsonObject(with: canonicalJSON(selectionAudit)) }
+        if let evidenceProvenance {
+            value["historical_provenance_version"] = ContextEvidenceProvenance.version
+            value["protected_primary_span_count"] = protectedPrimarySpanCount!
+            value["historical_provenance"] = try evidenceProvenance.map { try $0.object() }
+            if let retrievalAuditJSON,
+               let retrieval = try JSONSerialization.jsonObject(with: retrievalAuditJSON) as? [String: Any] {
+                if let trace = retrieval["selection_trace"] { value["historical_selection_trace"] = trace }
+                if let expansion = retrieval["exchange_expansion"] { value["neighborhood_expansion"] = expansion }
+            }
+        }
         return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
 
@@ -148,6 +181,21 @@ struct ContextSnapshot {
         }
         if let componentAuditJSON { value["components"] = try JSONSerialization.jsonObject(with: componentAuditJSON) }
         if let selectionWorkID { value["selection_work_id"] = selectionWorkID }
+        if let evidenceProvenance {
+            value["historical_provenance_version"] = ContextEvidenceProvenance.version
+            value["protected_primary_span_count"] = protectedPrimarySpanCount!
+            value["historical_provenance_sha256"] = Self.digest(try JSONSerialization.data(
+                withJSONObject: evidenceProvenance.map { try $0.object() }, options: [.sortedKeys]))
+            if let retrievalAuditJSON,
+               let retrieval = try JSONSerialization.jsonObject(with: retrievalAuditJSON) as? [String: Any] {
+                for (key, digestKey) in [("selection_trace", "historical_selection_trace_sha256"),
+                    ("exchange_expansion", "neighborhood_expansion_sha256")] {
+                    if let field = retrieval[key] {
+                        value[digestKey] = Self.digest(try JSONSerialization.data(withJSONObject: field, options: [.sortedKeys]))
+                    }
+                }
+            }
+        }
         var bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         if bytes.count > 32768, var retrieval = value["retrieval"] as? [String: Any] {
             for key in ["selection_trace", "exchange_expansion"] where bytes.count > 32768 {
@@ -156,7 +204,7 @@ struct ContextSnapshot {
                 value["retrieval"] = retrieval
                 bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
             }
-            if bytes.count > 32768 {
+            if bytes.count > 32768 && evidenceProvenance == nil {
                 retrieval.removeValue(forKey: "selection_trace_omitted")
                 retrieval.removeValue(forKey: "exchange_expansion_omitted")
                 value["retrieval"] = retrieval
@@ -209,6 +257,34 @@ struct ContextSnapshot {
     /// order. Each retained span keeps its original offset, digest and bytes.
     func reducedEvidenceForComponentCap() throws -> ContextSnapshot? { try reducingEvidence(envelope: false) }
 
+    /// Fit the actual proof and real selection-work ID before either is frozen.
+    /// Each suffix removal keeps exact ranges and all primaries while neighbors
+    /// remain. The returned candidate has no stale component proof or work ID;
+    /// its evidence and whole prompt must be counted again under the same lease.
+    func fittedForDeliveryAudit() throws -> ContextSnapshot? {
+        guard evidenceProvenance != nil, componentAuditJSON != nil, selectionWorkID != nil else {
+            throw ContextError.sourceMismatch
+        }
+        var candidate = self
+        var removed = false
+        while true {
+            do { _ = try candidate.deliveryAudit(); break }
+            catch ContextError.invalidBudget {
+                guard var next = try candidate.reducingEvidence(envelope: false, auditSize: true) else {
+                    throw ContextError.invalidBudget
+                }
+                // Only measure the old proof's actual serialized headroom.
+                // It never authorizes the changed body and is never returned.
+                next.componentAuditJSON = componentAuditJSON
+                next.selectionWorkID = selectionWorkID
+                candidate = next; removed = true
+            }
+        }
+        guard removed else { return nil }
+        candidate.componentAuditJSON = nil; candidate.selectionWorkID = nil
+        return candidate
+    }
+
     func reducedForTokenAdmission() throws -> ContextSnapshot? {
         _ = try componentAssignments()
         if !evidence.isEmpty { return try reducingEvidence(envelope: true) }
@@ -231,29 +307,58 @@ struct ContextSnapshot {
         return result
     }
 
-    private func reducingEvidence(envelope: Bool) throws -> ContextSnapshot? {
+    private func reducingEvidence(envelope: Bool, auditSize: Bool = false) throws -> ContextSnapshot? {
         _ = try componentAssignments()
         guard !evidence.isEmpty else { return nil }
-        let removed = (evidence.count + 1) / 2
+        let optionalCount = evidence.count - (protectedPrimarySpanCount ?? evidence.count)
+        let removed = auditSize ? 1 : evidenceProvenance != nil && optionalCount > 0 ? (optionalCount + 1) / 2 : (evidence.count + 1) / 2
         let retained = Array(evidence.dropLast(removed))
         let recent = Array(messages.dropFirst().prefix(includedRecentCount))
         let candidateMessages = [messages[0]] + recent + (retained.isEmpty ? [] : [try ContextAssembler.evidenceMessage(retained, selectionVersion: selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion)]) + [messages[messages.count - 1]]
         var result = try replacing(messages: candidateMessages, evidence: retained,
-            recentSourceIDs: recentSourceIDs, recentSources: recentSources, omittedRecentCount: omittedRecentCount)
+            recentSourceIDs: recentSourceIDs, recentSources: recentSources, omittedRecentCount: omittedRecentCount,
+            evidenceProvenance: evidenceProvenance.map { Array($0.dropLast(removed)) })
         result.selectionAudit?.evidenceReductionRounds += 1
-        if envelope { result.selectionAudit?.evidenceEnvelopeExcludedCount += removed }
+        if auditSize {
+            guard evidenceProvenance != nil, let excluded = result.selectionAudit?.evidenceAuditExcludedCount,
+                  let rounds = result.selectionAudit?.evidenceAuditReductionRounds else { throw ContextError.sourceMismatch }
+            result.selectionAudit?.evidenceAuditExcludedCount = excluded + removed
+            result.selectionAudit?.evidenceAuditReductionRounds = rounds + 1
+            try result.refreshHistoricalDeliveryTrace()
+        }
+        else if envelope { result.selectionAudit?.evidenceEnvelopeExcludedCount += removed }
         else { result.selectionAudit?.evidenceTokenExcludedCount += removed }
         result.componentAuditJSON = nil
         return result
     }
 
     private func replacing(messages: [ContextMessage], evidence: [MemoryHit], recentSourceIDs: [String],
-        recentSources: [ContextRecentSource], omittedRecentCount: Int) throws -> ContextSnapshot {
-        ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try ContextAssembler.serializedMessages(messages).count,
+        recentSources: [ContextRecentSource], omittedRecentCount: Int,
+        evidenceProvenance: [ContextEvidenceProvenance]? = nil) throws -> ContextSnapshot {
+        var result = ContextSnapshot(messages: messages, evidence: evidence, serializedBytes: try ContextAssembler.serializedMessages(messages).count,
             omittedRecentCount: omittedRecentCount, includedRecentCount: recentSourceIDs.count, recentSourceIDs: recentSourceIDs,
             retrievalManifestID: retrievalManifestID, retrievalManifestJSON: retrievalManifestJSON,
             retrievalAuditJSON: retrievalAuditJSON, retrievalNotice: retrievalNotice, recentSources: recentSources,
-            selectionBinding: selectionBinding, selectionAudit: selectionAudit, componentAuditJSON: nil)
+            selectionBinding: selectionBinding, selectionAudit: selectionAudit, componentAuditJSON: nil,
+            evidenceProvenance: evidenceProvenance ?? self.evidenceProvenance)
+        try result.refreshHistoricalDeliveryTrace()
+        return result
+    }
+
+    mutating func refreshHistoricalDeliveryTrace() throws {
+        guard let evidenceProvenance, let retrievalAuditJSON,
+              var retrieval = try JSONSerialization.jsonObject(with: retrievalAuditJSON) as? [String: Any],
+              var trace = retrieval["selection_trace"] as? [String: Any],
+              trace["version"] as? String == "historical-selection-trace-v2" else { return }
+        trace["delivery"] = try evidenceProvenance.enumerated().map { try $0.element.object(finalRank: $0.offset) }
+        trace["delivered_count"] = evidence.count
+        trace["protected_primary_span_count"] = protectedPrimarySpanCount!
+        trace["reduction_policy"] = ContextComponentPolicy.selectedQwenNeighborhood.reductionVersion
+        trace["audit_size_excluded_count"] = selectionAudit?.evidenceAuditExcludedCount
+        trace["audit_size_reduction_rounds"] = selectionAudit?.evidenceAuditReductionRounds
+        if (selectionAudit?.evidenceAuditExcludedCount ?? 0) > 0 { trace["delivery_reduction_reason"] = "audit_size" }
+        retrieval["selection_trace"] = trace
+        self.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: retrieval, options: [.sortedKeys])
     }
 }
 
@@ -283,6 +388,7 @@ enum ContextAssembler {
     static let componentMaximumRecentRows = 256
     static let componentMaximumEvidenceBytes = 131_072
     static let componentMaximumEvidenceSpans = 16
+    static let componentMaximumExpandedEvidenceSpans = 48
     static let componentMaximumEvidenceSpanBytes = 4_096
     static let componentMaximumSerializedBytes = 1_900_000
 
@@ -299,8 +405,11 @@ enum ContextAssembler {
         budgetBytes: Int = componentMaximumSerializedBytes,
         maximumRecentBytes: Int = componentMaximumRecentBytes,
         maximumRecentRows: Int = componentMaximumRecentRows,
-        episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false) throws -> ContextSnapshot {
-        _ = try episodeLease?.checkActive(projectID: projectID)
+        episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false,
+        componentPolicy: ContextComponentPolicy = .selectedQwen) throws -> ContextSnapshot {
+        let active = try episodeLease?.checkActive(projectID: projectID)
+        _ = try componentPolicy.validated()
+        if let frozen = active?.limits.componentPolicy, frozen != componentPolicy { throw EpisodeBudgetError.invalid }
         return try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
             guard budgetBytes > 0, budgetBytes <= componentMaximumSerializedBytes,
                   maximumRecentBytes >= 0, maximumRecentBytes <= componentMaximumRecentBytes,
@@ -343,16 +452,20 @@ enum ContextAssembler {
             }
             let messages = [mandatory[0]] + recent + [mandatory[1]]
             var audit = ContextSelectionAudit(maximumRecentBytes: maximumRecentBytes, maximumRecentRows: maximumRecentRows,
-                maximumEvidenceBytes: componentMaximumEvidenceBytes, maximumEvidenceSpans: componentMaximumEvidenceSpans,
+                maximumEvidenceBytes: componentPolicy.evidenceBytes, maximumEvidenceSpans: componentPolicy.evidenceSpans,
                 maximumEvidenceSpanBytes: componentMaximumEvidenceSpanBytes, maximumSerializedBytes: budgetBytes)
             audit.recentRowExcludedCount = max(0, historyCount - references.count)
             audit.recentByteExcludedCount = references.count - selected.count
+            audit.version = componentPolicy.selectionAuditVersion
+            if componentPolicy.usesBoundedNeighborhood {
+                audit.evidenceAuditExcludedCount = 0; audit.evidenceAuditReductionRounds = 0
+            }
             let result = ContextSnapshot(messages: messages, evidence: [], serializedBytes: try serializedMessages(messages).count,
                 omittedRecentCount: historyCount - selected.count, includedRecentCount: selected.count,
                 recentSourceIDs: selected.map(\.eventID), recentSources: selected,
                 selectionBinding: ContextSelectionBinding(projectID: projectID, conversationID: conversationID,
                     acceptedHumanEventID: excludingEventID, mandatoryMessagesSHA256: ContextSnapshot.digest(try serializedMessages(mandatory))),
-                selectionAudit: audit)
+                selectionAudit: audit, evidenceProvenance: componentPolicy.usesBoundedNeighborhood ? [] : nil)
             _ = try result.componentAssignments()
             return result
         }
@@ -365,27 +478,59 @@ enum ContextAssembler {
         maximumEvidenceBytes: Int = componentMaximumEvidenceBytes,
         maximumEvidenceSpans: Int = componentMaximumEvidenceSpans,
         maximumEvidenceSpanBytes: Int = componentMaximumEvidenceSpanBytes,
-        episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false) throws -> ContextSnapshot {
-        _ = try episodeLease?.checkActive(projectID: projectID)
+        episodeLease: EpisodeLease? = nil, operationIsNested: Bool = false,
+        componentPolicy: ContextComponentPolicy = .selectedQwen,
+        historicalProvenance: [ContextEvidenceProvenance]? = nil) throws -> ContextSnapshot {
+        let active = try episodeLease?.checkActive(projectID: projectID)
+        _ = try componentPolicy.validated()
+        if let frozen = active?.limits.componentPolicy, frozen != componentPolicy { throw EpisodeBudgetError.invalid }
         return try MeteredRetrieval.operation(lease: episodeLease, nested: operationIsNested) {
             _ = try recent.componentAssignments()
             guard recent.evidence.isEmpty, let binding = recent.selectionBinding,
                   episodeIdentifierEqual(binding.projectID, projectID), episodeIdentifierEqual(binding.conversationID, conversationID),
                   episodeIdentifierEqual(binding.acceptedHumanEventID, excludingEventID),
                   maximumEvidenceBytes >= 0, maximumEvidenceBytes <= componentMaximumEvidenceBytes,
-                  maximumEvidenceSpans >= 0, maximumEvidenceSpans <= componentMaximumEvidenceSpans,
+                  maximumEvidenceSpans >= 0, maximumEvidenceSpans <= componentPolicy.evidenceSpans,
                   maximumEvidenceSpanBytes > 0, maximumEvidenceSpanBytes <= componentMaximumEvidenceSpanBytes,
                   let selectionAudit = recent.selectionAudit else { throw ContextError.sourceMismatch }
+            if componentPolicy.usesBoundedNeighborhood {
+                guard selectionAudit.version == componentPolicy.selectionAuditVersion,
+                      let historicalProvenance, historicalProvenance.count == historicalHits.count,
+                      historicalHits.count <= componentMaximumExpandedEvidenceSpans,
+                      historicalProvenance.filter({ $0.origin == "primary" }).count <= componentMaximumEvidenceSpans else {
+                    throw ContextError.sourceMismatch
+                }
+                var neighborSeen = false
+                for (rank, provenance) in historicalProvenance.enumerated() {
+                    _ = try provenance.validated()
+                    guard provenance.matches(historicalHits[rank]), provenance.candidateRank == rank else { throw ContextError.sourceMismatch }
+                    if provenance.origin == "neighbor" { neighborSeen = true }
+                    else if neighborSeen { throw ContextError.sourceMismatch }
+                }
+            } else {
+                guard historicalProvenance == nil, recent.evidenceProvenance == nil else { throw ContextError.sourceMismatch }
+            }
             let exclusions = Set((recent.recentSourceIDs + [excludingEventID]).map { Data($0.utf8) })
             var evidence: [MemoryHit] = [], byteExcluded = 0, rowExcluded = 0
             var candidates: [[String: Any]] = [], decisions: [[String: Any]] = []
+            var selectedProvenance: [ContextEvidenceProvenance] = []
+            let traceLimit = componentPolicy.usesBoundedNeighborhood ? componentMaximumExpandedEvidenceSpans : componentMaximumEvidenceSpans
             for (rank, hit) in historicalHits.enumerated() {
-                if rank < 16 {
-                    candidates.append(["event_id": hit.eventID, "source_sha256": hit.digest,
-                        "offset": hit.excerptOffset, "byte_length": hit.excerpt.utf8.count, "rank": rank])
+                if rank < traceLimit {
+                    var candidate: [String: Any] = ["event_id": hit.eventID, "source_sha256": hit.digest,
+                        "offset": hit.excerptOffset, "byte_length": hit.excerpt.utf8.count, "rank": rank]
+                    if let historicalProvenance { candidate.merge(try historicalProvenance[rank].object()) { _, new in new } }
+                    candidates.append(candidate)
                 }
                 func record(_ reason: String) {
-                    if rank < 16 { decisions.append(["event_id": hit.eventID, "rank": rank, "disposition": reason]) }
+                    if rank < traceLimit {
+                        var decision: [String: Any] = ["event_id": hit.eventID, "rank": rank, "disposition": reason]
+                        if let historicalProvenance {
+                            decision.merge((try? historicalProvenance[rank].object()) ?? [:]) { _, new in new }
+                            if reason == "included" { decision["final_rank"] = evidence.count - 1 }
+                        }
+                        decisions.append(decision)
+                    }
                 }
                 if exclusions.contains(Data(hit.eventID.utf8)) { record("excluded_recent_or_request"); continue }
                 guard evidence.count < maximumEvidenceSpans else { rowExcluded += 1; record("span_limit"); continue }
@@ -408,6 +553,7 @@ enum ContextAssembler {
                     byteExcluded += 1; record("envelope_byte_limit"); continue
                 }
                 evidence = candidateEvidence
+                if let historicalProvenance { selectedProvenance.append(historicalProvenance[rank]) }
                 record("included")
             }
             let messages = Array(recent.messages.dropLast()) + (evidence.isEmpty ? [] : [try evidenceMessage(evidence, selectionVersion: binding.version)]) + [recent.messages.last!]
@@ -416,16 +562,19 @@ enum ContextAssembler {
                 recentSourceIDs: recent.recentSourceIDs, retrievalManifestID: recent.retrievalManifestID,
                 retrievalManifestJSON: recent.retrievalManifestJSON, retrievalAuditJSON: recent.retrievalAuditJSON,
                 retrievalNotice: recent.retrievalNotice, recentSources: recent.recentSources,
-                selectionBinding: recent.selectionBinding, selectionAudit: recent.selectionAudit)
+                selectionBinding: recent.selectionBinding, selectionAudit: recent.selectionAudit,
+                evidenceProvenance: componentPolicy.usesBoundedNeighborhood ? selectedProvenance : nil)
             var retrieval = try result.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-            retrieval["selection_trace"] = ["version": "historical-selection-trace-v1", "candidate_count": historicalHits.count,
-                "trace_truncated": historicalHits.count > 16, "candidates": candidates, "assembly": decisions]
+            retrieval["selection_trace"] = ["version": componentPolicy.usesBoundedNeighborhood ? "historical-selection-trace-v2" : "historical-selection-trace-v1",
+                "candidate_count": historicalHits.count, "trace_truncated": historicalHits.count > traceLimit,
+                "candidates": candidates, "assembly": decisions]
             result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: retrieval, options: [.sortedKeys])
             result.selectionAudit?.maximumEvidenceBytes = maximumEvidenceBytes
             result.selectionAudit?.maximumEvidenceSpans = maximumEvidenceSpans
             result.selectionAudit?.maximumEvidenceSpanBytes = maximumEvidenceSpanBytes
             result.selectionAudit?.evidenceByteExcludedCount += byteExcluded
             result.selectionAudit?.evidenceRowExcludedCount += rowExcluded
+            try result.refreshHistoricalDeliveryTrace()
             _ = try result.componentAssignments()
             return result
         }

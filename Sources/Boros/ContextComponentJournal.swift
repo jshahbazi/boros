@@ -116,6 +116,7 @@ enum ContextComponentJournal {
               let contextString = admission["context"] as? String,
               let contextBytes = Data(base64Encoded: contextString) else { throw invalid("proof binding mismatch") }
         let context = try object(contextBytes)
+        if policy.usesBoundedNeighborhood, contextBytes.count > 32768 { throw invalid("neighborhood delivery audit oversized") }
         guard let componentNames = context["message_components"] as? [String],
               let sourceDigest = context["source_snapshot_sha256"] as? String, isDigest(sourceDigest),
               proof["sourceSnapshotDigest"] as? String == sourceDigest,
@@ -274,9 +275,18 @@ enum ContextComponentJournal {
         let caps: [String: Int] = ["maximumRecentBytes": policy.recentBytes, "maximumRecentRows": policy.recentCandidates,
             "maximumEvidenceBytes": policy.evidenceBytes, "maximumEvidenceSpans": policy.evidenceSpans,
             "maximumEvidenceSpanBytes": 4096, "maximumSerializedBytes": policy.maximumMessageBytes]
-        guard audit["version"] as? String == "context-geometric-v1", caps.allSatisfy({ integer(audit[$0.key]) == $0.value }),
+        guard audit["version"] as? String == policy.selectionAuditVersion, caps.allSatisfy({ integer(audit[$0.key]) == $0.value }),
               audit.allSatisfy({ $0.key == "version" || integer($0.value) != nil }),
               integer(selection["omitted_recent_count"]) != nil else { throw invalid("selection limits mismatch") }
+        if policy.usesBoundedNeighborhood {
+            try validateNeighborhood(selection: selection, context: context, historical: historical, policy: policy)
+        } else {
+            guard selection["historical_provenance"] == nil, context["historical_provenance_sha256"] == nil,
+                  selection["protected_primary_span_count"] == nil, context["protected_primary_span_count"] == nil,
+                  audit["evidenceAuditExcludedCount"] == nil, audit["evidenceAuditReductionRounds"] == nil else {
+                throw invalid("historical policy has neighborhood provenance")
+            }
+        }
         var seen = Set<Data>()
         for (index, source) in recent.enumerated() {
             guard let id = source["eventID"] as? String, equal(id, recentIDs[index]), seen.insert(Data(id.utf8)).inserted,
@@ -346,6 +356,105 @@ enum ContextComponentJournal {
                 try consume(Data(ContextSourceFraming.evidenceFooter.utf8))
             }
             guard cursor == bytes.count else { throw invalid("extra evidence bytes") }
+        }
+    }
+
+    private static func validateNeighborhood(selection: [String: Any], context: [String: Any],
+        historical: [[String: Any]], policy: ContextComponentPolicy) throws {
+        guard selection["historical_provenance_version"] as? String == ContextEvidenceProvenance.version,
+              context["historical_provenance_version"] as? String == ContextEvidenceProvenance.version,
+              let provenance = selection["historical_provenance"] as? [[String: Any]], provenance.count == historical.count,
+              let protected = integer(selection["protected_primary_span_count"]), protected <= min(16, historical.count),
+              integer(context["protected_primary_span_count"]) == protected,
+              let audit = selection["selection"] as? [String: Any],
+              let auditExcluded = integer(audit["evidenceAuditExcludedCount"]), auditExcluded <= 48,
+              let auditRounds = integer(audit["evidenceAuditReductionRounds"]), auditRounds == auditExcluded,
+              let allRounds = integer(audit["evidenceReductionRounds"]), allRounds >= auditRounds,
+              context["historical_provenance_sha256"] as? String == digest(try canonicalArray(provenance)) else {
+            throw invalid("neighborhood provenance mismatch")
+        }
+        var delivery: [[String: Any]] = [], candidateRanks = Set<Int>()
+        for (rank, value) in provenance.enumerated() {
+            let base = Set(["event_id", "offset", "byte_length", "excerpt_sha256", "candidate_rank", "origin", "primary_rank"])
+            let origin = value["origin"] as? String
+            guard Set(value.keys) == (origin == "neighbor" ? base.union(["anchor_event_id", "direction"]) : base),
+                  origin == (rank < protected ? "primary" : "neighbor") else { throw invalid("neighborhood origin mismatch") }
+            let item: ContextEvidenceProvenance
+            do { item = try JSONDecoder().decode(ContextEvidenceProvenance.self, from: canonical(value)).validated() }
+            catch { throw invalid("neighborhood span invalid") }
+            let source = historical[rank]
+            guard equal(source["event_id"], item.eventID), item.offset == integer(source["excerpt_offset"]),
+                  item.byteLength == integer(source["excerpt_bytes"]), item.excerptSHA256 == source["excerpt_sha256"] as? String,
+                  candidateRanks.insert(item.candidateRank).inserted,
+                  rank == 0 || item.candidateRank > (integer(provenance[rank - 1]["candidate_rank"]) ?? -1) else {
+                throw invalid("neighborhood span linkage mismatch")
+            }
+            delivery.append(try item.object(finalRank: rank))
+        }
+        let retrieval = context["retrieval"] as? [String: Any] ?? [:]
+        for (selectionKey, contextKey, retrievalKey) in [
+            ("historical_selection_trace", "historical_selection_trace_sha256", "selection_trace"),
+            ("neighborhood_expansion", "neighborhood_expansion_sha256", "exchange_expansion")
+        ] {
+            if let rawBound = selection[selectionKey] {
+                guard let bound = rawBound as? [String: Any] else { throw invalid("neighborhood audit shape invalid") }
+                guard context[contextKey] as? String == digest(try canonical(bound)) else { throw invalid("neighborhood audit digest mismatch") }
+                if let rawDelivered = retrieval[retrievalKey] {
+                    guard let delivered = rawDelivered as? [String: Any] else { throw invalid("neighborhood audit shape invalid") }
+                    guard try canonical(delivered) == canonical(bound) else { throw invalid("neighborhood audit body mismatch") }
+                } else {
+                    guard retrieval[retrievalKey + "_omitted"] as? String == "metadata_limit" else {
+                        throw invalid("neighborhood audit omission missing")
+                    }
+                }
+            } else {
+                guard context[contextKey] == nil, retrieval[retrievalKey] == nil else { throw invalid("unbound neighborhood audit") }
+            }
+        }
+        if let trace = selection["historical_selection_trace"] as? [String: Any] {
+            guard trace["version"] as? String == "historical-selection-trace-v2",
+                  let count = integer(trace["candidate_count"]), count <= 48,
+                  let candidates = trace["candidates"] as? [[String: Any]], candidates.count == count,
+                  let assembly = trace["assembly"] as? [[String: Any]], assembly.count == count,
+                  boolean(trace["trace_truncated"]) == false, integer(trace["delivered_count"]) == historical.count,
+                  integer(trace["protected_primary_span_count"]) == protected,
+                  trace["reduction_policy"] as? String == policy.reductionVersion,
+                  integer(trace["audit_size_excluded_count"]) == auditExcluded,
+                  integer(trace["audit_size_reduction_rounds"]) == auditRounds,
+                  auditExcluded == 0 ? trace["delivery_reduction_reason"] == nil : trace["delivery_reduction_reason"] as? String == "audit_size",
+                  let delivered = trace["delivery"] as? [[String: Any]],
+                  try canonicalArray(delivered) == canonicalArray(delivery) else { throw invalid("neighborhood selection trace mismatch") }
+            let included = assembly.filter { $0["disposition"] as? String == "included" }.count
+            guard let tokenExcluded = integer(audit["evidenceTokenExcludedCount"]),
+                  let envelopeExcluded = integer(audit["evidenceEnvelopeExcludedCount"]),
+                  included == historical.count + tokenExcluded + envelopeExcluded + auditExcluded else {
+                throw invalid("neighborhood reduction accounting mismatch")
+            }
+            for item in provenance {
+                guard let candidate = integer(item["candidate_rank"]), candidate < count,
+                      let eventID = item["event_id"] as? String, equal(candidates[candidate]["event_id"], eventID),
+                      integer(candidates[candidate]["offset"]) == integer(item["offset"]),
+                      integer(candidates[candidate]["byte_length"]) == integer(item["byte_length"]),
+                      candidates[candidate]["excerpt_sha256"] as? String == item["excerpt_sha256"] as? String,
+                      candidates[candidate]["origin"] as? String == item["origin"] as? String,
+                      episodeIdentifierEqual(candidates[candidate]["anchor_event_id"] as? String, item["anchor_event_id"] as? String),
+                      candidates[candidate]["direction"] as? String == item["direction"] as? String,
+                      integer(candidates[candidate]["primary_rank"]) == integer(item["primary_rank"]),
+                      assembly[candidate]["disposition"] as? String == "included" else { throw invalid("neighborhood candidate linkage mismatch") }
+            }
+        } else {
+            guard historical.isEmpty, protected == 0, auditExcluded == 0, auditRounds == 0,
+                  retrieval["mode"] as? String == "recent_only" else {
+                throw invalid("neighborhood selection trace missing")
+            }
+        }
+        if let expansion = selection["neighborhood_expansion"] as? [String: Any] {
+            guard expansion["version"] as? String == BoundedNeighborhoodExpansion.version,
+                  integer(expansion["maximum_primary_candidates"]) == 16, integer(expansion["maximum_candidates"]) == 48,
+                  let primaryCount = integer(expansion["primary_count"]), primaryCount <= 16,
+                  let decisions = expansion["decisions"] as? [[String: Any]], decisions.count <= 48 else {
+                throw invalid("neighborhood expansion bound mismatch")
+            }
         }
     }
 

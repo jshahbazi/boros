@@ -32,6 +32,8 @@ def synthetic_count(text):
         return FIXTURE.count(text)
     evidence = sum(content.count("BEGIN HISTORICAL SOURCE") for _, content in blocks)
     evidence_unit = 4000 if "fixture-boundary-archive" in text else 5000
+    if any(marker in text for marker in ("fixture-neighborhoodAuditDated-archive", "fixture-neighborhoodAuditFit-archive")):
+        evidence_unit = 100
     recent = len(blocks) - (2 if is_full else 0) - int(bool(evidence))
     result = (100 if is_full else 0) + recent * 4000 + evidence * evidence_unit
     with LOCK:

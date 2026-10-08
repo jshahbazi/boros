@@ -123,6 +123,21 @@ struct ContextComponentPolicy: Codable, Equatable {
     var rendererVersion = "qwen38-attributed-text-v1"
 
     static let selectedQwen = ContextComponentPolicy()
+    /// Explicit experimental fixtures retain this separately versioned policy.
+    /// Ordinary selected-model episodes use the measured v1 default below.
+    static let selectedQwenNeighborhood: ContextComponentPolicy = {
+        var value = ContextComponentPolicy()
+        value.version = "selected-model-context-components-v2"
+        value.evidenceSpans = 48
+        value.reductionVersion = "primary-first-neighbor-geometric-v1"
+        return value
+    }()
+    // The wider candidate frontier remains experimental pending answer-quality
+    // evidence that justifies changing ordinary Send and public evaluation.
+    static let currentSelectedQwen = selectedQwen
+
+    var usesBoundedNeighborhood: Bool { self == Self.selectedQwenNeighborhood }
+    var selectionAuditVersion: String { usesBoundedNeighborhood ? "context-neighborhood-v2" : "context-geometric-v1" }
 
     init() {}
     private enum CodingKeys: String, CodingKey {
@@ -148,7 +163,7 @@ struct ContextComponentPolicy: Codable, Equatable {
     }
 
     func validated() throws -> ContextComponentPolicy {
-        guard self == Self.selectedQwen else { throw EpisodeBudgetError.invalid }
+        guard self == Self.selectedQwen || self == Self.selectedQwenNeighborhood else { throw EpisodeBudgetError.invalid }
         return self
     }
 

@@ -109,8 +109,11 @@ enum ChatContextPreparation {
         projectID: String, prompt: String, excludingEventID: String,
         semanticIndex: SemanticIndex? = nil, retrievalStrategy: ContextRetrievalStrategy = .hybrid,
         episodeLease: EpisodeLease? = nil, lexicalQueryUTF8Range: Range<Int>? = nil,
-        semanticQueryUTF8Range: Range<Int>? = nil, evidenceSourceIDs: [String]? = nil) throws -> ContextSnapshot {
-        _ = try episodeLease?.checkActive(projectID: projectID)
+        semanticQueryUTF8Range: Range<Int>? = nil, evidenceSourceIDs: [String]? = nil,
+        componentPolicy: ContextComponentPolicy = .selectedQwen) throws -> ContextSnapshot {
+        let active = try episodeLease?.checkActive(projectID: projectID)
+        _ = try componentPolicy.validated()
+        if let frozen = active?.limits.componentPolicy, frozen != componentPolicy { throw EpisodeBudgetError.invalid }
         return try MeteredRetrieval.operation(lease: episodeLease) {
             _ = try recent.componentAssignments()
             guard let binding = recent.selectionBinding,
@@ -125,7 +128,7 @@ enum ChatContextPreparation {
                 guard retrievalStrategy == .hybrid, let episodeLease else { throw MeteredRetrievalError.invalid }
                 return try declaredSourceSnapshot(recent: recent, store: store, conversationID: conversationID,
                     projectID: projectID, excludingEventID: excludingEventID, sourceIDs: evidenceSourceIDs,
-                    lease: episodeLease)
+                    lease: episodeLease, componentPolicy: componentPolicy)
             }
             if retrievalStrategy == .recentOnly {
                 return try recentOnlySnapshot(recent)
@@ -153,12 +156,13 @@ enum ChatContextPreparation {
                 let completed = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: projectID,
                     primaryHits: hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
                     episodeLease: episodeLease, operationIsNested: true)
-                let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
-                    primaryHits: completed.hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
-                    episodeLease: episodeLease, operationIsNested: true, includePrecedingHuman: true)
+                let expanded = try expandPrimaries(store: store, projectID: projectID, hits: completed.hits,
+                    frontier: frontier, exclusions: excluded, lease: episodeLease, policy: componentPolicy)
                 var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
                     projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
-                    episodeLease: episodeLease, operationIsNested: true)
+                    maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
+                    componentPolicy: componentPolicy, historicalProvenance: componentPolicy.usesBoundedNeighborhood
+                        ? BoundedNeighborhoodExpansion.provenance(for: expanded) : nil)
                 var fields: [String: Any] = ["mode": fallback ? "lexical_fallback" : "lexical", "semantic_available": false]
                 fields["primary_completion"] = completed.audit
                 fields["exchange_expansion"] = expanded.audit
@@ -198,12 +202,13 @@ enum ChatContextPreparation {
             let completed = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: projectID,
                 primaryHits: report.hits, sourceFrontier: report.manifest.sourceFrontier, excludingSourceIDs: excluded,
                 episodeLease: episodeLease, operationIsNested: true)
-            let expanded = try MeteredExchangeExpansion.expand(store: store, projectID: projectID,
-                primaryHits: completed.hits, sourceFrontier: report.manifest.sourceFrontier, excludingSourceIDs: excluded,
-                episodeLease: episodeLease, operationIsNested: true, includePrecedingHuman: true)
+            let expanded = try expandPrimaries(store: store, projectID: projectID, hits: completed.hits,
+                frontier: report.manifest.sourceFrontier, exclusions: excluded, lease: episodeLease, policy: componentPolicy)
             var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
                 projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
-                episodeLease: episodeLease, operationIsNested: true)
+                maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
+                componentPolicy: componentPolicy, historicalProvenance: componentPolicy.usesBoundedNeighborhood
+                    ? BoundedNeighborhoodExpansion.provenance(for: expanded) : nil)
             result.retrievalManifestID = report.manifestID
             result.retrievalManifestJSON = try report.serializedManifest()
             let coverage = report.manifest.coverage
@@ -240,12 +245,23 @@ enum ChatContextPreparation {
         }
     }
 
+    private static func expandPrimaries(store: MemoryStore, projectID: String, hits: [MemoryHit], frontier: Int,
+        exclusions: ExactSourceIDs, lease: EpisodeLease?, policy: ContextComponentPolicy) throws -> ExchangeExpansionReport {
+        if policy.usesBoundedNeighborhood {
+            return try BoundedNeighborhoodExpansion.expand(store: store, projectID: projectID, primaryHits: hits,
+                sourceFrontier: frontier, excludingSourceIDs: exclusions, episodeLease: lease, operationIsNested: true)
+        }
+        return try MeteredExchangeExpansion.expand(store: store, projectID: projectID, primaryHits: hits,
+            sourceFrontier: frontier, excludingSourceIDs: exclusions, episodeLease: lease,
+            operationIsNested: true, includePrecedingHuman: true)
+    }
+
     /// Internal control for separating source availability from answer quality.
     /// Every selected ID resolves to its original scoped record before any
     /// payload is read. Component reduction and full-body admission still run.
     private static func declaredSourceSnapshot(recent: ContextSnapshot, store: MemoryStore,
         conversationID: String, projectID: String, excludingEventID: String,
-        sourceIDs: [String], lease: EpisodeLease) throws -> ContextSnapshot {
+        sourceIDs: [String], lease: EpisodeLease, componentPolicy: ContextComponentPolicy) throws -> ContextSnapshot {
         guard !sourceIDs.isEmpty, sourceIDs.count <= ContextAssembler.componentMaximumEvidenceSpans,
               ExactSourceIDs(sourceIDs).count == sourceIDs.count,
               sourceIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 && !$0.contains("\0")
@@ -281,7 +297,13 @@ enum ChatContextPreparation {
         }
         var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
             projectID: projectID, excludingEventID: excludingEventID, historicalHits: hits,
-            episodeLease: lease, operationIsNested: true)
+            maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: lease, operationIsNested: true,
+            componentPolicy: componentPolicy, historicalProvenance: componentPolicy.usesBoundedNeighborhood
+                ? hits.enumerated().map { rank, hit in
+                    ContextEvidenceProvenance(eventID: hit.eventID, offset: hit.excerptOffset,
+                        byteLength: hit.excerpt.utf8.count, excerptSHA256: ContextSnapshot.digest(Data(hit.excerpt.utf8)),
+                        candidateRank: rank, origin: "primary", primaryRank: rank, anchorEventID: nil, direction: nil)
+                } : nil)
         result.retrievalManifestID = nil; result.retrievalManifestJSON = nil; result.retrievalNotice = nil
         try appendAudit(to: &result, fields: ["mode": "declared_original_sources",
             "version": "declared-original-sources-v1", "source_frontier": frontier,
@@ -312,7 +334,7 @@ enum ChatContextPreparation {
         prompt: String, input: String, range: Range<Int>?, semanticInput: String, semanticRange: Range<Int>?) throws {
         var audit = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         var trace = audit["selection_trace"] as? [String: Any] ?? [:]
-        trace["version"] = "historical-selection-trace-v1"
+        if trace["version"] as? String != "historical-selection-trace-v2" { trace["version"] = "historical-selection-trace-v1" }
         trace["lexical_query_version"] = HistoricalQueryFormulation.version
         trace["quoted_anchor_count"] = formulation.quotedAnchorCount
         trace["lexical_query_sha256"] = ContextSnapshot.digest(Data((formulation.query ?? "").utf8))

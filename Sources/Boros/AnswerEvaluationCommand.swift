@@ -579,7 +579,7 @@ enum AnswerEvaluationCommand {
                 }
                 report.sort { ($0["ordinal"] as? Int ?? 0) < ($1["ordinal"] as? Int ?? 0) }
                 guard var configuration = try object(EpisodeLimits()) as? [String: Any] else { throw Failure.invalid }
-                configuration["componentPolicy"] = try object(ContextComponentPolicy.selectedQwen)
+                configuration["componentPolicy"] = try object(ContextComponentPolicy.currentSelectedQwen)
                 let c = document.configuration
                 var value: [String: Any] = ["version": 1, "diagnostic": "production-answer-development-v1",
                     "split": "development", "history_id": document.history_id, "input_sha256": inputDigest,

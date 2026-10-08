@@ -151,7 +151,7 @@ enum AnswerAttemptCoordinatorChecks {
                 let accepted = try operation.accept()
                 checks[prefix + "_accepted_original_chat_scope"] = accepted.projectID == chat.projectID
                     && accepted.humanEventID == operation.identifiers.humanEventID && !accepted.origin.isLocalRead
-                checks[prefix + "_selected_policy_frozen"] = accepted.limits.componentPolicy == .selectedQwen
+                checks[prefix + "_selected_policy_frozen"] = accepted.limits.componentPolicy == .currentSelectedQwen
                 checks[prefix + "_complete_human_capture_before_preparation"] = try store.events(conversationID: chat.id)
                     .contains { $0.id == operation.identifiers.humanEventID && $0.text == prompt && $0.status == .complete }
                 if kind == .concurrentAcceptanceStop {

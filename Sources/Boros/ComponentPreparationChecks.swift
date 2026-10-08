@@ -15,6 +15,8 @@ enum ComponentPreparationChecks {
         case identityModel, identityTemplate, identityRuntime
         case legacyVersion, identityVersion
         case jsonCapability
+        case neighborhood, neighborhoodEnvelope, neighborhoodRecentOnly
+        case neighborhoodAuditDated, neighborhoodAuditFit
     }
     private final class Clock: EpisodeClockSource {
         private let lock = NSLock()
@@ -80,7 +82,8 @@ enum ComponentPreparationChecks {
             directory = URL(fileURLWithPath: temporaryPath, isDirectory: true)
                 .appendingPathComponent("boros-preparation-" + UUID().uuidString, isDirectory: true)
             store = try MemoryStore(directory: directory)
-            chat = try store.createConversation(projectID: "synthetic-preparation", title: "Synthetic component preparation")
+            chat = try store.createConversation(projectID: kind == .neighborhoodAuditDated
+                ? "synthetic-audit-" + String(repeating: "p", count: 240) : "synthetic-preparation", title: "Synthetic component preparation")
             currentID = "fixture-current-" + kind.rawValue
             droppedSourceID = "fixture-" + kind.rawValue + "-recent-0"
             let marker: String
@@ -104,7 +107,31 @@ enum ComponentPreparationChecks {
                         turnID: "fixture-archive-turn-\(index)", eventID: "fixture-\(kind.rawValue)-archive-\(index)")
                 }
             }
-            let count = kind == .boundary || kind == .legacyVersion || kind == .identityVersion ? 2 : (kind == .cancel || kind == .deadline
+            if kind == .neighborhood || kind == .neighborhoodEnvelope || kind == .neighborhoodRecentOnly {
+                let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic neighborhood evidence")
+                for (index, role) in [MemoryRole.assistant, .human, .assistant].enumerated() {
+                    _ = try store.append(conversationID: archive.id, role: role,
+                        text: index == 1 ? "pipelinekey synthetic original request" : "Synthetic immediate neighboring answer \(index)",
+                        status: index == 0 ? .partial : .complete, turnID: "fixture-neighborhood-turn-\(index)",
+                        eventID: "fixture-\(kind.rawValue)-archive-\(index)")
+                }
+            }
+            if kind == .neighborhoodAuditDated || kind == .neighborhoodAuditFit {
+                for primary in 0..<16 {
+                    let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic bounded audit evidence")
+                    for (index, role) in [MemoryRole.assistant, .human, .assistant].enumerated() {
+                        let prefix = "fixture-\(kind.rawValue)-archive-\(primary)-\(index)-"
+                        let eventID = kind == .neighborhoodAuditDated
+                            ? prefix + String(repeating: "e", count: 256 - prefix.utf8.count) : prefix
+                        _ = try store.append(conversationID: archive.id, role: role,
+                            text: index == 1 ? "pipelinekey original primary \(primary)" : "Adjacent original response \(index)",
+                            status: index == 0 ? .partial : .complete, turnID: "fixture-audit-turn-\(primary)-\(index)",
+                            eventID: eventID, sourceTime: kind == .neighborhoodAuditDated ? try Self.syntheticDate("2023-05-30") : nil)
+                    }
+                }
+            }
+            let count = kind == .neighborhood || kind == .neighborhoodEnvelope || kind == .neighborhoodAuditDated || kind == .neighborhoodAuditFit ? 0
+                : kind == .boundary || kind == .legacyVersion || kind == .identityVersion || kind == .neighborhoodRecentOnly ? 2 : (kind == .cancel || kind == .deadline
                 || kind == .identityModel || kind == .identityTemplate || kind == .identityRuntime) ? 1 : 7
             for index in 0..<count {
                 let text = kind == .cancel || kind == .deadline ? marker + " recent source"
@@ -115,13 +142,17 @@ enum ComponentPreparationChecks {
             }
             let episodeID = UUID().uuidString
             var limits = EpisodeLimits(); limits.componentPolicy = .selectedQwen
+            if kind == .neighborhood || kind == .neighborhoodEnvelope || kind == .neighborhoodRecentOnly
+                || kind == .neighborhoodAuditDated || kind == .neighborhoodAuditFit {
+                limits.componentPolicy = .selectedQwenNeighborhood
+            }
             if kind == .httpLimit { limits.resources.httpAttempts = 4 }
             _ = try store.acceptRequestAndBeginEpisode(conversationID: chat.id, turnID: "fixture-current-turn",
                 humanEventID: currentID, episodeID: episodeID, text: prompt, limits: limits, clock: clock.now())
             lease = EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
             settings.profile = .customLocal; settings.endpointURL = baseURL
             settings.endpointModel = Qwen38TextAdapter.modelID; settings.maximumOutput = 64
-            settings.endpointSafetyTokens = 256; settings.endpointContextLimit = kind == .envelope ? 9000 : 32768
+            settings.endpointSafetyTokens = 256; settings.endpointContextLimit = kind == .envelope || kind == .neighborhoodEnvelope ? 9000 : 32768
             settings.temperature = 0; settings.episodeLease = lease
             settings.endpointJSONOutput = kind == .jsonCapability
             switch kind {
@@ -142,7 +173,9 @@ enum ComponentPreparationChecks {
             let preparation = ComponentContextPreparationOperation(store: store, conversationID: chat.id,
                 projectID: chat.projectID, humanEventID: kind == .scope ? "fixture-foreign-human" : currentID,
                 prompt: prompt, settings: settings,
-                conversation: Conversation(), semanticIndex: nil, episodeLease: lease) { [self] outcome in finish(outcome) }
+                conversation: Conversation(), semanticIndex: nil,
+                retrievalStrategy: kind == .neighborhoodRecentOnly ? .recentOnly : .hybrid,
+                episodeLease: lease) { [self] outcome in finish(outcome) }
             operation = preparation
             if kind == .cancel || kind == .deadline { installBarrierObserver() }
             preparation.start()
@@ -474,6 +507,9 @@ enum ComponentPreparationChecks {
                         && prepared.settings.preparedContextComponents?.sourceSnapshotDigest == sourceDigest
                     checks[prefix + "_component_caps_independent_of_whole"] = proof.recent.tokens <= 8000
                         && proof.evidence.tokens <= 12000 && prepared.receipt.promptTokens == proof.wholePrompt.tokens
+                    checks[prefix + "_proof_uses_own_frozen_policy_version_and_reduction"] = try proof.policyVersion == state.limits.componentPolicy?.version
+                        && proof.reductionVersion == state.limits.componentPolicy?.reductionVersion
+                        && proof.policyDigest == EndpointRequest.digest(try state.limits.componentPolicy!.canonicalData())
                     let countInventory = try journalInventory()
                     checks[prefix + "_tokenizer_counts_charge_no_generative_input"] = countInventory.tokenizerWork > 0
                         && countInventory.generativeTokenizerWork == 0 && state.charged.httpAttempts > 4
@@ -544,6 +580,70 @@ enum ComponentPreparationChecks {
                         let body = try JSONSerialization.jsonObject(with: prepared.body) as! [String: Any]
                         checks[prefix + "_actual_optional_body_counted"] = (body["response_format"] as? [String: String]) == ["type": "json_object"]
                             && proof.modelIdentity.capabilities.contains("json_schema")
+                    case .neighborhood, .neighborhoodEnvelope:
+                        let expectedCount = kind == .neighborhood ? 2 : 1
+                        let selection = try JSONSerialization.jsonObject(with: prepared.snapshot.selectionEvidence()) as! [String: Any]
+                        let retrieval = try JSONSerialization.jsonObject(with: prepared.snapshot.retrievalAuditJSON!) as! [String: Any]
+                        let trace = retrieval["selection_trace"] as! [String: Any]
+                        checks[prefix + "_new_policy_preserves_original_primary_after_counted_neighbor_reduction"] =
+                            state.limits.componentPolicy == .selectedQwenNeighborhood && prepared.snapshot.evidence.count == expectedCount
+                            && prepared.snapshot.protectedPrimarySpanCount == 1
+                            && prepared.snapshot.evidence[0].eventID == "fixture-\(kind.rawValue)-archive-1"
+                            && prepared.snapshot.evidenceProvenance?.first?.origin == "primary"
+                            && proof.evidence.tokens == expectedCount * 5000
+                        checks[prefix + "_initial_assembly_and_final_delivery_are_distinct_and_bound"] =
+                            try trace["version"] as? String == "historical-selection-trace-v2"
+                            && trace["candidate_count"] as? Int == 3 && trace["delivered_count"] as? Int == expectedCount
+                            && (trace["delivery"] as? [[String: Any]])?.count == expectedCount
+                            && selection["historical_selection_trace"] is [String: Any]
+                            && audit["historical_provenance_sha256"] as? String == EndpointRequest.digest(
+                                try JSONSerialization.data(withJSONObject: selection["historical_provenance"]!, options: [.sortedKeys]))
+                        checks[prefix + "_counted_reductions_keep_byte_token_and_provider_limits"] =
+                            prepared.snapshot.selectionAudit?.maximumEvidenceSpans == 48
+                            && prepared.snapshot.selectionAudit?.maximumEvidenceBytes == 131072
+                            && prepared.snapshot.selectionAudit?.evidenceTokenExcludedCount == 1
+                            && prepared.snapshot.selectionAudit?.evidenceEnvelopeExcludedCount == (kind == .neighborhoodEnvelope ? 1 : 0)
+                            && state.limits.resources == EpisodeResources.developmentCaps
+                    case .neighborhoodRecentOnly:
+                        let recentBytes = "pipelinekey original recent decision".utf8.count + "Synthetic recent source 1".utf8.count
+                        let retrieval = try JSONSerialization.jsonObject(with: prepared.snapshot.retrievalAuditJSON!) as! [String: Any]
+                        checks[prefix + "_new_policy_recent_only_has_zero_historical_work"] = prepared.snapshot.evidence.isEmpty
+                            && prepared.snapshot.protectedPrimarySpanCount == 0 && retrieval["selection_trace"] == nil
+                            && retrieval["exchange_expansion"] == nil && state.charged.rawSourceBytes == 2 * (prompt.utf8.count + recentBytes)
+                            && state.charged.encoderInputBytes == 0 && state.charged.vectorBytes == 0
+                            && proof.evidence.tokens == 0 && proof.evidence.tokenizerWorkID == nil
+                        checks[prefix + "_new_policy_recent_only_journal_has_empty_bound_provenance"] =
+                            state.limits.componentPolicy == .selectedQwenNeighborhood
+                            && prepared.snapshot.selectionAudit?.maximumEvidenceSpans == 48
+                            && prepared.snapshot.evidenceProvenance?.isEmpty == true
+                    case .neighborhoodAuditDated, .neighborhoodAuditFit:
+                        let dated = kind == .neighborhoodAuditDated, count = prepared.snapshot.evidence.count
+                        let selection = try JSONSerialization.jsonObject(with: prepared.snapshot.selectionEvidence()) as! [String: Any]
+                        let retrieval = try JSONSerialization.jsonObject(with: prepared.snapshot.retrievalAuditJSON!) as! [String: Any]
+                        let trace = retrieval["selection_trace"] as! [String: Any]
+                        let excluded = prepared.snapshot.selectionAudit?.evidenceAuditExcludedCount
+                        checks[prefix + "_forty_eight_candidates_keep_sixteen_protected_primaries"] =
+                            trace["candidate_count"] as? Int == 48 && prepared.snapshot.protectedPrimarySpanCount == 16
+                            && prepared.snapshot.evidenceProvenance?.prefix(16).allSatisfy { $0.origin == "primary" } == true
+                            && (dated ? count >= 16 && count < 48 : count == 48)
+                        checks[prefix + "_exact_proof_and_real_selection_link_fit_hard_delivery_bound"] =
+                            try prepared.snapshot.deliveryAudit().count <= 32768
+                            && audit["components"] is [String: Any] && audit["selection_work_id"] as? String == prepared.snapshot.selectionWorkID
+                            && prepared.snapshot.selectionWorkID?.utf8.count == 36 && proof.sourceSnapshotDigest == sourceDigest
+                            && proof.evidence.tokens == count * 100 && proof.wholePrompt.tokens == 100 + count * 100
+                        checks[prefix + "_only_audit_size_removes_optional_neighbors_and_recounts"] =
+                            excluded == 48 - count && prepared.snapshot.selectionAudit?.evidenceAuditReductionRounds == excluded
+                            && prepared.snapshot.selectionAudit?.evidenceTokenExcludedCount == 0
+                            && prepared.snapshot.selectionAudit?.evidenceEnvelopeExcludedCount == 0
+                            && (dated ? (excluded ?? 0) > 0 && countInventory.tokenizerWork >= 5 : excluded == 0)
+                            && trace["audit_size_excluded_count"] as? Int == excluded
+                            && (trace["delivery"] as? [[String: Any]])?.count == count
+                            && (selection["historical_provenance"] as? [[String: Any]])?.count == count
+                        checks[prefix + "_source_dates_and_maximum_id_ranges_remain_required"] =
+                            prepared.snapshot.evidence.allSatisfy { dated ? $0.sourceTime != nil && $0.eventID.utf8.count == 256 : $0.sourceTime == nil }
+                            && prepared.snapshot.selectionAudit?.maximumEvidenceSpans == 48
+                            && prepared.snapshot.selectionAudit?.maximumEvidenceBytes == 131072
+                            && state.limits.resources == EpisodeResources.developmentCaps
                     default: checks[prefix + "_expected_failure"] = false
                     }
                     if kind == .pipeline || kind == .jsonCapability {
@@ -573,6 +673,8 @@ enum ComponentPreparationChecks {
                         && invocation?.finalStatus == .cancelled && restoredReceipt.charged == originalReceipt.charged
                         && restoredReceipt.held == originalReceipt.held
                         && invocation?.admissionJSON == originalAdmission
+                    checks[prefix + "_restore_preserves_own_frozen_policy_and_span_cap"] = restoredReceipt.limits == originalReceipt.limits
+                        && restoredReceipt.limits.componentPolicy?.evidenceSpans == state.limits.componentPolicy?.evidenceSpans
                     if kind == .pipeline {
                         if let inputProof {
                             let proofWork = try restored.episodeWork(episodeID: lease.episodeID, operationID: inputProof.operationID)
@@ -589,6 +691,9 @@ enum ComponentPreparationChecks {
                     }
                     if kind == .legacyVersion || kind == .identityVersion {
                         checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory, versionsOnly: true, identityVersion: kind == .identityVersion)) { _, latest in latest }
+                    }
+                    if kind == .neighborhoodRecentOnly {
+                        checks.merge(JournalCorruptionChecks.neighborhoodShapeChecks(archive: archive, directory: directory)) { _, latest in latest }
                     }
                 case .failure(let error):
                     let code = ComponentContextPreparationOperation.failureCode(error)
@@ -886,6 +991,55 @@ enum ComponentPreparationChecks {
                 checks[prefix + "legacy_missing_policy_decodes_nil"] = decoded.componentPolicy == nil
                     && decoded.resources == EpisodeResources.developmentCaps
             } catch { checks[prefix + "legacy_missing_policy_decodes_nil"] = false }
+            return checks
+        }
+        static func neighborhoodShapeChecks(archive: URL, directory: URL) -> [String: Bool] {
+            var checks: [String: Bool] = [:]
+            let shapes: [(String, Any)] = [("array", [Any]()), ("string", "synthetic scalar"),
+                ("number", 7), ("null", NSNull())]
+            for (selectionKey, digestKey, retrievalKey) in [
+                ("historical_selection_trace", "historical_selection_trace_sha256", "selection_trace"),
+                ("neighborhood_expansion", "neighborhood_expansion_sha256", "exchange_expansion")
+            ] {
+                for (shape, value) in shapes {
+                    let key = "component_preparation_neighborhood_recent_only_" + selectionKey + "_" + shape + "_rejected_with_matching_digests"
+                    do {
+                        checks[key] = try withCopy(archive: archive, directory: directory) { database in
+                            try MemoryStore.validateEpisodeJournal(database: database.handle)
+                            var admission = try object(database.bytes("SELECT admission_json FROM invocations WHERE id='fixture-invocation'"))
+                            guard var receipt = admission["receipt"] as? [String: Any],
+                                  var proof = receipt["componentProof"] as? [String: Any],
+                                  let contextBytes = Data(base64Encoded: try string(admission["context"])) else { throw FixtureError.malformed }
+                            var context = try object(contextBytes)
+                            let workID = try string(context["selection_work_id"])
+                            let source = try database.bytes("SELECT s.payload FROM episode_work w JOIN episode_request_snapshots s ON s.digest=w.snapshot_digest WHERE w.id=?", [.text(workID)])
+                            var selection = try object(source)
+                            guard (selection["historical_sources"] as? [[String: Any]])?.isEmpty == true,
+                                  var retrieval = context["retrieval"] as? [String: Any],
+                                  retrieval["mode"] as? String == "recent_only" else { throw FixtureError.malformed }
+                            selection[selectionKey] = value
+                            let boundBytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed])
+                            context[digestKey] = ContextSnapshot.digest(boundBytes)
+                            retrieval[retrievalKey] = value
+                            context["retrieval"] = retrieval
+                            let refreshedSource = try encoded(selection), sourceDigest = ContextSnapshot.digest(refreshedSource)
+                            try database.replaceSnapshot(workID: workID, payload: refreshedSource)
+                            context["source_snapshot_sha256"] = sourceDigest
+                            proof["sourceSnapshotDigest"] = sourceDigest
+                            receipt["componentProof"] = proof; context["components"] = proof
+                            admission["receipt"] = receipt; admission["context"] = try encoded(context).base64EncodedString()
+                            let refreshedAdmission = try encoded(admission)
+                            try database.execute("UPDATE invocations SET admission_json=?,admission_digest=? WHERE id='fixture-invocation'",
+                                [.bytes(refreshedAdmission), .text(ContextSnapshot.digest(refreshedAdmission))])
+                            var componentRejected = false
+                            do { try ContextComponentJournal.validate(database: database.handle) }
+                            catch MemoryError.database(let reason) { componentRejected = reason == "component journal neighborhood audit shape invalid" }
+                            do { try MemoryStore.validateEpisodeJournal(database: database.handle); return false }
+                            catch { return componentRejected }
+                        }
+                    } catch { checks[key] = false }
+                }
+            }
             return checks
         }
         private static func apply(_ mutation: Mutation, database: Database) throws {

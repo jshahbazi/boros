@@ -20,7 +20,7 @@ from evaluation_statistics import percentile
 ROOT = Path(__file__).resolve().parents[1]
 SCALES = (1000, 10000, 100000)
 MODES = ("warm", "restart")
-FILES = (*retrieval.CORE_FILES, *retrieval.PYTHON_FILES, "scripts/evaluate_scaling.py")
+FILES = (*retrieval.CURRENT_CORE_FILES, *retrieval.PYTHON_FILES, "scripts/evaluate_scaling.py")
 RESOURCE_KEYS = ("inputTokens", "outputTokens", "modelCalls", "httpAttempts", "memoryOperations",
                  "rawSourceBytes", "vectorBytes", "metadataRows", "encoderInputBytes")
 IMPORT_HASHES = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in FILES}
@@ -98,7 +98,7 @@ def compile_harness(output: Path, flags: list[str]) -> Path:
     source = output / "source"
     binary = output / "retrieval-scaling"
     command = ["/usr/bin/swiftc", *flags, "-I", str(source / "Sources/CSQLite"), "-o", str(binary),
-        *(str(source / name) for name in retrieval.CORE_FILES if name.endswith(".swift"))]
+        *(str(source / name) for name in retrieval.CURRENT_CORE_FILES if name.endswith(".swift"))]
     result = subprocess.run(command, capture_output=True, timeout=900)
     # Compiler diagnostics can contain source text; retain them privately.
     write_bytes(output / "compile.stdout", result.stdout)

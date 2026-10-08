@@ -71,6 +71,57 @@ class Contracts(unittest.TestCase):
                  "semantic_input_offset": 19, "semantic_input_bytes": 23}
         self.assertEqual(e.content_free_metadata(trace, frozenset()), trace)
 
+    def test_neighborhood_metadata_preserves_rank_direction_and_funding(self):
+        expansion = {"version": "bounded-bidirectional-neighborhood-v1", "maximum_primary_candidates": 16,
+            "maximum_candidates": 48, "primary_count": 16, "retained_primary_count": 16,
+            "excluded_primary_count": 0, "duplicate_primary_span_count": 0, "decisions": [
+                {"event_id": "synthetic-public-source", "origin": "primary", "primary_rank": 10,
+                 "final_rank": 10, "disposition": "retained_primary", "metadata_funded": True,
+                 "metadata_rows_reserved": 1, "payload_funded": False, "raw_source_bytes_reserved": 0},
+                {"anchor_event_id": "synthetic-public-source", "origin": "neighbor", "primary_rank": 10,
+                 "direction": "previous", "final_rank": 36, "disposition": "included_prefix",
+                 "metadata_funded": True, "metadata_rows_reserved": 3, "payload_funded": True,
+                 "raw_source_bytes_reserved": 258}]}
+        self.assertEqual(e.content_free_metadata(expansion, frozenset({"synthetic-public-source"})), expansion)
+
+    def test_neighborhood_metadata_does_not_publish_unknown_text_or_source_ids(self):
+        metadata = {"origin": "synthetic private origin sentinel", "direction": "synthetic private direction sentinel",
+            "event_id": "synthetic private source sentinel", "anchor_event_id": "synthetic private anchor sentinel",
+            "synthetic private field sentinel": {"primary_rank": 10, "final_rank": 36}}
+        sanitized = e.content_free_metadata(metadata)
+        serialized = json.dumps(sanitized)
+        self.assertNotIn("synthetic private", serialized)
+        self.assertEqual(sanitized["origin"], {"sha256": e.digest(metadata["origin"].encode()),
+            "bytes": len(metadata["origin"].encode())})
+        self.assertEqual(sanitized["direction"], {"sha256": e.digest(metadata["direction"].encode()),
+            "bytes": len(metadata["direction"].encode())})
+        self.assertTrue(any(key.startswith("field_sha256_") for key in sanitized))
+
+    def test_neighborhood_provenance_keeps_distinct_ranges_and_delivery_links(self):
+        provenance = [{"event_id": "synthetic-public-source", "origin": "primary", "primary_rank": 10,
+                       "offset": 120, "byte_length": 12, "excerpt_sha256": "a" * 64},
+                      {"event_id": "synthetic-public-source", "origin": "neighbor", "primary_rank": 11,
+                       "offset": 0, "byte_length": 40, "excerpt_sha256": "b" * 64, "direction": "previous"}]
+        audit = {"version": "context-neighborhood-v2", "policyVersion": "selected-model-context-components-v2",
+            "reduction_policy": "primary-first-neighbor-geometric-v1",
+            "historical_provenance_version": "bounded-neighborhood-provenance-v1", "historical_provenance": provenance,
+            "protected_primary_span_count": 1, "historical_provenance_sha256": "c" * 64,
+            "historical_selection_trace": {"version": "historical-selection-trace-v2", "candidate_count": 48},
+            "historical_selection_trace_sha256": "d" * 64, "neighborhood_expansion_sha256": "e" * 64,
+            "delivery": {"delivered_count": 2, "protected_primary_span_count": 1},
+            "selection_trace_omitted": True}
+        self.assertEqual(e.content_free_metadata(audit, frozenset({"synthetic-public-source"})), audit)
+
+    def test_neighborhood_provenance_hashes_free_text_inside_allowlisted_fields(self):
+        metadata = {"historical_provenance": [{"origin": "primary", "event_id": "synthetic private event sentinel",
+                      "direction": "synthetic private direction sentinel", "source_created_utc": "synthetic private date sentinel"}],
+                    "historical_selection_trace": {"version": "synthetic private version sentinel"},
+                    "neighborhood_expansion": {"decisions": [{"disposition": "synthetic private disposition sentinel"}]},
+                    "delivery": {"reduction_policy": "synthetic private policy sentinel"}}
+        serialized = json.dumps(e.content_free_metadata(metadata))
+        self.assertNotIn("synthetic private", serialized)
+        self.assertIn('"origin": "primary"', serialized)
+
     @classmethod
     def setUpClass(cls):
         cls.fixtures = e.generate("development", history_count=1)
