@@ -1,14 +1,14 @@
 # Design repair plan
 
-Written October 7, 2026 in response to the [design and test assessment](reviews/DESIGN-AND-TEST-ASSESSMENT-20261007.md). This is proposed design. Nothing in it is implemented or measured unless the linked record says so. It keeps the product decision in [the plan](../tracechat-plan.md): preserve accepted history, retrieve relevant evidence, make limits visible. It changes the order of work and what counts as progress.
+Written October 7, 2026 in response to the [design and test assessment](reviews/DESIGN-AND-TEST-ASSESSMENT-20261007.md); revised October 8, 2026 after checking each factual claim against the source records (see [Revision notes](#revision-notes)). This is proposed design. Nothing in it is implemented or measured unless the linked record says so. It keeps the product decision in [the plan](../tracechat-plan.md): preserve accepted history, retrieve relevant evidence, make limits visible. It changes the order of work and what counts as progress.
 
 ## Principles
 
-1. **Quality evidence precedes architecture.** No new schema, authority, service, deletion or tree work until the retrieval and answering gates below have a measured value on a registered cohort.
+1. **Quality evidence precedes architecture.** No new authority, service, deletion or tree work, and no schema change other than a retrieval structure that P1 has shown to raise recall, until the retrieval and answering gates below have a measured value on a registered cohort.
 2. **Measure stages separately.** Candidate recall, delivered recall, reader success on sufficient packs, end-to-end acceptance, latency and cost are six numbers. A change is judged by the stage it targets.
-3. **Retrieval is evaluated without a model.** Required-span recall is computable offline from annotations in seconds. Iterate retrieval there, and spend model and judge calls only on configurations that already clear the offline gate.
+3. **Retrieval is evaluated without generation.** Candidate recall is computable from annotations without any model server. Delivered recall also needs the selected model's token counts, from the local `/tokenize` endpoint or a pinned offline copy of the tokenizer; neither generates text or spends money. Iterate retrieval there, and spend generation and judge calls only on configurations that already clear the offline gate.
 4. **Check counts are not progress.** Contract checks stay as regression protection. Status documents report the six stage numbers and their cohort sizes.
-5. **Reuse what already works.** The investigation engine's full-index, rarity-weighted exchange search found all four missing turns on the local repeat. Port its selection into the ordinary path rather than tuning the eight-term query.
+5. **Reuse what already works.** The investigation engine scores whole human-led exchange blocks against every content term of the question with inverse-document-frequency weights (`NativeHistoryNavigation.swift:199` on `codex/native-investigation`). On the local repeat it delivered the missing turn in both previously missed cases it was run on, `1b9b7252` and `4baee567`; the third rejected miss, `51c32626`, and the accepted miss, `1a1907b4`, have not been run through it. Port that selection into the ordinary path and measure it on all four, rather than tuning the eight-term query.
 
 ## Gates
 
@@ -16,70 +16,86 @@ These restate the plan's targets with the stage split and realistic interim thre
 
 | Gate | Measure | Interim target | Release target (plan) |
 |---|---|---|---|
-| R1 candidate recall | Fraction of annotated positive turns present in the ranked candidate set before packing | 95 percent | 95 percent (Gate 2) |
-| R2 delivered recall | Fraction of annotated positive turns delivered whole after packing and token fitting | 90 percent | 95 percent (Gate 2) |
-| A1 reader on sufficient packs | Independently accepted answers when every required turn is delivered | 80 percent | Set from A1 measurement |
-| A2 end to end | Independently accepted answers over all declared questions, abstentions included | Better than recent-only with a 95 percent lower bound above zero | Plan Gate 4 and 5 terms |
+| R1 candidate recall | Budget-feasible answerable cases whose every annotated positive turn is in the ranked candidate set at a depth declared before measurement | 95 percent | Diagnostic only; no plan gate |
+| R2 delivered recall | Budget-feasible answerable cases whose every annotated positive turn is delivered whole after packing and token fitting, history-weighted, per replicate and build | 90 percent | 95 percent (Gate 2) |
+| A1 reader on sufficient packs | Independently accepted answers when an adjudicated sufficient pack is delivered | 80 percent | Set from A1 measurement |
+| A2 end to end | Independently accepted answers over all declared questions, abstentions included | Better than recent-only with a 95 percent lower bound above zero | Declared in the phase-0 decision sheet; the plan sets no absolute baseline score, and Gates 4 and 5 apply only to a tree comparison |
 | L1 memory latency | Added memory-path p95 over recent-only at 100,000 events | 2 seconds | 500 milliseconds (Gate 6) |
-| L2 turn cost | Model calls and input tokens per turn over recent-only | At most 3 calls and 40,000 tokens | Declared with the workload |
+| L2 turn cost | Added model calls, calibration requests included, and added input tokens per turn over recent-only | At most 3 calls and 40,000 tokens | Declared with the workload |
 
-Cohort: at least 100 answer-blind, category-stratified LongMemEval histories with opaque identities, three replicates for any model-involved result, abstentions retained in the denominator. The 51 previously used question identities stay out of every new cohort.
+R1 and R2 are case-level, matching Gate 2's "every required span" wording. Turn-level fractions, such as the earlier 14 of 18, are reported as secondary diagnostics. R1 rises by construction as the candidate depth grows, so R2 decides. Measured reference points: the fourteen-history hybrid run delivered every annotated turn in 8 of 12 answerable cases (four cases each missed one turn); the repaired 100,000-event warm automatic-context p95 is 0.621 seconds ([SCALING.md](SCALING.md)); recent-only used 2 model calls and about 3,500 input tokens per turn, investigation about 15 calls and 77,000 tokens ([local repeat](NATIVE-INVESTIGATION-LOCAL-REPEAT.md)).
+
+LongMemEval positive-turn annotations are a proxy for the plan's sufficient source spans. Temporal and multi-session questions can need unannotated antecedents or dates, and `1a1907b4` was accepted without its annotated turn. A case is budget-feasible when its annotated turns plus mandatory input fit the 12,000-token evidence cap; infeasible cases leave the R1 and R2 denominators and stay in A2, as plan section 13 requires.
+
+### Cohorts
+
+- **Development cohort.** The frozen 100-question declaration on `codex/native-investigation` ([NATIVE-INVESTIGATION-100.md](NATIVE-INVESTIGATION-100.md)): answer-blind, category-proportional, opaque version-8 identities, 49,229 turns. Only ten attempts have run on it. Its 90 answerable questions supply R1 and R2. The fourteen-history cohort is kept as a regression set so the four known misses stay visible.
+- **Held-out cohort.** Drawn in P6 from identities never used before: exclude the 51 from the seven, fourteen and thirty-question experiments and the frozen 100, leaving 349 of LongMemEval S's 500.
+- **Replicates.** Three for any model-involved result. Abstentions stay in every A2 denominator.
+
+LongMemEval S cannot satisfy the plan's statistical design on its own. It has 30 abstention and 30 preference questions in total, at least 17 abstentions and 11 preference questions are already used, and it has no immediate-follow-up or scoped instruction and lifecycle cases. LongMemEval M reuses the same 500 questions. See P6.
 
 ## Work packages
 
-Dependency order. Each package names its exit evidence. Packages P1 to P3 require no model calls and no spending.
+Dependencies: P0 before everything; P1 before P2; P3 and P4 can run beside P1 and P2; P5 after P4; P6 after P2, P3 and P5; P7 after P6. P1 and P2 make no generation calls. P3 uses only the local model server. P4 (Sol as judge), P5 (Sol as reference reader) and P6 make remote or paid requests and each needs its own authorization and spending cap. Every model run also needs a frozen declaration, as the earlier local runs had.
 
 ### P0 Consolidate branches
 
-Merge `codex/boros-foundation` into `main`, commit or discard the uncommitted working tree in the original checkout, rebase `codex/native-investigation` onto the result, and make `main` the only development branch. Record which experimental defaults are on (`v1/16` ordinary selection, investigation off). Exit: one branch, clean status, `scripts/check.py` passes on it, STATUS.md describes files that exist.
+`main` is an ancestor of `codex/boros-foundation`, so it fast-forwards. `codex/native-investigation` is five commits ahead of the foundation branch and one behind (the assessment docs commit). Commit the native branch's uncommitted stop record in its own worktree, rebase it onto the foundation branch, commit or discard the uncommitted working tree in the original checkout, fast-forward `main`, and make `main` the only development branch. Record which experimental defaults are on (`v1/16` ordinary selection, investigation off). Exit: one branch, clean status, `scripts/check.py` passes on it, STATUS.md describes files that exist.
 
 ### P1 Offline retrieval harness
 
-Build a model-free harness over the pinned LongMemEval S file that ingests each selected history into a temporary store, runs the actual native selection path through the existing CLI projection, and scores R1 and R2 against the scorer-only annotations. It must run all 100 cohort histories in minutes, report per category, retain every failure, and never expose annotations to the selector. Reuse the existing answer-blind selection, opaque-identity projection and v8 provenance pins. Exit: R1 and R2 for the current `v1/16` default on the 100-history cohort, recorded with cohort manifest hash. This number becomes the baseline every retrieval change is compared against.
+Extend `scripts/evaluate_imported_chat.py`, which already runs recent-only, lexical and hybrid selection offline in disposable stores, to the development cohort. It currently runs the legacy byte-bounded selector and skips the selected-Qwen staged token reduction (`evaluate_imported_chat.py:467-468`), so as written it can measure R1 but not R2. Add the actual selected-Qwen v1 assembly, with counts from the local `/tokenize` endpoint or a pinned offline tokenizer whose parity with `/tokenize` is checked. Reuse the answer-blind selection, opaque-identity projection and version-8 provenance pins. Never expose annotations to the selector. Report per category and retain every failure.
+
+Cache ingested stores by projection hash so iteration reruns only selection. Lexical ingestion of 100,000 events took 25 seconds warm; semantic indexing time for the cohort's 48.9 MB is unmeasured, so the harness reports its own wall time rather than assuming minutes.
+
+Exit: R1 and R2 for the current `v1/16` default on the development cohort and the fourteen-history regression set, with budget-feasibility labels and the cohort manifest hash. This becomes the baseline every retrieval change is compared against.
 
 ### P2 Retrieval repair
 
-Implement in the ordinary native path, each measured on P1 before the next:
+The four known misses have two different causes ([adversarial review](reviews/JUDGING-RETRIEVAL-ADVERSARIAL-20261006.md), case table). In `51c32626` and `1b9b7252` the needed turn is the message just after or just before a retrieved primary, but in the adjacent exchange. In `4baee567` the eight-term query has no lexical match for the target. The bidirectional neighborhood experiment reached three needed turns but appended them at candidate positions 30 and 31, after every primary, where geometric suffix reduction removed them under the 12,000-token cap ([reassessment](reviews/ARCHITECTURE-REASSESSMENT-20261006.md)). Implement in the ordinary native path, each step measured on P1 before the next:
 
-1. **Exchange units.** Index and retrieve complete human/assistant rounds as the ranking unit, delivering whole units. This removes the directional neighbor defect that caused three of four misses. The investigation engine already has the exchange index; make it a persistent, incrementally maintained store structure rather than a per-turn rebuild.
-2. **Full-question query.** Replace the eight-term prompt-order selector with the investigation engine's rarity-weighted content-term search over the whole question, keeping quoted anchors as mandatory terms. Keep OR semantics but rank by weighted term coverage and unit byte cost.
-3. **Wider candidate window, cost-aware packing.** Retrieve more candidates than will fit, then pack by relevance per token under the 12,000-token evidence cap, rather than rank order followed by geometric prefix removal. Protect mandatory units; make every omission an explicit receipt.
-4. **Global vector search.** Replace the chronological 4,096-chunk population with a search over every eligible chunk. At the current corpus scale a brute-force cosine pass over all vectors is cheap enough to measure before building an index. Measure on P1 whether semantic fusion raises R1 over lexical alone; if it does not, keep semantic off the ordinary path and stop spending maintenance budget on it.
-5. **Encoder decision.** If step 4 shows semantic value but coverage holes from the English-only gate limit it, evaluate one locally runnable multilingual code-tolerant encoder on the same offline harness. Do not change encoders on reach arguments alone.
+1. **Full-question query over exchange blocks.** Replace the eight-term prompt-order selector with the investigation engine's IDF-weighted scoring of human-led exchange blocks over every content term of the question, keeping quoted anchors as mandatory terms. Rank by weighted term coverage and block token cost. Measure first with the existing in-memory index rebuilt per turn; make it a persistent, incrementally maintained store structure only if it raises R2.
+2. **Anchor-adjacent packing.** Exchange blocks alone do not reach the `51c32626` and `1b9b7252` targets, which sit in the neighboring block. Deliver each selected block with its adjacent opposite-role message on each side when the budget allows, packed beside its anchor rather than after all primaries.
+3. **Wider candidate window, cost-aware packing.** Retrieve more candidates than will fit, then pack by relevance per token under the 12,000-token evidence cap, rather than rank order followed by geometric suffix reduction. Protect mandatory units; make every omission an explicit receipt.
+4. **Global vector search.** Replace the chronological 4,096-chunk population with a search over every eligible chunk. A brute-force cosine pass over all vectors is likely cheap at this scale; measure it before building an index. Measure on P1 whether semantic fusion raises R2 over lexical alone; if it does not, keep semantic off the ordinary path and stop spending maintenance budget on it.
+5. **Encoder decision.** If step 4 shows semantic value but coverage holes from the English-only gate limit it, evaluate one locally runnable multilingual, code-tolerant encoder on the same harness. Do not change encoders on reach arguments alone.
 
-Exit: R1 at or above 95 percent and R2 at or above 90 percent on the 100-history cohort, with the 100,000-event standalone latency profile rerun.
+Exit: R2 at or above 90 percent on the development cohort, all four known misses reported individually, and the 100,000-event standalone latency profile rerun against L1 and Gate 3. The literal search endpoint, at 3.0 seconds p95, already fails Gate 3's one-second target.
 
 ### P3 Latency and cost of the investigation route
 
-The investigation loop meets quality on three cases and misses L1 and L2 by an order of magnitude. Reduce it before any broader quality run:
+The investigation loop accepted three of three answers but misses L1 and L2 by an order of magnitude. Reduce it before any broader quality run:
 
-1. Build the map and exchange index once per store and maintain them incrementally under the existing background budget. Rebuilding per turn is the first cost to remove.
-2. Reduce the loop to one planner call and one final call by default. Keep the extraction stage and additional actions behind a setting until A1 shows they add accepted answers.
+1. Build the map and exchange index once per store and maintain them incrementally under the existing background budget, subject to principle 1. Rebuilding per turn is the first cost to remove.
+2. Reduce the loop to one planner call and one final call by default. Keep the extraction stage and additional actions behind a setting until A1 shows they add accepted answers. Each private stage opens a fresh component session with its own calibration request; count calibrations in L2 and determine whether the provider-admission contract can share one calibration across a turn.
 3. Reuse prompt prefixes across private stages so mlx-serve's cache applies; measure with the provider's usage receipts.
 4. Set the turn deadline to the L1 target and report every deadline failure.
 
-Exit: investigation p95 added latency and token cost on the three-case repeat recorded against L1 and L2; a decision on whether the route can become the ordinary path or stays an explicit mode.
+Exit: investigation p95 added latency and cost on the three-case repeat plus `51c32626` and `1a1907b4`, recorded against L1 and L2; a decision on whether the route can become the ordinary path or stays an explicit mode.
 
 ### P4 Judge calibration
 
 Before any model-involved quality claim:
 
-1. Assemble a blinded calibration set of at least 50 saved answers across accepted, rejected, abstention, incomplete evidence and correct-plus-unsupported cases, adjudicated by a person against the reference and the delivered evidence.
-2. Measure false-accept and false-reject rates for JevK5, Qwen-as-judge and Sol-as-judge against that adjudication, per category.
+1. Assemble a blinded calibration set of at least 50 saved answers across accepted, rejected, abstention, incomplete evidence and correct-plus-unsupported cases, adjudicated by the user or a reviewer they designate against the reference and the delivered evidence. Adjudicate pack sufficiency separately from the answer; Qwen gave the `51c32626` pack opposite sufficiency labels depending on the answer it judged.
+2. Measure false-accept and false-reject rates for JevK5, Qwen as judge and Sol as judge against that adjudication, per category. At 50 items a rate near 50 percent has a 95 percent interval of roughly 14 points either way; report intervals and enlarge the set if they cannot separate the candidates.
 3. Select the judge or ensemble with the lowest error, record the rates, and report every later acceptance with those rates attached.
-4. Keep answerability cues out of every model-visible identifier; the v8 opaque projection is the required baseline for all cohorts.
+4. Keep answerability cues out of every model-visible identifier; the version-8 opaque projection is the required baseline for all cohorts.
 
-Exit: recorded judge error rates; the LongMemEval local labels from earlier waves annotated with the measured rate of their judge.
+Exit: recorded judge error rates with intervals; the earlier LongMemEval local labels annotated with the measured rate of their judge; a set of adjudicated sufficient packs for P5.
 
 ### P5 Reader decision
 
-With P2 delivering sufficient packs, measure A1 on identical delivered evidence for the selected Qwen, at least one larger locally runnable model, and Sol as an upper reference. Compare direct answering with the investigation route's quote-extraction step. Decide the default reader on A1, latency and the remote-processing boundary. A remote default requires the plan's egress and disclosure contracts first; this package only produces the measurement that would justify that work.
+A1 needs sufficient packs, not P2's selector. Build them from annotations as the source controls did, keep only those P4 adjudicates sufficient, and measure A1 on identical packs for the selected Qwen, at least one larger locally runnable model, and Sol as an upper reference. Compare direct answering with the investigation route's quote-extraction step. Repeat on P2's delivered packs once P2 exits. Decide the default reader on A1, latency and the remote-processing boundary. A remote default requires the plan's egress and disclosure contracts first; this package only produces the measurement that would justify that work.
 
-Exit: A1 per reader on the 100-history cohort, three replicates.
+Exit: A1 per reader on the development cohort, three replicates.
 
 ### P6 Registered comparison
 
-Freeze the configuration from P2, P3 and P5, register a fresh held-out cohort disjoint from everything used so far, and run the plan's arm comparison for recent-only, ordinary hybrid and investigation. Report all six gate numbers with intervals. This is the first result that may be described as product quality.
+Freeze the configuration from P2, P3 and P5, register a held-out cohort from the 349 unused identities, and run the plan's arm comparison for recent-only, ordinary hybrid and investigation. Report all six gate numbers with intervals. This is the first result that may be described as product quality.
+
+Before registration, decide how to meet the plan's 200-history, 50-per-critical-category design. LongMemEval S cannot supply 50 abstention or preference cases, or any follow-up and instruction-lifecycle cases. Either register an additional source for those categories, or register the comparison as covering recall categories only and report the others inconclusive, as plan section 13 directs when confidence cannot be established.
 
 ### P7 Resume deferred architecture
 
@@ -87,11 +103,26 @@ Only after P6: authority lifecycle, deletion and restore fencing, service and MC
 
 ## Testing changes
 
-- Add the P1 harness to `scripts/check.py` with an R1 and R2 floor set from the last accepted result. A build that lowers recall fails the check, in the same way a broken ledger does today.
+- Add the P1 harness to `scripts/check.py` with a recall floor set from the last accepted result. `check.py` runs without a model server, so the floor uses R1 at the declared depth, or R2 only if P1 pins an offline tokenizer. A build that lowers recall fails the check, in the same way a broken ledger does today.
 - Move `*Checks.swift` out of the shipped binary into a separate test executable sharing the sources. The product bundle should not carry 7,500 lines of fixtures.
 - Report in STATUS.md one table of the six gate numbers with cohort size, replicates, judge error rate and source capture hash. Retire check-count headlines.
 - Require every quality document to state which stage it measures. A delivered-turn number is not an answer number, and an accepted-answer number without a judge error rate is a model opinion.
 
 ## What this plan does not do
 
-It does not promise that the local Qwen model can meet A1; P5 decides that. It does not adopt a summary tree; P7 keeps it gated. It does not enable remote processing; P5 produces only the measurement. It does not resume the held paid experiments; P4 and P6 require their own authorization and spending caps. It does not rewrite the storage, episode or backup layers, which pass their contracts and are not the cause of the failures.
+It does not promise that the local Qwen model can meet A1; P5 decides that. It does not adopt a summary tree; P7 keeps it gated. It does not enable remote processing; P5 produces only the measurement. It does not resume the held paid experiments; P4, P5 and P6 require their own authorization and spending caps. It does not rewrite the storage, episode or backup layers, which pass their contracts and are not the cause of the failures.
+
+## Revision notes
+
+The October 8 check against the source records corrected these points in the first version:
+
+1. It said the investigation engine "found all four missing turns". The local repeat covered two of the four missed cases; its third case, `gpt4_70e84552`, had all annotated turns delivered by hybrid already. It delivered the missing turn in both covered cases.
+2. It said exchange units remove the neighbor defect behind three of four misses. Exchange blocks start at each human message, so two of those targets sit in the neighboring block; the fix needs anchor-adjacent packing, and the third needs a better query.
+3. It said P1 to P3 need no model calls. P1 and P2 need the tokenizer for R2, and P3 needs local generation. P5 was missing from the list of packages needing spending authorization.
+4. R1 and R2 were turn fractions; Gate 2 is case-level. R1 had no declared depth, so a wider window would raise it by construction.
+5. A2's release target cited Gates 4 and 5, which compare a tree against the baseline, not memory against recent-only.
+6. It excluded only the 51 earliest identities and ignored the frozen 100-question declaration; it proposed a 100-history cohort without noting that LongMemEval S cannot meet the plan's per-category minimums.
+7. It described the packer as "geometric prefix removal"; the reduction removes suffixes.
+8. P1 proposed building a harness; an offline runner exists and needs extending to token-fitted assembly.
+9. Principle 1 forbade new schema while P2 and P3 proposed persistent indexes.
+10. P5 waited on P2 although A1 is defined on sufficient packs, which annotations can supply directly.
