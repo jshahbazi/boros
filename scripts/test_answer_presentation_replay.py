@@ -52,6 +52,56 @@ class Contracts(unittest.TestCase):
         self.assertIn("lexical", replay.RETRIEVAL_SELECTION["retrieval-on-21"])
         self.assertIn("semantic index", replay.RETRIEVAL_SELECTION["retrieval-on-21"])
 
+    def test_retrieval_arm_is_declared_only_for_hybrid_cohorts(self):
+        self.assertIsNone(replay.declared_retrieval_arm("retrieval-on-21", None))
+        self.assertEqual(replay.declared_retrieval_arm("retrieval-on-21", "ordinary_send"), "ordinary_send")
+        for cohort in ("recent-only-21", "echo-7"):
+            with self.assertRaisesRegex(replay.ReplayError, "retrieval_arm_requires_hybrid_cohort"):
+                replay.declared_retrieval_arm(cohort, "ordinary_send")
+        for arm in ("lexical", "hybrid", "ordinary-send"):
+            with self.assertRaisesRegex(replay.ReplayError, "unknown_retrieval_arm"):
+                replay.declared_retrieval_arm("retrieval-on-21", arm)
+        self.assertIn("disabled by policy", replay.RETRIEVAL_ARMS["ordinary_send"])
+        self.assertIn("no semantic index built or passed", replay.RETRIEVAL_ARMS["ordinary_send"])
+
+    def test_declare_parser_accepts_only_known_retrieval_arms(self):
+        import contextlib
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                replay.main(["declare", "--output", "/unused", "--dataset", "/unused", "--binary", "/unused",
+                             "--cohort", "retrieval-on-21", "--retrieval-arm", "lexical"])
+
+    def test_runner_command_passes_the_declared_retrieval_arm(self):
+        entry = {"attempt": 1, "context_framing": replay.V3, "component_policy": "selected-model-context-components-v1"}
+        base = replay.runner_command(Path("/b/Boros"), Path("/o/inputs/q.json"), Path("/o/run-00"), entry)
+        self.assertEqual(base, ["/b/Boros", "--answer-evaluation", "/o/inputs/q.json", "--output-directory", "/o/run-00",
+                                "--attempt", "1", "--context-framing", replay.V3])
+        lexical = replay.runner_command(Path("/b/Boros"), Path("/o/inputs/q.json"), Path("/o/run-00"),
+                                        {**entry, "context_framing": None, "retrieval_arm": "ordinary_send"})
+        self.assertEqual(lexical[-2:], ["--retrieval-arm", "ordinary_send"])
+        self.assertNotIn("--context-framing", lexical)
+        policy = replay.runner_command(Path("/b/Boros"), Path("/i"), Path("/n"),
+                                       {**entry, "component_policy": replay.NEIGHBORHOOD_POLICY})
+        self.assertEqual(policy[-2:], ["--component-policy", replay.NEIGHBORHOOD_POLICY])
+        self.assertNotIn("--retrieval-arm", base + policy)
+
+    def test_retrieval_arm_is_verified_from_the_runner_report(self):
+        entry = {"retrieval_arm": "ordinary_send"}
+        report = {"retrieval_arm_override": "ordinary_send", "semantic_retrieval_policy": "disabled_by_policy"}
+        item = {"retrieval_arm": "ordinary_send", "semantic_retrieval_policy": "disabled_by_policy",
+                "preparation_received_semantic_index": False, "semantic_sidecar_present": False,
+                "retrieval_arm_receipt_validated": True, "background": {"performed": False}}
+        self.assertTrue(replay.retrieval_arm_as_declared(entry, report, item))
+        for key, value in (("retrieval_arm", "hybrid"), ("semantic_retrieval_policy", "enabled"),
+                           ("preparation_received_semantic_index", True), ("semantic_sidecar_present", True),
+                           ("retrieval_arm_receipt_validated", None), ("background", {"performed": True})):
+            self.assertFalse(replay.retrieval_arm_as_declared(entry, report, {**item, key: value}), key)
+        self.assertFalse(replay.retrieval_arm_as_declared(entry, {}, item))
+        # A run declared without an arm must come from a report without one.
+        self.assertTrue(replay.retrieval_arm_as_declared({}, {"context_framing": replay.V4}, {"strategy": "hybrid"}))
+        self.assertFalse(replay.retrieval_arm_as_declared({}, report, {"strategy": "hybrid"}))
+        self.assertFalse(replay.retrieval_arm_as_declared({}, {}, item))
+
     def test_gold_delivery_matches_harness_coverage(self):
         case = history(gold_sizes=(10, 6))
         self.assertEqual(replay.gold_delivery(case, [span("g0", 0, 10), span("g1", 0, 6)])["gold_delivery"], "whole")

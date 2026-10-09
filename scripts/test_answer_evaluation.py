@@ -378,8 +378,12 @@ class NativeContracts(unittest.TestCase):
         for item in self.native["attempts"]:
             self.assertTrue(item["background"]["quiescent_during_answer"])
             self.assertTrue(item["background"]["performed"] == (item["strategy"] == "hybrid"))
+            # Runs without --retrieval-arm keep the original attempt fields.
+            self.assertTrue(not {"retrieval_arm", "semantic_retrieval_policy", "preparation_received_semantic_index",
+                                 "semantic_sidecar_present"} & set(item))
             self.assertTrue(item["episode"]["charged"]["httpAttempts"] > 0)
             self.assertTrue(item["episode"]["charged"]["modelCalls"] >= 2)
+        self.assertTrue("retrieval_arm_override" not in self.native)
 
     def test_native_shared_gui_send_stop_and_json_output(self):
         process = subprocess.run([str(NATIVE_BINARY), "--ui-shared-answer-integration-test",
@@ -466,7 +470,17 @@ class NativeContracts(unittest.TestCase):
                     "native_trial_cli_ordinary_metadata_contract_unchanged",
                     "native_trial_cli_version_4_refused", "native_trial_cli_version_5_refused",
                     "native_trial_cli_version_4_ordinary_accepted", "native_trial_cli_version_5_ordinary_accepted",
-                    *(f"native_trial_cli_invalid_argument_{i}_refused" for i in range(5)))
+                    *(f"native_trial_cli_invalid_argument_{i}_refused" for i in range(5)),
+                    "retrieval_arm_cli_default_is_declared_strategy", "retrieval_arm_cli_ordinary_send_accepted",
+                    "retrieval_arm_cli_combines_with_framing_and_attempt", "retrieval_arm_cli_refused_with_investigation",
+                    *(f"retrieval_arm_cli_invalid_{i}_refused" for i in range(6)),
+                    "retrieval_arm_selectable_only_while_policy_disables_semantic", "retrieval_arm_existing_arms_unchanged",
+                    "retrieval_arm_ordinary_send_replaces_only_hybrid_attempts",
+                    "retrieval_arm_ordinary_send_is_gui_send_configuration",
+                    "retrieval_arm_ordinary_send_builds_and_passes_no_index",
+                    "retrieval_arm_ordinary_send_coordinator_receives_no_index", "retrieval_arm_paired_input_accepted",
+                    "retrieval_arm_refused_when_no_selected_hybrid_attempt",
+                    "retrieval_arm_refused_for_declared_source_control", "retrieval_arm_absent_flag_accepts_every_input")
         self.assertTrue(all(checks.get(name) is True for name in required))
 
     def test_native_trial_flag_refuses_legacy_input_before_dispatch_or_output_creation(self):

@@ -240,6 +240,11 @@ enum AnswerEvaluationCommand {
         /// Optional explicit existing component policy, e.g. the experimental
         /// bounded-neighborhood policy that an earlier run froze as default.
         var componentPolicy: ContextComponentPolicy? = nil
+        /// Optional retrieval arm for declared `hybrid` attempts:
+        /// `--retrieval-arm ordinary_send` runs them in the ordinary Send
+        /// configuration (AnswerEvaluationRetrievalArm). Nil keeps every
+        /// declared strategy exactly as before.
+        var retrievalArm: AnswerEvaluationRetrievalArm? = nil
     }
     static let pinnableFramings = [ContextSourceFraming.currentSelectionVersion, ContextSourceFraming.quotedSelectionVersion]
     private static func invocationOptions(_ args: [String]) throws -> InvocationOptions {
@@ -265,10 +270,24 @@ enum AnswerEvaluationCommand {
                 let policies = [ContextComponentPolicy.selectedQwen, .selectedQwenNeighborhood]
                 guard let policy = policies.first(where: { $0.version == value }) else { throw Failure.arguments }
                 options.componentPolicy = policy
+            case "--retrieval-arm":
+                guard let arm = AnswerEvaluationRetrievalArm(rawValue: value), AnswerEvaluationRetrievalArm.selectable.contains(arm),
+                      arm != .ordinarySend || AnswerEvaluationRetrievalArm.ordinarySendSelectable else { throw Failure.arguments }
+                options.retrievalArm = arm
             default: throw Failure.arguments
             }
         }
         return options
+    }
+    /// A selected retrieval arm must change at least one attempt this
+    /// invocation runs, so a report that names the arm is never vacuous. The
+    /// declared-source control (version 6) delivers declared IDs instead of
+    /// selecting, so it has no ordinary Send counterpart.
+    private static func validateRetrievalArm(_ options: InvocationOptions, _ document: Document) throws {
+        guard options.retrievalArm != nil else { return }
+        guard document.version != 6, document.attempts.indices.contains(where: { index in
+            (options.onlyAttempt == nil || options.onlyAttempt == index) && document.attempts[index].strategy == .hybrid
+        }) else { throw Failure.arguments }
     }
     private struct Event: Decodable {
         let id: String
@@ -342,6 +361,7 @@ enum AnswerEvaluationCommand {
             let document = try decode(bytes)
             try options.preparationMode.validate(document)
             if let only = options.onlyAttempt { guard only < document.attempts.count else { throw Failure.arguments } }
+            try validateRetrievalArm(options, document)
             try createNewDirectory(output)
             let session = try Session(document: document, inputDigest: digest(bytes),
                 projectionDigest: projectionSHA256(bytes), output: output, preparationMode: options.preparationMode,
@@ -349,7 +369,7 @@ enum AnswerEvaluationCommand {
             DispatchQueue.global(qos: .userInitiated).async { session.begin() }
             dispatchMain()
         } catch Failure.arguments {
-            fputs("Usage: --answer-evaluation ABS_JSON --output-directory NEW_ABS [--investigate-memory | [--context-framing VERSION] [--attempt N] [--component-policy VERSION]].\n", stderr)
+            fputs("Usage: --answer-evaluation ABS_JSON --output-directory NEW_ABS [--investigate-memory | [--context-framing VERSION] [--attempt N] [--component-policy VERSION] [--retrieval-arm ordinary_send]].\n", stderr)
             return 2
         } catch {
             fputs("Answer evaluation input or destination failed validation.\n", stderr)
@@ -568,11 +588,12 @@ enum AnswerEvaluationCommand {
             do {
                 _ = try BackupArchive.restore(from: archive, to: restored, authority: .unmanagedNoDeletion)
                 let owner = try MemoryStore(directory: restored)
+                let arm = retrievalArm(attempt)
                 var semantic: SemanticIndex?
                 var construction: [String: Any] = ["schedule": "per_hybrid_attempt_before_acceptance", "performed": false]
                 let before = try owner.backgroundBudgetSnapshot()
                 let constructionStart = continuousSample()
-                if preparationMode.constructsSemanticIndex(version: document.version, attempt: attempt) {
+                if preparationMode.constructsSemanticIndex(version: document.version, attempt: attempt) && arm.buildsSemanticIndex {
                     do {
                         let index = try SemanticIndex(store: owner)
                         semantic = index
@@ -598,6 +619,13 @@ enum AnswerEvaluationCommand {
                             "failure": "index_construction_failed", "partial_coverage": true]
                     }
                 }
+                if arm == .ordinarySend {
+                    // The GUI host's own entry point: under the ordinary Send
+                    // policy it opens no sidecar and runs no encoder probe.
+                    semantic = try arm.hostIndex(store: owner)
+                    construction = ["schedule": "skipped_ordinary_send_semantic_disabled_by_policy", "performed": false,
+                        "host_index_opened": semantic != nil]
+                }
                 construction["milliseconds"] = milliseconds(constructionStart)
                 construction["budget_before"] = try object(before)
                 construction["budget_after"] = try object(owner.backgroundBudgetSnapshot())
@@ -611,7 +639,7 @@ enum AnswerEvaluationCommand {
                 }
             } catch {
                 do {
-                    var item = attemptMetadata(attempt, ordinal: index, preparationMode: preparationMode)
+                    var item = metadata(attempt, ordinal: index)
                     item["terminalized"] = true; item["failure_stage"] = "restore_or_setup"
                     item["failure"] = "attempt_setup_failed"; item["answer_bytes"] = 0
                     item["answer_sha256"] = digest(Data()); item["episode_state"] = NSNull()
@@ -630,17 +658,19 @@ enum AnswerEvaluationCommand {
             settings.contextFraming = framing
             var limits: EpisodeLimits?
             if let policy = options?.componentPolicy { var value = EpisodeLimits(); value.componentPolicy = policy; limits = value }
-            let value = AnswerAttemptCoordinator(store: owner,
+            let arm = retrievalArm(attempt)
+            let value = AnswerEvaluationCommand.coordinator(document: document, attempt: attempt, arm: arm, owner: owner,
                 conversationID: conversations[key(attempt.project_id, attempt.conversation_key)]!,
-                projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
-                settings: settings, semanticIndex: semantic, retrievalStrategy: attempt.strategy, limits: limits,
-                lexicalQueryUTF8Range: attempt.lexicalQueryUTF8Range,
-                semanticQueryUTF8Range: document.version >= 5 ? attempt.lexicalQueryUTF8Range : nil,
-                evidenceSourceIDs: attempt.evidence_source_ids,
-                onText: { _ in }, onComplete: { completion, text in
+                settings: settings, limits: limits, semantic: semantic,
+                onComplete: { completion, text in
                     do {
-                        var item = attemptMetadata(attempt, ordinal: ordinal, preparationMode: self.preparationMode)
+                        var item = self.metadata(attempt, ordinal: ordinal)
                         item["terminalized"] = true; item["background"] = construction
+                        if self.options?.retrievalArm != nil {
+                            item["preparation_received_semantic_index"] = self.coordinator?.preparationReceivesSemanticIndex as Any? ?? NSNull()
+                            item["semantic_sidecar_present"] = FileManager.default.fileExists(
+                                atPath: owner.directory.appendingPathComponent("semantic", isDirectory: true).path)
+                        }
                         item["identifiers"] = try object(completion.identifiers)
                         item["episode"] = try completion.episode.map { try object($0) } ?? NSNull()
                         item["episode_state"] = completion.episode?.state.rawValue as Any? ?? NSNull()
@@ -671,6 +701,13 @@ enum AnswerEvaluationCommand {
                                     ? native?["version"] as? String == "native-investigation-v1"
                                     : native == nil else { throw Failure.invalid }
                                 item["preparation_mode_receipt_validated"] = true
+                            }
+                            if arm == .ordinarySend {
+                                // The receipt must show the policy withheld the index.
+                                let retrieval = audit["retrieval"] as? [String: Any]
+                                guard retrieval?[SemanticRetrievalPolicy.auditField] as? String == SemanticRetrievalPolicy.disabledByPolicy.rawValue,
+                                      retrieval?["mode"] as? String == "lexical", retrieval?["manifest_id"] == nil else { throw Failure.invalid }
+                                item["retrieval_arm_receipt_validated"] = true
                             }
                             item["preparation"] = ["request_sha256": preparation.requestDigest,
                                 "selection_sha256": preparation.sourceSelectionDigest,
@@ -734,7 +771,7 @@ enum AnswerEvaluationCommand {
                     value.terminate(reason: .failed); return
                 }
                 do {
-                    var item = attemptMetadata(attempt, ordinal: ordinal, preparationMode: preparationMode)
+                    var item = metadata(attempt, ordinal: ordinal)
                     item["terminalized"] = true; item["background"] = construction
                     item["failure_stage"] = "acceptance"; item["failure"] = "acceptance_failed"
                     item["episode_state"] = NSNull(); item["invocation_status"] = NSNull()
@@ -752,6 +789,22 @@ enum AnswerEvaluationCommand {
                     }
                 } catch { finish(fatal: "ipc_publication_failed") }
             }
+        }
+        /// The declared strategy, unless `--retrieval-arm` selected an arm
+        /// for declared hybrid attempts.
+        private func retrievalArm(_ attempt: Attempt) -> AnswerEvaluationRetrievalArm {
+            AnswerEvaluationRetrievalArm.resolve(declared: attempt.strategy, selected: options?.retrievalArm)
+        }
+        /// Attempt metadata. Runs with `--retrieval-arm` also record each
+        /// attempt's arm and policy; other runs keep the original key set.
+        private func metadata(_ attempt: Attempt, ordinal: Int) -> [String: Any] {
+            var value = attemptMetadata(attempt, ordinal: ordinal, preparationMode: preparationMode)
+            if options?.retrievalArm != nil {
+                let arm = retrievalArm(attempt)
+                value["retrieval_arm"] = arm.rawValue
+                value["semantic_retrieval_policy"] = arm.semanticRetrieval.rawValue
+            }
+            return value
         }
         private func publish(_ item: [String: Any], text: String, ordinal: Int) throws {
             try writePrivate(Data(text.utf8), output.appendingPathComponent(String(format: "answer-%04d.txt", ordinal)))
@@ -780,7 +833,7 @@ enum AnswerEvaluationCommand {
                 // these records cannot be mistaken for completed answers.
                 let retained = Set(report.compactMap { $0["ordinal"] as? Int })
                 for index in document.attempts.indices where !retained.contains(index) {
-                    var item = attemptMetadata(document.attempts[index], ordinal: index, preparationMode: preparationMode)
+                    var item = metadata(document.attempts[index], ordinal: index)
                     let unselected = options?.onlyAttempt.map { $0 != index } ?? false
                     item["terminalized"] = false; item["failure_stage"] = unselected ? "not_selected" : "runner"
                     item["failure"] = unselected ? "attempt_not_selected_by_invocation" : fatal ?? "runner_outcome_unavailable"
@@ -809,6 +862,11 @@ enum AnswerEvaluationCommand {
                     value["context_framing_pinned"] = options.framingPinned
                     if let only = options.onlyAttempt { value["selected_attempt"] = only }
                     if let policy = options.componentPolicy { value["component_policy_override"] = policy.version }
+                    if let arm = options.retrievalArm {
+                        value["retrieval_arm_override"] = arm.rawValue
+                        value["semantic_retrieval_policy"] = arm.semanticRetrieval.rawValue
+                        value["retrieval_arm_applies_to"] = "declared_hybrid_attempts"
+                    }
                 }
                 if document.version >= 2 {
                     if (2...3).contains(document.version) { value["witness_mode"] = witnessMode }
@@ -1075,6 +1133,25 @@ enum AnswerEvaluationCommand {
             && completion.captureHealthy && completion.accountingHealthy && completion.invocationStarted
             && completion.generation.failure == nil && !completion.generation.stopped
     }
+    /// The coordinator of one attempt. `Session.answer` and the retrieval-arm
+    /// checks share it, so the checks exercise the command's own construction.
+    /// For the recent-only and hybrid arms the arguments are exactly those the
+    /// command passed before `--retrieval-arm` existed (`.enabled` is the
+    /// coordinator's default policy).
+    private static func coordinator(document: Document, attempt: Attempt, arm: AnswerEvaluationRetrievalArm,
+        owner: MemoryStore, conversationID: String, settings: GenerationSettings, limits: EpisodeLimits?,
+        semantic: SemanticIndex?, runner: AnswerAttemptRunning = ModelRunner(),
+        onStage: ((AnswerAttemptStage, AnswerAttemptPreparation?) -> Void)? = nil,
+        onComplete: @escaping (AnswerAttemptCompletion, String) -> Void) -> AnswerAttemptCoordinator {
+        AnswerAttemptCoordinator(store: owner, conversationID: conversationID,
+            projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
+            settings: settings, semanticIndex: semantic, retrievalStrategy: arm.retrievalStrategy, limits: limits,
+            lexicalQueryUTF8Range: attempt.lexicalQueryUTF8Range,
+            semanticQueryUTF8Range: document.version >= 5 ? attempt.lexicalQueryUTF8Range : nil,
+            evidenceSourceIDs: attempt.evidence_source_ids,
+            semanticRetrieval: arm.semanticRetrieval,
+            runner: runner, onStage: onStage, onText: { _ in }, onComplete: onComplete)
+    }
     private static func attemptMetadata(_ attempt: Attempt, ordinal: Int,
                                         preparationMode: PreparationMode = .ordinary) -> [String: Any] {
         var value: [String: Any] = ["ordinal": ordinal, "probe_id": attempt.probe_id, "strategy": attempt.strategy.rawValue,
@@ -1250,7 +1327,8 @@ extension AnswerEvaluationCommand {
         guard LocalEndpoint.chatURL(baseURL) != nil else {
             completion(["witness_fixture_loopback_required": false]); return
         }
-        do { WitnessCheckSuite(baseURL: baseURL, checks: try witnessDecodeChecks(baseURL: baseURL).merging(longMemoryDecodeChecks(baseURL: baseURL)) { _, newer in newer }, completion: completion).next() }
+        do { WitnessCheckSuite(baseURL: baseURL, checks: try witnessDecodeChecks(baseURL: baseURL).merging(longMemoryDecodeChecks(baseURL: baseURL)) { _, newer in newer }
+                .merging(retrievalArmChecks(baseURL: baseURL)) { _, newer in newer }, completion: completion).next() }
         catch { completion(["witness_contract_fixture_started": false]) }
     }
 
@@ -1711,6 +1789,97 @@ extension AnswerEvaluationCommand {
             configuration["context_limit"] = 3200; root["configuration"] = configuration
         }
         return root
+    }
+
+    /// `--retrieval-arm` contracts that need no endpoint: option parsing,
+    /// refusal before any output exists, per-attempt resolution, and the
+    /// ordinary Send host index. Selection equivalence with the retrieval
+    /// harness is checked across binaries by scripts/test_ordinary_send_arm.py.
+    private static func retrievalArmChecks(baseURL: String) throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        let base = ["--answer-evaluation", "/synthetic/input.json", "--output-directory", "/synthetic/output"]
+        let plain = try invocationOptions(base)
+        let selected = try invocationOptions(base + ["--retrieval-arm", "ordinary_send"])
+        let combined = try invocationOptions(base + ["--context-framing", ContextSourceFraming.quotedSelectionVersion,
+            "--retrieval-arm", "ordinary_send", "--attempt", "1"])
+        checks["retrieval_arm_cli_default_is_declared_strategy"] = plain.retrievalArm == nil
+        checks["retrieval_arm_cli_ordinary_send_accepted"] = selected.retrievalArm == .ordinarySend
+            && selected.preparationMode == .ordinary && selected.componentPolicy == nil && !selected.framingPinned
+        checks["retrieval_arm_cli_combines_with_framing_and_attempt"] = combined.retrievalArm == .ordinarySend
+            && combined.onlyAttempt == 1 && combined.framingPinned
+        for (index, extra) in [["--retrieval-arm", "hybrid"], ["--retrieval-arm", "recent_only"], ["--retrieval-arm", "lexical"],
+                               ["--retrieval-arm", "ordinary-send"], ["--retrieval-arm"],
+                               ["--retrieval-arm", "ordinary_send", "--retrieval-arm", "ordinary_send"]].enumerated() {
+            do { _ = try invocationOptions(base + extra); checks["retrieval_arm_cli_invalid_\(index)_refused"] = false }
+            catch { checks["retrieval_arm_cli_invalid_\(index)_refused"] = true }
+        }
+        do {
+            _ = try invocationOptions(base + ["--investigate-memory", "--retrieval-arm", "ordinary_send"])
+            checks["retrieval_arm_cli_refused_with_investigation"] = false
+        } catch { checks["retrieval_arm_cli_refused_with_investigation"] = true }
+        checks["retrieval_arm_selectable_only_while_policy_disables_semantic"] = AnswerEvaluationRetrievalArm.ordinarySendSelectable
+            == (SemanticRetrievalPolicy.ordinarySend == .disabledByPolicy)
+            && AnswerEvaluationRetrievalArm.selectable == [.ordinarySend]
+
+        // Resolution: without the flag every attempt keeps its declared
+        // strategy, the coordinator default policy and the explicit build.
+        let unchanged = ContextRetrievalStrategy.allCases.allSatisfy { strategy in
+            let arm = AnswerEvaluationRetrievalArm.resolve(declared: strategy, selected: nil)
+            return arm.retrievalStrategy == strategy && arm.semanticRetrieval == .enabled
+                && arm.buildsSemanticIndex == (strategy == .hybrid) && arm.rawValue == strategy.rawValue
+        }
+        checks["retrieval_arm_existing_arms_unchanged"] = unchanged
+        let recent = AnswerEvaluationRetrievalArm.resolve(declared: .recentOnly, selected: .ordinarySend)
+        let ordinary = AnswerEvaluationRetrievalArm.resolve(declared: .hybrid, selected: .ordinarySend)
+        checks["retrieval_arm_ordinary_send_replaces_only_hybrid_attempts"] = recent == .recentOnly && ordinary == .ordinarySend
+        checks["retrieval_arm_ordinary_send_is_gui_send_configuration"] = ordinary.retrievalStrategy == .hybrid
+            && ordinary.semanticRetrieval == SemanticRetrievalPolicy.ordinarySend && !ordinary.buildsSemanticIndex
+
+        // The host index: the GUI's entry point opens nothing under the policy.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-retrieval-arm-check-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory)
+        var opened = 0
+        let host = try ordinary.hostIndex(store: store) { _ in opened += 1; throw SemanticError.invalid }
+        let others = try [AnswerEvaluationRetrievalArm.recentOnly, .hybrid].map { arm in
+            try arm.hostIndex(store: store) { _ in opened += 1; throw SemanticError.invalid }
+        }
+        let window = try store.backgroundBudgetSnapshot().window
+        checks["retrieval_arm_ordinary_send_builds_and_passes_no_index"] = host == nil && others.allSatisfy { $0 == nil } && opened == 0
+            && !FileManager.default.fileExists(atPath: store.directory.appendingPathComponent("semantic", isDirectory: true).path)
+            && window == nil
+        let admitted = AnswerAttemptCoordinator(store: store, conversationID: "unused", projectID: "unused", prompt: "unused",
+            settings: GenerationSettings(), semanticIndex: nil, semanticRetrieval: ordinary.semanticRetrieval,
+            onText: { _ in }, onComplete: { _, _ in })
+        checks["retrieval_arm_ordinary_send_coordinator_receives_no_index"] = !admitted.preparationReceivesSemanticIndex
+
+        // Refusal happens after decoding and before the output directory.
+        func accepts(_ document: Document, _ options: InvocationOptions) -> Bool {
+            do { try validateRetrievalArm(options, document); return true } catch { return false }
+        }
+        var paired = witnessFixture(baseURL: baseURL)
+        paired["version"] = 7
+        let time = EventSourceTime(value: "2023-07-27T18:00", precision: "minute", timezone: "unspecified",
+            sourceSHA256: String(repeating: "e", count: 64), locator: "/synthetic/retrieval-arm/date", originalValue: "2023/07/27 (Thu) 18:00")
+        paired["events"] = (paired["events"] as! [[String: Any]]).map { var event = $0; event["source_time"] = time.object; return event }
+        var question = (paired["attempts"] as! [[String: Any]])[0]
+        question["question_time"] = time.object
+        var hybrid = question; hybrid["strategy"] = "hybrid"
+        paired["attempts"] = [question, hybrid]
+        let pairedDocument = try decode(witnessFixtureBytes(paired), pins: longMemoryFixturePins(paired))
+        let witness = witnessFixture(baseURL: baseURL)
+        let witnessDocument = try decode(witnessFixtureBytes(witness), pins: witnessFixturePins(witness))
+        let control = sourceControlFixture(baseURL: baseURL)
+        let controlDocument = try decode(witnessFixtureBytes(control), pins: sourceControlFixturePins(control))
+        var recentOnly = selected; recentOnly.onlyAttempt = 0
+        var hybridOnly = selected; hybridOnly.onlyAttempt = 1
+        checks["retrieval_arm_paired_input_accepted"] = accepts(pairedDocument, selected) && accepts(pairedDocument, hybridOnly)
+        checks["retrieval_arm_refused_when_no_selected_hybrid_attempt"] = !accepts(pairedDocument, recentOnly)
+            && !accepts(witnessDocument, selected)
+        checks["retrieval_arm_refused_for_declared_source_control"] = !accepts(controlDocument, selected)
+        checks["retrieval_arm_absent_flag_accepts_every_input"] = accepts(pairedDocument, plain) && accepts(witnessDocument, plain)
+            && accepts(controlDocument, plain)
+        return checks
     }
 
     private static func sourceControlFixturePins(_ root: [String: Any]) throws -> InputPins {

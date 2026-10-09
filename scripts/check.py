@@ -114,6 +114,14 @@ def main():
         total += evaluation_report["checks"]
         if imported_evaluation.returncode or evaluation_report["failed"] or evaluation_report["errors"] or evaluation_report["skipped"]:
             return 1
+        # Compiles the delivery harness into the cache the recall floor below reuses.
+        ordinary_send = subprocess.run([sys.executable, str(ROOT / "scripts/test_ordinary_send_arm.py"),
+                                        "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=1800)
+        ordinary_send_report = json.loads(ordinary_send.stdout)
+        print(json.dumps({"suite": "ordinary-send-evaluation-arm", **ordinary_send_report}))
+        total += ordinary_send_report["checks"]
+        if ordinary_send.returncode or ordinary_send_report["failed"] or ordinary_send_report["errors"] or ordinary_send_report["skipped"]:
+            return 1
     # Recall floor: runs the offline retrieval harness on the regression cohort. It skips, visibly
     # and with exit code 0, when the pinned dataset or tokenizer is unavailable. A skip adds no checks.
     floor = subprocess.run([sys.executable, str(ROOT / "scripts/retrieval_floor.py")],
