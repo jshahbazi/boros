@@ -392,7 +392,8 @@ These are the historical labels already attached to the items, from the runs tha
 | Qwen and Sol, four-field source-aware rubric | 2 each | 1/1 each | 0/1 each |
 | Sol, source-only sufficiency | 8 | sufficiency agreement 8/8, kappa 1.0 | |
 
-- **Qwen as judge rejects about half of correct answers.** Its disagreements concentrate in the neighborhood run (7 of 9 labels) and the independent cohort (3 of 9). Accepted-answer counts in records judged by Qwen are therefore likely undercounts, by an amount that may differ between arms; they should not be compared across arms without re-judging.
+- **Correction, October 9, 2026: the Qwen figure reflects a rubric difference, not only judge error.** Nine answerable items whose answers decline ("no record of that") were adjudicated accept, apparently as the right behavior given insufficient evidence. The protocol's accept requires agreement with the reference, so under it those answers are rejects. Eight of Qwen's 12 disagreements are these declines. A first Sonnet pass (one replicate, 71 of 100 replies parseable) agrees with Sol on every item both labelled and disagrees with the adjudication mainly on the same declines. The rubric question is with the user; until it is settled, no judge's false-reject rate here is final.
+- **As first recorded:** Qwen as judge rejects about half of the answers adjudicated correct. Its disagreements concentrate in the neighborhood run (7 of 9 labels) and the independent cohort (3 of 9). Accepted-answer counts in records judged by Qwen are therefore likely undercounts, by an amount that may differ between arms; they should not be compared across arms without re-judging.
 - **False accept is effectively unmeasured.** The set has only 7 adjudicated rejects, and the earlier judges saw at most 4 of them. Measuring false-accept rates needs more wrong answers; see the next steps below.
 
 ### Answer presentation defects
