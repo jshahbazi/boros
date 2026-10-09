@@ -193,6 +193,61 @@ class Contracts(unittest.TestCase):
                 v.post(other, {}, "synthetic-token")
             self.assertFalse(opener.called)
 
+    def test_generation_controls_are_opt_in_and_validated_per_model(self):
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        schema = {"type": "object", "properties": {"answer": {"type": "string", "enum": ["yes", "no"]}},
+                  "required": ["answer"], "additionalProperties": False}
+        default = v.payload(messages, 64)
+        self.assertEqual(set(default), {"anthropic_version", "messages", "max_tokens", "system"})
+        self.assertEqual(v.count_payload(messages), v.count_payload(messages, schema=None))
+        sonnet = v.payload(messages, 64, model="claude-sonnet-5-5", schema=schema, thinking={"type": "between_tools"})
+        self.assertEqual(sonnet["thinking"], {"type": "between_tools"})
+        self.assertEqual(sonnet["output_config"], {"format": {"type": "json_schema", "schema": schema}})
+        self.assertEqual({key: value for key, value in sonnet.items() if key not in ("thinking", "output_config")},
+                         default)
+        self.assertEqual(v.payload(messages, 64, model="claude-sonnet-5-5", thinking={"type": "between_tools"},
+                                   effort="high")["output_config"], {"effort": "high"})
+        opus = v.payload(messages, 2048, model="claude-opus-5-5", schema=schema, effort="low")
+        self.assertNotIn("thinking", opus)
+        self.assertEqual(opus["output_config"], {"effort": "low", "format": {"type": "json_schema", "schema": schema}})
+        for body in (sonnet, opus):
+            self.assertTrue({"temperature", "top_p", "top_k", "output_format", "model"}.isdisjoint(body))
+        count = v.count_payload(messages, model="claude-sonnet-5-5", schema=schema)
+        self.assertEqual(count["output_config"], {"format": {"type": "json_schema", "schema": schema}})
+        self.assertTrue({"thinking", "max_tokens"}.isdisjoint(count))
+        for model, thinking, effort, code in (
+                ("claude-sonnet-5-5", {"type": "disabled"}, None, "thinking_invalid"),
+                ("claude-sonnet-5-5", {"type": "adaptive"}, None, "thinking_invalid"),
+                ("claude-sonnet-5-5", {"type": "enabled", "budget_tokens": 1024}, None, "thinking_invalid"),
+                ("claude-sonnet-5-5", {"type": "between_tools", "display": "omitted"}, None, "thinking_invalid"),
+                ("claude-sonnet-5-5", {"type": "between_tools"}, "xhigh", "effort_invalid_with_between_tools"),
+                ("claude-sonnet-5-5", {"type": "between_tools"}, "max", "effort_invalid_with_between_tools"),
+                ("claude-opus-5-5", {"type": "between_tools"}, None, "thinking_unsupported_for_model"),
+                ("claude-opus-5-5", {"type": "disabled"}, "low", "thinking_invalid"),
+                ("claude-opus-5-5", None, "minimal", "effort_invalid"),
+                ("claude-haiku-5-5", None, "low", "model_not_supported")):
+            with self.subTest(model=model, thinking=thinking, effort=effort), self.assertRaisesRegex(v.VertexError, code):
+                v.payload(messages, 64, model=model, thinking=thinking, effort=effort)
+        for bad in ({"type": "object", "properties": {}, "required": []},
+                    {"type": "object", "properties": {"a": {"type": "object", "properties": {}, "required": []}},
+                     "required": ["a"], "additionalProperties": False},
+                    {"type": "string"}, [], None):
+            with self.subTest(schema=bad), self.assertRaisesRegex(v.VertexError, "output_schema_invalid"):
+                v.payload(messages, 64, schema=bad) if bad is not None else v.output_format(bad)
+
+    def test_response_metadata_reports_stop_reason_and_thinking_tokens_only(self):
+        raw = reply(stop_reason="max_tokens", content=[{"type": "thinking", "thinking": "", "signature": "s"}],
+                    usage={"input_tokens": 5, "output_tokens": 256, "output_tokens_details": {"thinking_tokens": 256}})
+        self.assertEqual(v.response_metadata(raw), {"stop_reason": "max_tokens", "thinking_tokens": 256})
+        self.assertEqual(v.response_metadata(reply()), {"stop_reason": "end_turn", "thinking_tokens": None})
+        self.assertEqual(v.response_metadata(reply(stop_reason="PRIVATE_TEXT")), {"stop_reason": "other",
+                                                                                   "thinking_tokens": None})
+        self.assertEqual(v.response_metadata(b"not json"), {"stop_reason": None, "thinking_tokens": None})
+        # Existing callers' usage records are unchanged: reasoning stays zero.
+        self.assertEqual(v.parse_usage(json.loads(raw))["reasoning_tokens"], 0)
+        with self.assertRaisesRegex(v.VertexError, "response_incomplete"):
+            v.parse_response(raw)
+
     def test_pricing_is_declared_and_rounds_up(self):
         pricing = v.Pricing("5", "25")
         self.assertEqual(pricing.microusd(1000, 100), 7500)

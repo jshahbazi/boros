@@ -1139,6 +1139,56 @@ def parse_sufficiency_text(text):
     return value["sufficiency"] if value["sufficiency"] in ("sufficient", "insufficient") else None
 
 
+# Transport-level reply constraint for Vertex judges (structured outputs, `output_config.format`).
+# It is separate from JUDGE_PROMPTS: the prompt texts and their pinned hashes are unchanged, and
+# declarations pin this hash on its own. The verdict schema's single field carries the yes or no
+# answer the upstream prompt asks for; the sufficiency schema is exactly the object the sufficiency
+# prompt asks for, so parse_sufficiency_text parses it unchanged.
+REPLY_SCHEMAS = {
+    "version": "boros-judge-calibration-reply-schemas-v1",
+    "transport": "output_config.format, type json_schema",
+    "verdict": {
+        "schema": {"type": "object", "properties": {"answer": {"type": "string", "enum": ["yes", "no"]}},
+                   "required": ["answer"], "additionalProperties": False},
+        "field": "answer", "mapping": {"yes": "accept", "no": "reject"}},
+    "sufficiency": {
+        "schema": {"type": "object",
+                   "properties": {"sufficiency": {"type": "string", "enum": ["sufficient", "insufficient"]}},
+                   "required": ["sufficiency"], "additionalProperties": False},
+        "field": "sufficiency", "mapping": {"sufficient": "sufficient", "insufficient": "insufficient"}},
+    "reply": "strict JSON object with exactly the schema's single field and one of its enum values, surrounding "
+             "whitespace allowed; anything else, a refusal or a truncated reply is a recorded failure",
+}
+
+
+def reply_schema_sha256() -> str:
+    return sha256_bytes(canonical(REPLY_SCHEMAS))
+
+
+def parse_structured_reply(text, stage: str):
+    """Constrained JSON reply -> label, or None when it is off schema (never coerced)."""
+    require(stage in STAGES, "stage_invalid")
+    if stage == "sufficiency":
+        return parse_sufficiency_text(text)
+    if not isinstance(text, str):
+        return None
+
+    def pairs(items):
+        keys = [key for key, _ in items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate")
+        return dict(items)
+    try:
+        value = json.loads(text.strip(), object_pairs_hook=pairs,
+                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (ValueError, RecursionError):
+        return None
+    spec = REPLY_SCHEMAS["verdict"]
+    if not isinstance(value, dict) or set(value) != {spec["field"]} or not isinstance(value[spec["field"]], str):
+        return None
+    return spec["mapping"].get(value[spec["field"]])
+
+
 # --------------------------------------------------------------------------- scoring
 
 
@@ -1370,6 +1420,22 @@ def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True
 # --------------------------------------------------------------------------- declarations
 
 DECLARATION_MODELS = {"vertex-opus": "claude-opus-5-5", "vertex-sonnet": "claude-sonnet-5-5"}
+# Vertex declaration v2: structured replies plus explicit per-model thinking controls. Version 1
+# (DECLARATION_FORMAT) stays valid so runs made under it can be resumed and verified unchanged.
+DECLARATION_FORMAT_V2 = "boros-judge-calibration-vertex-declaration-v2"
+VERTEX_DECLARATION_FORMATS = (DECLARATION_FORMAT, DECLARATION_FORMAT_V2)
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+PROVIDER_DEFAULT = "provider-default"
+THINKING_OMITTED = "omitted-adaptive"  # no `thinking` field is sent; the model thinks adaptively
+# Per model: the only accepted `execution.thinking`, the accepted `execution.effort` values and the
+# accepted `execution.max_output_tokens_per_request` range for a v2 declaration.
+VERTEX_V2_CONTROLS = {
+    # Thinking off. between_tools takes no other field and is accepted only at effort high or below.
+    "claude-sonnet-5-5": {"thinking": {"type": "between_tools"}, "efforts": (PROVIDER_DEFAULT, "low", "medium", "high"),
+                          "output_tokens": (16, 4096)},
+    # Thinking cannot be disabled; an explicit effort bounds it, and the cap leaves room for thinking.
+    "claude-opus-5-5": {"thinking": THINKING_OMITTED, "efforts": EFFORTS, "output_tokens": (1024, 8192)},
+}
 LOCAL_DECLARATION_FORMAT = "boros-judge-calibration-local-declaration-v1"
 LOCAL_JUDGES = ("jevk5", "qwen-local")
 # Runner judge name -> score column name in CANDIDATE_JUDGES.
@@ -1392,6 +1458,45 @@ def local_provider(judge):
             "model_instance_identity": "unobservable"}
 
 
+def reply_schemas_declaration():
+    """The `reply_schemas` block a v2 Vertex declaration must carry."""
+    return {"version": REPLY_SCHEMAS["version"], "sha256": reply_schema_sha256(),
+            "transport": REPLY_SCHEMAS["transport"]}
+
+
+def vertex_request_controls(document):
+    """Request controls of a Vertex declaration: None for v1 (unconstrained, no thinking field),
+    else {"structured": True, "thinking": dict or None, "effort": str or None}. check_declaration
+    validates the values; the adapter validates them again when it renders a body."""
+    if document.get("format") != DECLARATION_FORMAT_V2:
+        return None
+    execution = document.get("execution") or {}
+    thinking, effort = execution.get("thinking"), execution.get("effort")
+    return {"structured": True, "thinking": thinking if isinstance(thinking, dict) else None,
+            "effort": None if effort == PROVIDER_DEFAULT else effort}
+
+
+def _check_vertex_v2(document, model, problems):
+    execution = document.get("execution") or {}
+    controls = VERTEX_V2_CONTROLS[model]
+    thinking, effort = execution.get("thinking"), execution.get("effort")
+    if isinstance(thinking, dict) and (thinking.get("type") in ("disabled", "enabled") or "budget_tokens" in thinking):
+        problems.append("thinking_forbidden")
+    if thinking != controls["thinking"]:
+        problems.append("thinking_contract")
+    if effort not in controls["efforts"]:
+        between_tools = isinstance(thinking, dict) and thinking.get("type") == "between_tools"
+        problems.append("effort_above_high_with_between_tools" if between_tools and effort in EFFORTS else "effort")
+    low, high = controls["output_tokens"]
+    limit = execution.get("max_output_tokens_per_request")
+    if not (_positive_int(limit, high) and limit >= low):
+        problems.append("output_limit")
+    if "extended_thinking" in execution:
+        problems.append("stale_field:execution.extended_thinking")
+    if document.get("reply_schemas") != reply_schemas_declaration():
+        problems.append("reply_schema_hash")
+
+
 def planned_requests(item_count: int, replicates: int) -> int:
     return item_count * len(STAGES) * replicates
 
@@ -1407,7 +1512,7 @@ def check_declaration(document, set_dir: Path | None = None):
     def walk(value, path=""):
         if isinstance(value, dict):
             for key, child in value.items():
-                if key.lower() in ("temperature", "top_p", "top_k", "api_key_value", "seed"):
+                if key.lower() in ("temperature", "top_p", "top_k", "api_key_value", "seed", "budget_tokens"):
                     problems.append(f"forbidden_field:{path}{key}")
                 walk(child, f"{path}{key}.")
         elif isinstance(value, list):
@@ -1421,7 +1526,7 @@ def check_declaration(document, set_dir: Path | None = None):
     vertex = judge in DECLARATION_MODELS
     if judge not in DECLARATION_MODELS and judge not in LOCAL_JUDGES:
         problems.append("judge")
-    if document.get("format") != (DECLARATION_FORMAT if vertex else LOCAL_DECLARATION_FORMAT):
+    if document.get("format") not in (VERTEX_DECLARATION_FORMATS if vertex else (LOCAL_DECLARATION_FORMAT,)):
         problems.append("format")
     provider = document.get("provider") or {}
     execution = document.get("execution") or {}
@@ -1458,12 +1563,17 @@ def check_declaration(document, set_dir: Path | None = None):
             problems.append("provider_contract")
         if execution.get("count_tokens_before_generation") is not True:
             problems.append("token_counting")
-        if execution.get("extended_thinking") is not False or execution.get("automatic_retries") != 0:
+        if execution.get("automatic_retries") != 0:
             problems.append("execution_contract")
         if execution.get("refuse_if_counted_cost_exceeds_cap") is not True:
             problems.append("cost_gate")
-        if not _positive_int(execution.get("max_output_tokens_per_request"), 4096):
-            problems.append("output_limit")
+        if document.get("format") == DECLARATION_FORMAT_V2:
+            _check_vertex_v2(document, DECLARATION_MODELS[judge], problems)
+        else:  # version 1, kept for runs made under it: no thinking field, no reply constraint
+            if execution.get("extended_thinking") is not False:
+                problems.append("execution_contract")
+            if not _positive_int(execution.get("max_output_tokens_per_request"), 4096):
+                problems.append("output_limit")
         for path in (("budget", "spending_cap_usd"), ("pricing", "input_usd_per_million_tokens"),
                      ("pricing", "output_usd_per_million_tokens")):
             value = (document.get(path[0]) or {}).get(path[1])
