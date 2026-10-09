@@ -213,27 +213,35 @@ def run(args):
     require(MODEL in live_models(), "pinned_model_not_listed")
     for index, entry in enumerate(declaration["runs"]):
         done = ledger(output)
-        if any(row["run"] == index for row in done):
+        rows = [row for row in done if row["run"] == index]
+        if any(row.get("invocation_started") is True for row in rows):
             continue
-        started = sum(1 for row in done if row.get("invocation_started") is not False)
-        require(started < declaration["generation_limit"], "generation_limit_reached")
+        # A run whose answer invocation never started (admission or setup
+        # failure) made no answer generation and may be retried, at most twice.
+        tries = sum(1 for row in rows if row["state"] == "started")
+        require(all(any(other["run"] == row["run"] and other["state"] != "started" and other.get("try") == row.get("try")
+                        for other in done) for row in done if row["state"] == "started"), "unfinished_run_in_ledger")
+        require(tries < 3, "retry_limit_reached")
+        generations = sum(1 for row in done if row.get("invocation_started") is True)
+        require(generations < declaration["generation_limit"], "generation_limit_reached")
         input_path = output / "inputs" / f"{entry['question_id']}.json"
         require(digest(input_path.read_bytes()) == entry["runner_input_sha256"], "frozen_input_changed")
-        native = output / f"run-{index:02d}-{entry['question_id']}-{entry['arm']}"
+        native = output / (f"run-{index:02d}-{entry['question_id']}-{entry['arm']}" + (f"-try{tries}" if tries else ""))
         command = [str(binary), "--answer-evaluation", str(input_path), "--output-directory", str(native),
                    "--context-framing", entry["context_framing"], "--attempt", str(entry["attempt"])]
         if entry["component_policy"] != "selected-model-context-components-v1":
             command += ["--component-policy", entry["component_policy"]]
         # Reserve the generation before starting so a crash cannot hide one.
         with open(output / "ledger.jsonl", "a") as handle:
-            handle.write(json.dumps({"run": index, "state": "started"}) + "\n")
+            handle.write(json.dumps({"run": index, "state": "started", "try": tries or None}) + "\n")
         process = subprocess.run(command, capture_output=True, timeout=3600,
                                  env={**os.environ, "BOROS_DATA_DIR": str(output / "unused-app-runtime")})
         report = json.loads((native / "report.json").read_text()) if (native / "report.json").exists() else {}
         attempts = [item for item in report.get("attempts", []) if item.get("ordinal") == entry["attempt"]]
         item = attempts[0] if attempts else {}
         with open(output / "ledger.jsonl", "a") as handle:
-            handle.write(json.dumps({"run": index, "state": "finished", "returncode": process.returncode,
+            handle.write(json.dumps({"run": index, "state": "finished", "try": tries or None, "directory": native.name,
+                                     "returncode": process.returncode,
                                      "invocation_started": item.get("invocation_started"),
                                      "failure": item.get("failure")}) + "\n")
         print(json.dumps({"run": index, "question_id": entry["question_id"], "arm": entry["arm"],
@@ -262,10 +270,17 @@ def measure(args):
     declaration = json.loads((output / "declaration.json").read_text())
     frozen = histories(args.dataset)
     rows = []
+    ledger_rows = ledger(output)
+    attempts_made = {"answer_generations": sum(1 for row in ledger_rows if row.get("invocation_started") is True),
+                     "runs_without_answer_invocation": sum(1 for row in ledger_rows
+                                                           if row["state"] != "started" and row.get("invocation_started") is False),
+                     "failures_without_answer_invocation": sorted({row.get("failure") or row["state"] for row in ledger_rows
+                                                                   if row["state"] != "started" and row.get("invocation_started") is False})}
     for index, entry in enumerate(declaration["runs"]):
         history, document, _ = frozen[(entry["question_id"], entry["source_run"])]
         require(digest(canonical(document)) == entry["runner_input_sha256"], "frozen_input_changed")
-        native = output / f"run-{index:02d}-{entry['question_id']}-{entry['arm']}"
+        finished = [row for row in ledger(output) if row["run"] == index and row.get("invocation_started") is True]
+        native = output / (finished[-1]["directory"] if finished else "missing")
         report_path = native / "report.json"
         row = {"question_id": entry["question_id"], "source_run": entry["source_run"], "strategy": entry["strategy"],
                "arm": entry["arm"]}
@@ -294,7 +309,7 @@ def measure(args):
         totals[arm] = {"answers": len(measured),
                        **{name: sum(int(row[name]) for row in measured) for name in DETECTOR if name not in ("answer_bytes", "answer_words")},
                        "median_answer_words": sorted(row["answer_words"] for row in measured)[len(measured) // 2] if measured else None}
-    print(json.dumps({"version": VERSION, "rows": rows, "totals": totals}, indent=1))
+    print(json.dumps({"version": VERSION, "ledger": attempts_made, "rows": rows, "totals": totals}, indent=1))
 
 
 def main(argv=None):
