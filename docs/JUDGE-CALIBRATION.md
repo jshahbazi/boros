@@ -398,7 +398,7 @@ These are the historical labels already attached to the items, from the runs tha
 
 ### Answer presentation defects
 
-Seven accepted or rejected Qwen answers carry notes about visible metadata, envelope text such as "Original message text", stray dollar signs or poor prose. They come from the natural-v5, independent-v1, neighborhood-v1 and source-controls-v1 runs. Whether the current build still produces them is unverified. This is a product defect separate from correctness.
+Seven accepted or rejected Qwen answers carry notes about visible metadata, envelope text such as "Original message text", stray dollar signs or poor prose. They come from the natural-v5, independent-v1, neighborhood-v1 and source-controls-v1 runs. This is a product defect separate from correctness. [ANSWER-PRESENTATION-DEFECTS.md](ANSWER-PRESENTATION-DEFECTS.md) gives the offline diagnosis. Four of the seven answers open with a copied recent-message envelope header. Across saved answers, the copy appears in 16 of 126 envelope answers and none outside the envelope. The cause is that prior assistant turns are sent framed with that header. Current `main` still renders the same envelope. The live echo rate on the current build is unmeasured.
 
 ### Next steps (proposed)
 
