@@ -64,6 +64,22 @@ class Contracts(unittest.TestCase):
         self.assertIn("disabled by policy", replay.RETRIEVAL_ARMS["ordinary_send"])
         self.assertIn("no semantic index built or passed", replay.RETRIEVAL_ARMS["ordinary_send"])
 
+    def test_declared_authorization_names_the_retrieval_arm_run(self):
+        for cohort in replay.COHORTS:
+            self.assertEqual(replay.declared_authorization(cohort, None), replay.COHORTS[cohort]["authorization"])
+        text = replay.declared_authorization("retrieval-on-21", "ordinary_send")
+        self.assertNotEqual(text, replay.COHORTS["retrieval-on-21"]["authorization"])
+        self.assertIn("--retrieval-arm ordinary_send", text)
+        self.assertIn("42 local generations", text)
+        self.assertIn("$1.00", text)
+        saved = dict(replay.RETRIEVAL_ARM_AUTHORIZATIONS)
+        try:
+            replay.RETRIEVAL_ARM_AUTHORIZATIONS.clear()
+            with self.assertRaisesRegex(replay.ReplayError, "retrieval_arm_not_authorized"):
+                replay.declared_authorization("retrieval-on-21", "ordinary_send")
+        finally:
+            replay.RETRIEVAL_ARM_AUTHORIZATIONS.update(saved)
+
     def test_declare_parser_accepts_only_known_retrieval_arms(self):
         import contextlib
         with contextlib.redirect_stderr(io.StringIO()):

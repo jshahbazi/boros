@@ -145,6 +145,14 @@ RETRIEVAL_ARMS = {
                      "arm, whose selection equals its lexical arm. The runner report records the arm per attempt "
                      "and it is verified at measurement.",
 }
+# Authorization recorded for a cohort declared with a runner retrieval arm, per (cohort, arm). It
+# replaces the cohort's own text, which describes the run declared without the arm.
+RETRIEVAL_ARM_AUTHORIZATIONS = {
+    ("retrieval-on-21", "ordinary_send"): "user, 2026-10-09: up to 42 local generations (21 questions x 2 framings, "
+                                          "V3 pinned and V4 default), all with --retrieval-arm ordinary_send, local "
+                                          "model server only, same settings as the hybrid retrieval-on run; then "
+                                          "default-judge verdicts on all 42 answers under a $1.00 cap",
+}
 DETECTOR = ("copied_header", "fabricated_event_ids", "repeated_question", "raw_event_ids", "ai_disclaimer",
             "plain_decline", "latex", "answer_bytes", "answer_words", "addresses_question", "contains_reference",
             "cited_labels", "unresolved_labels", "ends_with_question", "markdown_bold")
@@ -215,6 +223,15 @@ def declared_retrieval_arm(cohort_name, arm):
     require(all(strategy == "hybrid" for _, _, strategy, _ in COHORTS[cohort_name]["cases"]),
             "retrieval_arm_requires_hybrid_cohort")
     return arm
+
+
+def declared_authorization(cohort_name, retrieval_arm):
+    """The authorization text a declaration records: the cohort's own, or, with a retrieval arm, the
+    authorization of that arm's run. A retrieval arm without a recorded authorization is refused."""
+    if retrieval_arm is None:
+        return COHORTS[cohort_name]["authorization"]
+    require((cohort_name, retrieval_arm) in RETRIEVAL_ARM_AUTHORIZATIONS, "retrieval_arm_not_authorized")
+    return RETRIEVAL_ARM_AUTHORIZATIONS[(cohort_name, retrieval_arm)]
 
 
 def runner_command(binary: Path, input_path: Path, native: Path, entry):
@@ -298,7 +315,7 @@ def declare(args):
     configuration = {key: value for key, value in baseline.CONFIGURATION.items() if key != "system"}
     declaration = {
         "version": VERSION, "declared_at_utc": datetime.now(timezone.utc).isoformat(),
-        "cohort": args.cohort, "authorization": cohort["authorization"],
+        "cohort": args.cohort, "authorization": declared_authorization(args.cohort, retrieval_arm),
         "cases": [list(case) for case in cohort["cases"]],
         "model": MODEL, "live_models_listed": models, "endpoint": baseline.CONFIGURATION["endpoint"],
         "temperature": baseline.CONFIGURATION["temperature"], "thinking": baseline.CONFIGURATION["thinking"],
