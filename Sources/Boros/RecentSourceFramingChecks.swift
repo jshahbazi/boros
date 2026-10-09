@@ -387,6 +387,8 @@ enum RecentSourceFramingChecks {
             && unbound.messages[0].content == framing && unboundLabels?.count == unbound.includedRecentCount
         checks.merge(try scopedDeclineChecks(store: store, chat: chat, project: project, request: request, system: system,
             v4: snapshot, hit: hit)) { _, new in new }
+        checks.merge(try v4VariantChecks(store: store, chat: chat, project: project, request: request, system: system,
+            v4: snapshot, hit: hit)) { _, new in new }
         return checks
     }
 
@@ -473,6 +475,104 @@ enum RecentSourceFramingChecks {
             && !ContextSourceFraming.permits(ablation, evaluationOnlyPermitted: false)
             && ContextSourceFraming.permits(ablation, evaluationOnlyPermitted: true)
             && !ContextSourceFraming.permits("context-source-snapshot-v999", evaluationOnlyPermitted: true)
+        return checks
+    }
+
+    /// V4-advice and V4-ordered (docs/FRAMING-V4-VARIANTS.md) are V4 plus one
+    /// sentence each after the unchanged fix G sentences; every non-System
+    /// byte, the sources and the label map equal V4's. Content-free: booleans only.
+    private static func v4VariantChecks(store: MemoryStore, chat: StoredConversation, project: String,
+        request: MemoryEvent, system: String, v4: ContextSnapshot, hit: MemoryHit) throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        let quoted = ContextSourceFraming.quotedSelectionVersion
+        let advice = ContextSourceFraming.adviceSelectionVersion
+        let ordered = ContextSourceFraming.orderedConclusionSelectionVersion
+        let g = ContextAssembler.insufficientEvidenceSentences
+        let added = ContextAssembler.v4VariantSentences
+        let family = [quoted, ContextSourceFraming.scopedDeclineSelectionVersion,
+                      ContextSourceFraming.insufficientEvidenceAblationSelectionVersion, advice, ordered]
+        checks["v4_variant_versions_supported_quoted_and_not_default"] = advice == "context-source-snapshot-v4-advice"
+            && ordered == "context-source-snapshot-v4-ordered"
+            && [advice, ordered].allSatisfy { ContextSourceFraming.isSupportedSelectionVersion($0)
+                && ContextSourceFraming.quotesSources($0) && ContextSourceFraming.carriesSourceTime($0)
+                && ContextSourceFraming.permits($0, evaluationOnlyPermitted: false) }
+            && ContextSourceFraming.quotedSelectionVersions == Set(family) && Set(family).count == 5
+            && ContextSourceFraming.defaultSelectionVersion == quoted && GenerationSettings().contextFraming == quoted
+            && !ContextSourceFraming.evaluationOnlySelectionVersions.contains(advice)
+            && !ContextSourceFraming.evaluationOnlySelectionVersions.contains(ordered)
+        // System text: byte-level derivation from the pinned V4 literal.
+        let v4Framing = ContextAssembler.historyFraming(selectionVersion: quoted)
+        let adviceFraming = ContextAssembler.historyFraming(selectionVersion: advice)
+        let orderedFraming = ContextAssembler.historyFraming(selectionVersion: ordered)
+        let pinned = ContextSnapshot.digest(Data(v4Framing.utf8)) == v4SystemFramingSHA256
+        checks["v4_variant_advice_is_v4_plus_only_the_v5_advice_clause"] = pinned
+            && v4Framing.components(separatedBy: g.first + " " + g.second).count == 2
+            && adviceFraming == v4Framing.replacingOccurrences(of: g.second, with: g.second + " " + added.advice)
+            && adviceFraming.utf8.count == v4Framing.utf8.count + 1 + added.advice.utf8.count
+            && adviceFraming.contains(g.first + " " + g.second + " " + added.advice + " A missing excerpt is not proof")
+            && g.scoped.contains(added.advice) && !v4Framing.contains(added.advice)
+            && adviceFraming.contains("the conversation history provided here does not show it")
+            && !adviceFraming.contains("check every quoted source")
+            && !adviceFraming.contains("only when the request needs a specific fact")
+        checks["v4_variant_ordered_is_v4_plus_one_ordering_sentence"] = pinned
+            && orderedFraming == v4Framing.replacingOccurrences(of: g.second, with: g.second + " " + added.ordered)
+            && orderedFraming.utf8.count == v4Framing.utf8.count + 1 + added.ordered.utf8.count
+            && orderedFraming.contains(g.first + " " + g.second + " " + added.ordered + " A missing excerpt is not proof")
+            && !v4Framing.contains(added.ordered) && !orderedFraming.contains(added.advice)
+            && added.ordered.contains("before you state the conclusion")
+            && added.ordered.contains("date or count arithmetic")
+            && added.ordered.contains("never revise a conclusion once you have stated it")
+        // Live selection: every non-System byte, the sources and the label map equal V4's.
+        func selection(_ version: String) throws -> ContextSnapshot {
+            try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
+                prompt: request.text, system: system, excludingEventID: request.id, selectionVersion: version)
+        }
+        func evidence(_ snapshot: ContextSnapshot) throws -> ContextSnapshot {
+            try ContextAssembler.addEvidence(to: snapshot, store: store, conversationID: chat.id, projectID: project,
+                excludingEventID: request.id, historicalHits: [hit])
+        }
+        func labels(_ snapshot: ContextSnapshot) throws -> Data {
+            let value = try JSONSerialization.jsonObject(with: snapshot.selectionEvidence()) as! [String: Any]
+            return try JSONSerialization.data(withJSONObject: ["map": value["citation_labels"] ?? NSNull(),
+                "label_version": value["citation_label_version"] ?? NSNull(), "recent": value["recent_sources"] ?? NSNull(),
+                "historical": value["historical_sources"] ?? NSNull(), "assignments": value["assignments"] ?? NSNull()],
+                options: [.sortedKeys])
+        }
+        let v4Evidence = try evidence(v4)
+        var snapshots: [String: ContextSnapshot] = [:]
+        for (name, version, framing) in [("advice", advice, adviceFraming), ("ordered", ordered, orderedFraming)] {
+            let snapshot = try selection(version), withEvidence = try evidence(snapshot)
+            snapshots[name] = snapshot
+            checks["v4_variant_\(name)_only_system_message_differs"] = snapshot.selectionBinding?.version == version
+                && !snapshot.isRejected && !withEvidence.isRejected
+                && snapshot.messages[0].content == system + "\n\n" + framing && snapshot.messages[0] != v4.messages[0]
+                && Array(snapshot.messages.dropFirst()) == Array(v4.messages.dropFirst())
+                && Array(withEvidence.messages.dropFirst()) == Array(v4Evidence.messages.dropFirst())
+                && snapshot.recentSourceIDs == v4.recentSourceIDs
+                && withEvidence.evidence.map(\.eventID) == v4Evidence.evidence.map(\.eventID)
+            checks["v4_variant_\(name)_labels_and_citation_map_unchanged"] = try labels(snapshot) == labels(v4)
+                && labels(withEvidence) == labels(v4Evidence)
+            let ownBinding = ContextSnapshot.digest(try ContextAssembler.serializedMessages(ContextAssembler.mandatoryMessages(
+                prompt: request.text, system: system, selectionVersion: version)))
+            checks["v4_variant_\(name)_mandatory_binding_is_its_own"] = try snapshot.selectionBinding?.mandatoryMessagesSHA256 == ownBinding
+                && snapshot.selectionBinding?.mandatoryMessagesSHA256 != v4.selectionBinding?.mandatoryMessagesSHA256
+                && snapshot.selectionDigest() != v4.selectionDigest()
+            var crossed = v4.selectionBinding!; crossed.version = version
+            checks["v4_variant_\(name)_binding_with_v4_body_refused"] = try rebuilt(v4, binding: crossed).isRejected
+                && rebuilt(snapshot, binding: v4.selectionBinding!).isRejected
+            // The System framing must match the recorded version exactly.
+            checks["v4_variant_\(name)_system_framing_bound_to_version"] = ContextAssembler.carriesHistoryFraming(
+                    snapshot.messages[0].content, selectionVersion: version)
+                && !ContextAssembler.carriesHistoryFraming(snapshot.messages[0].content, selectionVersion: quoted)
+                && !ContextAssembler.carriesHistoryFraming(v4.messages[0].content, selectionVersion: version)
+        }
+        // The two variants cannot be relabelled as each other either.
+        if let adviceSnapshot = snapshots["advice"], let orderedSnapshot = snapshots["ordered"] {
+            checks["v4_variant_advice_and_ordered_bindings_not_interchangeable"] =
+                try rebuilt(adviceSnapshot, binding: orderedSnapshot.selectionBinding!).isRejected
+                && rebuilt(orderedSnapshot, binding: adviceSnapshot.selectionBinding!).isRejected
+                && adviceSnapshot.selectionDigest() != orderedSnapshot.selectionDigest()
+        } else { checks["v4_variant_advice_and_ordered_bindings_not_interchangeable"] = false }
         return checks
     }
 

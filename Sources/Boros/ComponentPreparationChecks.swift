@@ -23,11 +23,17 @@ enum ComponentPreparationChecks {
         /// The same fixture under V5 (scoped fix G) and under the
         /// evaluation-only V4 no-G ablation: only the System framing differs.
         case scopedPipeline, ablationPipeline
-        var quotedFamily: Bool { [.quotedPipeline, .scopedPipeline, .ablationPipeline].contains(self) }
+        /// The same fixture under V4-advice and V4-ordered (V4 plus one System sentence each).
+        case advicePipeline, orderedPipeline
+        var quotedFamily: Bool {
+            [.quotedPipeline, .scopedPipeline, .ablationPipeline, .advicePipeline, .orderedPipeline].contains(self)
+        }
         var quotedFraming: String {
             switch self {
             case .scopedPipeline: return ContextSourceFraming.scopedDeclineSelectionVersion
             case .ablationPipeline: return ContextSourceFraming.insufficientEvidenceAblationSelectionVersion
+            case .advicePipeline: return ContextSourceFraming.adviceSelectionVersion
+            case .orderedPipeline: return ContextSourceFraming.orderedConclusionSelectionVersion
             default: return ContextSourceFraming.quotedSelectionVersion
             }
         }
@@ -175,7 +181,7 @@ enum ComponentPreparationChecks {
             if [.pipeline, .boundary, .neighborhoodAuditDated, .neighborhoodAuditFit].contains(kind) {
                 settings.contextFraming = ContextSourceFraming.currentSelectionVersion
             }
-            if kind == .scopedPipeline || kind == .ablationPipeline {
+            if kind.quotedFamily && kind != .quotedPipeline {
                 settings.contextFraming = kind.quotedFraming
                 // As the answer-evaluation command grants it for a pinned ablation.
                 settings.evaluationOnlyFramingPermitted = kind == .ablationPipeline
@@ -597,7 +603,7 @@ enum ComponentPreparationChecks {
                             && !prepared.snapshot.evidence.contains { $0.eventID == "fixture-pipeline-recent-1" }
                         checks[prefix + "_geometric_underfilled_caps_declared"] = proof.recent.tokens == 4000 && proof.evidence.tokens == 5000
                             && proof.wholePrompt.tokens == 9100
-                    case .quotedPipeline, .scopedPipeline, .ablationPipeline:
+                    case .quotedPipeline, .scopedPipeline, .ablationPipeline, .advicePipeline, .orderedPipeline:
                         let quoted = kind.quotedFraming
                         let snapshot = prepared.snapshot
                         let selectedSource = snapshot.recentSources[0]
@@ -752,11 +758,14 @@ enum ComponentPreparationChecks {
                                 && restoredAudit["inputProofSHA256"] as? String == inputProof.digest
                                 && inputProofEvidence(inputProof.operationID, directory: restoredDirectory) == inputProofEvidence(inputProof.operationID, directory: directory)
                         } else { checks[prefix + "_restore_retains_durable_input_proof_link"] = false }
-                        // The corruption suite runs for V3, V4 and V5; the ablation keeps the valid-journal control.
+                        // The corruption suite runs for V3, V4, V5, V4-advice and V4-ordered;
+                        // the ablation keeps the valid-journal control.
                         if kind != .ablationPipeline {
                             checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory,
                                 prefixOverride: kind == .quotedPipeline ? "component_preparation_quoted_journal_"
-                                    : kind == .scopedPipeline ? "component_preparation_scoped_journal_" : nil)) { _, latest in latest }
+                                    : kind == .scopedPipeline ? "component_preparation_scoped_journal_"
+                                    : kind == .advicePipeline ? "component_preparation_advice_journal_"
+                                    : kind == .orderedPipeline ? "component_preparation_ordered_journal_" : nil)) { _, latest in latest }
                         } else {
                             checks["component_preparation_ablation_journal_valid_coordinator_control"] =
                                 JournalCorruptionChecks.validates(archive: archive, directory: directory)
