@@ -1,5 +1,35 @@
 {
   "arms": {
+    "exchange_adjacent": {
+      "r1_cases": 10,
+      "r1_turns": 16,
+      "r2_cases": 10,
+      "r2_turns": 16
+    },
+    "exchange_lexical": {
+      "r1_cases": 10,
+      "r1_turns": 16,
+      "r2_cases": 10,
+      "r2_turns": 16
+    },
+    "exchange_packed": {
+      "r1_cases": 12,
+      "r1_turns": 18,
+      "r2_cases": 11,
+      "r2_turns": 17
+    },
+    "global_fill": {
+      "r1_cases": 9,
+      "r1_turns": 15,
+      "r2_cases": 9,
+      "r2_turns": 15
+    },
+    "global_hybrid": {
+      "r1_cases": 8,
+      "r1_turns": 14,
+      "r2_cases": 8,
+      "r2_turns": 14
+    },
     "hybrid": {
       "r1_cases": 8,
       "r1_turns": 14,
