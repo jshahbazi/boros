@@ -8,9 +8,16 @@ Commands:
   presentation defect pattern and how many occurrences there are. With
   ``--calibration-set`` and ``--item``, also print per-item counts for selected
   calibration items, resolved through the private key to their raw saved answers.
-- ``envelope``: render the current selected-Qwen envelope for a synthetic two-turn
-  conversation, using the framing literals read from this checkout's Swift source, so
-  the exact labels the model sees can be inspected without any model call.
+- ``envelope``: render the selected-Qwen envelope for a synthetic two-turn conversation
+  in both the V3 framing (context-source-snapshot-v3, header-led prior turns) and the
+  current default V4 framing (context-source-snapshot-v4, host-quoted prior turns,
+  citation labels), using the framing literals read from this checkout's Swift source,
+  so the exact labels the model sees can be inspected without any model call.
+
+The module also provides the per-answer detector used by
+``answer_presentation_replay.py``: copied headers in either framing, fabricated event IDs,
+citation labels and whether each resolves to a delivered source, plain declines, and a
+simple reference-string check.
 
 Privacy contract: stdout carries pattern names, counts, run/arm/model identifiers and
 calibration item IDs only. Answer, question, evidence and history text never leave the
@@ -30,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import judge_calibration as jc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOL_VERSION = "answer-presentation-defects-v1"
+TOOL_VERSION = "answer-presentation-defects-v2"
 FRAMING_SOURCE = ROOT / "Sources/Boros/ContextSourceFraming.swift"
 ASSEMBLER_SOURCE = ROOT / "Sources/Boros/ContextAssembler.swift"
 
@@ -43,6 +50,16 @@ HISTORICAL_FIELDS = ("event_id", "conversation_id", "role", "capture_status", "c
                      "source_created_utc", "source_time", "source_sha256", "excerpt_utf8_offset",
                      "source_total_bytes")
 INCOMPLETE_NOTICE = "[Incomplete historical"
+# V4 quoted framing (context-source-snapshot-v4).
+QUOTED_HEADING = "Earlier conversation message ["
+QUOTED_TEXT_LABEL = "quoted_text:"
+RE_CITATION = re.compile(r"\[(E\d+(?:\s*(?:,|;|and)\s*E\d+)*)\]")
+RE_LABEL = re.compile(r"E(\d+)")
+PLAIN_DECLINES = ("does not show", "doesn't show", "do not show", "don't show", "does not contain", "doesn't contain",
+                  "does not mention", "doesn't mention", "not mentioned", "isn't mentioned", "is not mentioned",
+                  "no record of", "no information about", "there is no information", "not in the provided",
+                  "not provided in", "i couldn't find", "i could not find", "i can't find", "i cannot find",
+                  "don't see any", "do not see any", "does not include", "doesn't include")
 # The clean-pack and orientation controls frame evidence as JSON records under this label.
 CONTROLS_LABEL = "Original chat records"
 
@@ -86,6 +103,10 @@ PATTERNS = {
     "envelope_historical_field_lines": ("envelope", "historical-source field lines such as 'event_id:'"),
     "envelope_incomplete_notice": ("envelope", "the incomplete-capture notice"),
     "envelope_controls_label": ("envelope", "the clean-pack 'Original chat records' label"),
+    "quoted_source_heading": ("envelope", "the V4 quoted recent-source heading"),
+    "quoted_text_label": ("envelope", "the V4 'quoted_text:' label"),
+    "host_header_at_answer_start": ("envelope", "the answer opens with a V3 or V4 host source header or block marker"),
+    "citation_label": ("identifier", "a cited host label such as [E2]"),
     "id_event_id_raw": ("identifier", "a raw benchmark event ID"),
     "id_event_id_word": ("identifier", "the words 'event ID' or 'event_id'"),
     "id_sha256_hex": ("identifier", "a 64-character hex digest"),
@@ -106,6 +127,7 @@ PATTERNS = {
     "question_verbatim": ("question", "the question text verbatim"),
     "ends_with_question": ("question", "the answer ends with a question mark"),
     "ai_disclaimer": ("prose", "an 'as an AI' style disclaimer"),
+    "plain_decline": ("prose", "a plain statement that the provided history does not show or contain it"),
     "meta_context_reference": ("prose", "talk about the supplied context or excerpts"),
 }
 
@@ -128,6 +150,11 @@ def pattern_counts(answer: str, question: str | None = None) -> dict:
         "envelope_historical_field_lines": len(RE_FIELD_LINE.findall(answer)),
         "envelope_incomplete_notice": answer.count(INCOMPLETE_NOTICE),
         "envelope_controls_label": answer.count(CONTROLS_LABEL),
+        "quoted_source_heading": answer.count(QUOTED_HEADING),
+        "quoted_text_label": answer.count(QUOTED_TEXT_LABEL),
+        "host_header_at_answer_start": int(stripped.startswith((RECENT_HEADING, QUOTED_HEADING, INCOMPLETE_NOTICE,
+                                                                 "BEGIN HISTORICAL SOURCE", "Historical source excerpts"))),
+        "citation_label": len(cited_labels(answer)),
         "id_event_id_raw": len(RE_EVENT_ID.findall(answer)),
         "id_event_id_word": len(RE_EVENT_WORD.findall(answer)),
         "id_sha256_hex": len(RE_HEX64.findall(answer)),
@@ -148,6 +175,7 @@ def pattern_counts(answer: str, question: str | None = None) -> dict:
         "question_verbatim": 0,
         "ends_with_question": int(answer.rstrip().endswith("?")),
         "ai_disclaimer": sum(lower.count(phrase) for phrase in DISCLAIMERS),
+        "plain_decline": sum(lower.replace("\u2019", "'").count(phrase) for phrase in PLAIN_DECLINES),
         "meta_context_reference": sum(lower.count(phrase) for phrase in META_PHRASES),
     }
     if question:
@@ -156,6 +184,48 @@ def pattern_counts(answer: str, question: str | None = None) -> dict:
             counts["question_verbatim"] = 1
     assert set(counts) == set(PATTERNS)
     return counts
+
+
+def cited_labels(answer: str) -> list:
+    """Every host label cited in square brackets, in order, e.g. [E2] or [E1, E3]."""
+    return ["E" + number for group in RE_CITATION.findall(answer) for number in RE_LABEL.findall(group)]
+
+
+def citation_resolution(answer: str, label_map) -> dict:
+    """Counts of cited labels that resolve to a delivered source in the recorded label map."""
+    delivered = {entry["label"] for entry in label_map or []}
+    labels = cited_labels(answer)
+    return {"cited_labels": len(labels), "distinct_cited_labels": len(set(labels)),
+            "resolved_labels": sum(label in delivered for label in labels),
+            "unresolved_labels": sum(label not in delivered for label in labels)}
+
+
+def event_id_mentions(answer: str, known_ids) -> dict:
+    """Raw benchmark event IDs in the answer and how many are absent from the history (fabricated)."""
+    known = set(known_ids)
+    found = RE_EVENT_ID.findall(answer)
+    echoed = []
+    for match in re.finditer(r'"event_id"\s*:\s*"([^"\n]{1,256})"', answer):
+        echoed.append(match.group(1))
+    fabricated = [value for value in found + echoed if value not in known]
+    return {"raw_event_ids": len(found), "fabricated_event_ids": len(set(fabricated))}
+
+
+def _plain(text) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9a-z]+", " ", str(text).lower())).strip()
+
+
+def contains_reference(answer: str, reference) -> bool:
+    """Simple string check: the normalized reference occurs in the normalized answer."""
+    target = _plain(reference)
+    return bool(target) and target in _plain(answer)
+
+
+def addresses_question(answer: str, question: str, counts: dict) -> bool:
+    """Structural check: a non-empty answer that does not open with a host header and does
+    not restate the question verbatim. It does not judge correctness."""
+    return bool(answer.strip()) and not counts["host_header_at_answer_start"] and not counts["envelope_header_at_answer_start"] \
+        and not counts["question_verbatim"]
 
 
 def context_flags(evidence) -> dict:
@@ -322,23 +392,35 @@ def framing_literals(framing_path: Path = FRAMING_SOURCE, assembler_path: Path =
         return match.group(1).encode().decode("unicode_escape")
 
     original = re.search(r'recentMetadataHeading \+ metadata \+ "((?:[^"\\]|\\.)*)"', framing)
-    header = re.search(r'return """\n(.*?)\n\s*""" \+ "\\n"', framing, re.S)
+    headers = re.findall(r'return """\n(.*?)\n\s*""" \+ "\\n"', framing, re.S)
     history = re.search(r'private static let historyFraming = """\n(.*?)\n\s*"""', assembler, re.S)
-    jc.require(original is not None and header is not None and history is not None, "framing_literal_missing")
-    header_lines = [line.strip() for line in header.group(1).splitlines()]
+    quoted_history = re.search(r'private static let quotedHistoryFraming = """\n(.*?)\n\s*"""', assembler, re.S)
+    quoted_fields = re.search(r'quotedRecentNote \+ (.*?)\n\s*\}', framing, re.S)
+    jc.require(original is not None and len(headers) == 2 and history is not None and quoted_history is not None
+               and quoted_fields is not None, "framing_literal_missing")
+    # The V4 block (labelled, no event_id line) precedes the V1 to V3 block in the source.
+    quoted_header, header = ([line.strip() for line in block.splitlines()] for block in headers)
+    jc.require(header[1].startswith("event_id:") and quoted_header[0].startswith("BEGIN HISTORICAL SOURCE [")
+               and not any(line.startswith("event_id:") for line in quoted_header), "framing_literal_missing")
+    field_names = re.findall(r'"(?:\\n)?([a-z_]+): "', quoted_fields.group(1))
     return {"recent_heading": literal("recentMetadataHeading"),
             "original_label": original.group(1).encode().decode("unicode_escape"),
             "evidence_prefix": literal("evidencePrefix"), "evidence_separator": literal("evidenceSeparator"),
-            "evidence_footer": literal("evidenceFooter"), "evidence_header_lines": header_lines,
-            "history_framing": history.group(1).strip()}
+            "evidence_footer": literal("evidenceFooter"), "evidence_header_lines": header,
+            "history_framing": history.group(1).strip(),
+            "quoted_recent_heading": literal("quotedRecentHeading"), "quoted_recent_note": literal("quotedRecentNote"),
+            "quoted_recent_fields": field_names, "quoted_evidence_header_lines": quoted_header,
+            "quoted_history_framing": quoted_history.group(1).strip()}
 
 
 def _metadata_json(fields: dict) -> str:
     return json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def render_envelope(literals: dict, system: str = "Be helpful, concise, and accurate.") -> list:
-    """Synthetic messages in the order ContextAssembler produces for a hybrid turn (v3 selection)."""
+def render_envelope(literals: dict, system: str = "Be helpful, concise, and accurate.", version: str = "v3") -> list:
+    """Synthetic messages in the order ContextAssembler produces for a hybrid turn (v3 or v4 selection)."""
+    if version == "v4":
+        return render_quoted_envelope(literals, system)
     source_time = {"locator": "/synthetic/0", "original_value": "2023/01/01 (Sun) 10:00", "precision": "minute",
                    "source_sha256": "0" * 64, "timezone": "unspecified", "value": "2023-01-01T10:00"}
 
@@ -363,6 +445,34 @@ def render_envelope(literals: dict, system: str = "Be helpful, concise, and accu
             {"role": "user", "content": "Question Date: 2023/01/02 (Mon) 09:00\nQuestion: Synthetic question?"}]
 
 
+def render_quoted_envelope(literals: dict, system: str) -> list:
+    """V4: prior turns are host-quoted user messages with labels; the excerpt continues the labels."""
+    source_time = {"locator": "/synthetic/0", "original_value": "2023/01/01 (Sun) 10:00", "precision": "minute",
+                   "source_sha256": "0" * 64, "timezone": "unspecified", "value": "2023-01-01T10:00"}
+    values = {"capture_status": "complete", "captured_utc": "2026-10-06T00:00:00Z", "source_time": _metadata_json(source_time)}
+
+    def recent(position, role, text):
+        fields = "".join(name + ": " + (role if name == "role" else values[name]) + "\n"
+                         for name in literals["quoted_recent_fields"] if name != "quoted_text")
+        return {"role": "user", "content": literals["quoted_recent_heading"] + "[E" + str(position) + "]"
+                + literals["quoted_recent_note"] + fields + "quoted_text:\n" + text}
+
+    header = "\n".join(literals["quoted_evidence_header_lines"])
+    substitutions = {r"\(label)": "E3", r"\(conversationID)": "synthetic-conversation", r"\(role)": "assistant",
+                     r"\(status)": "complete",
+                     r"\(chronology)": "captured_utc: 2026-10-06T00:00:00Z\nsource_time: " + _metadata_json(source_time),
+                     r"\(digest)": "0" * 64, r"\(offset)": "0", r"\(totalBytes)": "26"}
+    for placeholder, value in substitutions.items():
+        header = header.replace(placeholder, value)
+    evidence = (literals["evidence_prefix"] + header + "\n" + "Synthetic historical reply."
+                + literals["evidence_footer"] + " [E3]")
+    return [{"role": "system", "content": system + "\n\n" + literals["quoted_history_framing"]},
+            recent(1, "human", "Synthetic earlier question."),
+            recent(2, "assistant", "Synthetic earlier answer."),
+            {"role": "user", "content": evidence},
+            {"role": "user", "content": "Question Date: 2023/01/02 (Mon) 09:00\nQuestion: Synthetic question?"}]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -380,7 +490,14 @@ def main(argv=None):
             result = measure(roots, dataset, args.calibration_set, args.item)
         else:
             literals = framing_literals()
-            result = {"tool_version": TOOL_VERSION, "literals": literals, "messages": render_envelope(literals)}
+            result = {"tool_version": TOOL_VERSION, "literals": literals,
+                      "messages_v3": render_envelope(literals, version="v3"),
+                      "messages_v4": render_envelope(literals, version="v4"),
+                      "assistant_turns_starting_with_host_text": {
+                          version: sum(message["role"] == "assistant" and message["content"].startswith(
+                              (RECENT_HEADING, QUOTED_HEADING, INCOMPLETE_NOTICE))
+                              for message in render_envelope(literals, version=version))
+                          for version in ("v3", "v4")}}
         print(json.dumps(result, indent=1, ensure_ascii=False))
     except jc.CalibrationError as error:
         print(json.dumps({"error": str(error)}))

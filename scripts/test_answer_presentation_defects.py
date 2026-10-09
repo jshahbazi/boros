@@ -81,6 +81,65 @@ class Contracts(unittest.TestCase):
         self.assertEqual(stats["echo_role_assistant"], 1)
         self.assertNotIn("private", json.dumps(stats))
 
+    def test_v4_envelope_quotes_prior_turns_without_assistant_role(self):
+        literals = apd.framing_literals()
+        messages = apd.render_envelope(literals, version="v4")
+        self.assertEqual([m["role"] for m in messages], ["system", "user", "user", "user", "user"])
+        self.assertFalse(any(m["content"].startswith(apd.RECENT_HEADING) or apd.ORIGINAL_LABEL in m["content"]
+                             for m in messages))
+        self.assertTrue(messages[1]["content"].startswith(apd.QUOTED_HEADING + "E1]"))
+        self.assertTrue(messages[2]["content"].startswith(apd.QUOTED_HEADING + "E2]"))
+        self.assertIn("BEGIN HISTORICAL SOURCE [E3]\n", messages[3]["content"])
+        self.assertTrue(messages[3]["content"].endswith("END HISTORICAL SOURCE [E3]"))
+        self.assertNotIn("event_id", messages[3]["content"])
+        self.assertEqual(literals["quoted_recent_fields"], ["role", "capture_status", "captured_utc", "source_time"])
+        framing = literals["quoted_history_framing"]
+        self.assertIn("cite its label in square brackets", framing)
+        self.assertNotIn("cite their event IDs", framing)
+        self.assertIn("does not show it", framing)
+        self.assertIn("do not guess", framing)
+        self.assertIn("do not say that you are an AI", framing)
+
+    def test_detector_recognizes_a_copied_v4_header(self):
+        prior = apd.render_envelope(apd.framing_literals(), version="v4")[2]["content"]
+        header = prior[:prior.index(apd.QUOTED_TEXT_LABEL) + len(apd.QUOTED_TEXT_LABEL) + 1]
+        counts = apd.pattern_counts(header + "Synthetic answer.")
+        for name in ("quoted_source_heading", "quoted_text_label", "host_header_at_answer_start"):
+            self.assertEqual(counts[name], 1, name)
+        self.assertEqual(counts["envelope_header_at_answer_start"], 0)
+        v3 = apd.render_envelope(apd.framing_literals())[2]["content"]
+        self.assertEqual(apd.pattern_counts(v3)["host_header_at_answer_start"], 1)
+
+    def test_citation_labels_resolve_against_recorded_map(self):
+        label_map = [{"label": "E1"}, {"label": "E2"}, {"label": "E3"}]
+        answer = "It was March [E1]; later it changed [E2, E7] and again [E3 and E2]. Not [Ex] or E4."
+        self.assertEqual(apd.cited_labels(answer), ["E1", "E2", "E7", "E3", "E2"])
+        self.assertEqual(apd.citation_resolution(answer, label_map),
+                         {"cited_labels": 5, "distinct_cited_labels": 4, "resolved_labels": 4, "unresolved_labels": 1})
+        self.assertEqual(apd.pattern_counts(answer)["citation_label"], 5)
+
+    def test_event_id_mentions_flag_fabricated_ids(self):
+        known = ["abc12345-s0001-m0001"]
+        answer = 'See abc12345-s0001-m0001 and abc12345-s0001-m0009. {"event_id":"invented-id"}'
+        self.assertEqual(apd.event_id_mentions(answer, known), {"raw_event_ids": 2, "fabricated_event_ids": 2})
+
+    def test_plain_decline_is_separate_from_ai_disclaimer(self):
+        decline = apd.pattern_counts("The conversation history provided here does not show it.")
+        self.assertEqual((decline["plain_decline"], decline["ai_disclaimer"]), (1, 0))
+        disclaimer = apd.pattern_counts("As an AI, I don't have memory of that.")
+        self.assertEqual((disclaimer["plain_decline"], disclaimer["ai_disclaimer"]), (0, 2))
+
+    def test_reference_and_addressing_checks(self):
+        self.assertTrue(apd.contains_reference("You adopted Max, a beagle, in March.", "a Beagle"))
+        self.assertFalse(apd.contains_reference("You adopted a dog.", "beagle"))
+        self.assertFalse(apd.contains_reference("anything", ""))
+        question = "When did I adopt the dog named Max?"
+        clean = "In March."
+        self.assertTrue(apd.addresses_question(clean, question, apd.pattern_counts(clean, question)))
+        repeated = "When did I adopt the dog named Max?"
+        self.assertFalse(apd.addresses_question(repeated, question, apd.pattern_counts(repeated, question)))
+        self.assertFalse(apd.addresses_question("  ", question, apd.pattern_counts("  ", question)))
+
     def test_patterns_are_documented(self):
         counts = apd.pattern_counts("x")
         self.assertEqual(set(counts), set(apd.PATTERNS))

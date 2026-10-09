@@ -93,7 +93,8 @@ final class ComponentContextPreparationOperation {
                 self.policy = try frozenPolicy.validated()
                 self.policyDigest = EndpointRequest.digest(try self.policy.canonicalData())
                 var mandatory = self.settings
-                mandatory.messagesOverride = ContextAssembler.mandatoryMessages(prompt: self.prompt, system: self.settings.system)
+                mandatory.messagesOverride = ContextAssembler.mandatoryMessages(prompt: self.prompt, system: self.settings.system,
+                    selectionVersion: self.settings.contextFraming)
                     .map { ["role": $0.role, "content": $0.content] }
                 let body = try EndpointRequest.build(prompt: self.prompt, settings: mandatory, conversation: self.conversation)
                 let session = ProviderAdmission.beginComponentSession(mandatoryBody: body,
@@ -107,8 +108,9 @@ final class ComponentContextPreparationOperation {
                             do {
                                 try self.checkActive()
                                 if let supplied = self.preselectedSnapshot {
-                                    let mandatory = ContextAssembler.mandatoryMessages(prompt: self.prompt, system: self.settings.system)
-                                    guard let binding = supplied.selectionBinding,
+                                    let mandatory = ContextAssembler.mandatoryMessages(prompt: self.prompt, system: self.settings.system,
+                    selectionVersion: self.settings.contextFraming)
+                                    guard let binding = supplied.selectionBinding, binding.version == self.settings.contextFraming,
                                           episodeIdentifierEqual(binding.projectID, self.projectID),
                                           episodeIdentifierEqual(binding.conversationID, self.conversationID),
                                           episodeIdentifierEqual(binding.acceptedHumanEventID, self.humanEventID),
@@ -124,7 +126,7 @@ final class ComponentContextPreparationOperation {
                                     prompt: self.prompt, system: self.settings.system, excludingEventID: self.humanEventID,
                                     budgetBytes: self.policy.maximumMessageBytes, maximumRecentBytes: self.policy.recentBytes,
                                     maximumRecentRows: self.policy.recentCandidates, episodeLease: self.lease,
-                                    componentPolicy: self.policy)
+                                    componentPolicy: self.policy, selectionVersion: self.settings.contextFraming)
                                 self.countRecent(recent, prepareEvidence: true)
                             } catch { self.finish(.failure(error)) }
                         case .failure(let error): self.finish(.failure(error))
@@ -290,11 +292,11 @@ final class ComponentContextPreparationOperation {
                             let work: EpisodeWorkRecord
                             if let selectionOperationID {
                                 work = try self.lease.prepare(kind: .sourceRead, resources: resources,
-                                    adapterIdentity: snapshot.selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion,
+                                    adapterIdentity: snapshot.selectionVersion,
                                     snapshot: snapshot.selectionEvidence(), operationID: selectionOperationID)
                             } else {
                                 work = try self.lease.prepare(kind: .sourceRead, resources: resources,
-                                    adapterIdentity: snapshot.selectionBinding?.version ?? ContextSourceFraming.currentSelectionVersion,
+                                    adapterIdentity: snapshot.selectionVersion,
                                     snapshot: snapshot.selectionEvidence())
                             }
                             let submitted = try self.lease.dispatch(work, start: {})

@@ -1345,7 +1345,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         checks["send_old_source_is_beyond_recent_context"] = recentOnly.omittedRecentCount > 0
             && !recentOnly.messages.contains { $0.content.contains(old.text) }
         checks["send_question_retrieves_old_source"] = recalled.evidence.contains { $0.eventID == old.id }
-            && recalled.messages.contains { $0.role == "user" && $0.content.contains("event_id: \(old.id)") && $0.content.contains(old.text) }
+            && recalled.messages.contains { $0.role == "user" && $0.content.contains("BEGIN HISTORICAL SOURCE [E") && !$0.content.contains(old.id) && $0.content.contains(old.text) }
+            && ((try? JSONSerialization.jsonObject(with: recalled.selectionEvidence()) as? [String: Any])??["citation_labels"] as? [[String: Any]])?.contains { $0["event_id"] as? String == old.id } == true
         checks["send_retrieval_preserves_project_scope"] = !recalled.evidence.isEmpty
             && recalled.evidence.allSatisfy { $0.projectID == projectID && $0.eventID != other.id }
         checks["send_current_prompt_is_once_and_not_evidence"] = recalled.messages.last?.content == prompt
@@ -1866,7 +1867,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 preferences.conversationID = activeChat.id; savePreferences()
                 checks["last_conversation_preference_saved"] = LocalSettings.load(in: store.directory).conversationID == activeChat.id
                 let snapshot = try ContextAssembler.prepare(store: store, conversationID: activeChat.id, projectID: projectID,
-                    prompt: "Synthetic follow-up", system: "Synthetic host rule", budgetBytes: 65_536)
+                    prompt: "Synthetic follow-up", system: "Synthetic host rule", budgetBytes: 65_536, selectionVersion: ContextSourceFraming.currentSelectionVersion)
                 let humanContext = try ContextSourceFraming.recentPrefix(eventID: human.id,
                     role: human.role.rawValue, status: human.status.rawValue,
                     selectionVersion: ContextSourceFraming.currentSelectionVersion,

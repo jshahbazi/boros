@@ -21,7 +21,8 @@ enum ContextAdmissionChecks {
                 text: "Synthetic recent source \(index)", status: .complete, turnID: "turn-\(index)", eventID: "event-\(index)")
         }
         let snapshot = try ContextAssembler.prepare(store: store, conversationID: chat.id, projectID: "synthetic",
-            prompt: "Synthetic current request 日本語", system: "Synthetic host instruction", historicalQuery: "syntheticrarekey")
+            prompt: "Synthetic current request 日本語", system: "Synthetic host instruction", historicalQuery: "syntheticrarekey",
+            selectionVersion: ContextSourceFraming.currentSelectionVersion)
         var checks: [String: Bool] = [:]
         checks["optional_evidence_available"] = snapshot.evidence.count == 1 && snapshot.includedRecentCount == 7
         checks["recent_source_provenance_retained"] = snapshot.recentSourceIDs == (0..<7).map { "event-\($0)" }

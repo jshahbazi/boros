@@ -287,17 +287,20 @@ enum ContextComponentJournal {
                 throw invalid("historical policy has neighborhood provenance")
             }
         }
+        let quoted = ContextSourceFraming.quotesSources(selectionVersion)
+        try validateCitationLabels(selection: selection, quoted: quoted, recentIDs: recentIDs, historical: historical)
         var seen = Set<Data>()
         for (index, source) in recent.enumerated() {
             guard let id = source["eventID"] as? String, equal(id, recentIDs[index]), seen.insert(Data(id.utf8)).inserted,
                   !equal(id, humanID), equal(source["projectID"], projectID), equal(source["conversationID"], conversationID),
                   let role = source["role"] as? String, let status = source["status"] as? String,
                   let length = integer(source["byteCount"]), let hash = source["digest"] as? String,
-                  messages[index + 1]["role"] == (role == "human" ? "user" : "assistant"),
+                  messages[index + 1]["role"] == ContextSourceFraming.recentMessageRole(sourceRole: role, selectionVersion: selectionVersion),
                   let content = messages[index + 1]["content"] else { throw invalid("recent source mismatch") }
             let sourceTime = try sourceTime(source, selectionVersion: selectionVersion)
             let prefix = Data(try ContextSourceFraming.recentPrefix(eventID: id, role: role, status: status,
-                selectionVersion: selectionVersion, capturedAt: source["createdAt"] as? String, sourceTime: sourceTime).utf8), bytes = Data(content.utf8)
+                selectionVersion: selectionVersion, capturedAt: source["createdAt"] as? String, sourceTime: sourceTime,
+                citationPosition: quoted ? index : nil).utf8), bytes = Data(content.utf8)
             guard bytes.starts(with: prefix), bytes.count - prefix.count == length,
                   digest(Data(bytes.dropFirst(prefix.count))) == hash else { throw invalid("recent source bytes mismatch") }
             try sourceMetadata(database: database, id: id, projectID: projectID, conversationID: conversationID,
@@ -329,7 +332,7 @@ enum ContextComponentJournal {
                 guard let id = source["event_id"] as? String, !equal(id, humanID), !seen.contains(Data(id.utf8)),
                       equal(source["project_id"], projectID), let sourceConversation = source["conversation_id"] as? String,
                       let role = source["role"] as? String, let status = source["capture_status"] as? String,
-                      let created = source[selectionVersion == ContextSourceFraming.currentSelectionVersion ? "captured_utc" : "source_created_utc"] as? String, let hash = source["source_sha256"] as? String,
+                      let created = source[ContextSourceFraming.carriesSourceTime(selectionVersion) ? "captured_utc" : "source_created_utc"] as? String, let hash = source["source_sha256"] as? String,
                       let length = integer(source["source_bytes"]), let offset = integer(source["excerpt_offset"]),
                       let excerptBytes = integer(source["excerpt_bytes"]), excerptBytes <= 4096, offset <= length,
                       excerptBytes <= length - offset, let excerptHash = source["excerpt_sha256"] as? String else { throw invalid("historical source mismatch") }
@@ -337,9 +340,10 @@ enum ContextComponentJournal {
                 try sourceMetadata(database: database, id: id, projectID: projectID, conversationID: sourceConversation,
                     role: role, status: status, createdAt: created, hash: hash, length: length,
                     selectionVersion: selectionVersion, sourceTime: sourceTime)
+                let position = quoted ? recent.count + index : nil
                 try consume(Data(ContextSourceFraming.evidenceHeader(eventID: id, conversationID: sourceConversation,
                     role: role, status: status, createdAt: created, digest: hash, offset: offset, totalBytes: length,
-                    selectionVersion: selectionVersion, sourceTime: sourceTime).utf8))
+                    selectionVersion: selectionVersion, sourceTime: sourceTime, citationPosition: position).utf8))
                 guard excerptBytes <= bytes.count - cursor else { throw invalid("excerpt bytes missing") }
                 let excerpt = bytes.subdata(in: cursor..<(cursor + excerptBytes))
                 guard String(data: excerpt, encoding: .utf8) != nil, digest(excerpt) == excerptHash else { throw invalid("excerpt digest mismatch") }
@@ -353,7 +357,7 @@ enum ContextComponentJournal {
                     guard matches == 1 else { throw invalid("excerpt source range missing") }
                 }
                 cursor += excerptBytes
-                try consume(Data(ContextSourceFraming.evidenceFooter.utf8))
+                try consume(Data(ContextSourceFraming.evidenceFooter(selectionVersion: selectionVersion, citationPosition: position).utf8))
             }
             guard cursor == bytes.count else { throw invalid("extra evidence bytes") }
         }
@@ -458,8 +462,35 @@ enum ContextComponentJournal {
         }
     }
 
+    /// V4 snapshots must carry exactly the label map derived from delivery
+    /// order; V1 to V3 snapshots must carry none.
+    private static func validateCitationLabels(selection: [String: Any], quoted: Bool, recentIDs: [String],
+        historical: [[String: Any]]) throws {
+        guard quoted else {
+            guard selection["citation_labels"] == nil, selection["citation_label_version"] == nil else {
+                throw invalid("citation labels in unlabelled framing")
+            }
+            return
+        }
+        guard selection["citation_label_version"] as? String == ContextSourceFraming.citationLabelVersion,
+              let labels = selection["citation_labels"] as? [[String: Any]],
+              labels.count == recentIDs.count + historical.count else { throw invalid("citation label map missing") }
+        var expected: [[String: Any]] = []
+        for (index, id) in recentIDs.enumerated() {
+            expected.append(["label": try ContextSourceFraming.citationLabel(position: index), "kind": "recent", "event_id": id])
+        }
+        for (rank, source) in historical.enumerated() {
+            guard let id = source["event_id"] as? String, let offset = integer(source["excerpt_offset"]),
+                  let bytes = integer(source["excerpt_bytes"]) else { throw invalid("citation label map mismatch") }
+            expected.append(["label": try ContextSourceFraming.citationLabel(position: recentIDs.count + rank), "kind": "historical",
+                "event_id": id, "excerpt_offset": offset, "excerpt_bytes": bytes])
+        }
+        guard Set(labels.compactMap { $0["label"] as? String }).count == labels.count,
+              try canonicalArray(labels) == canonicalArray(expected) else { throw invalid("citation label map mismatch") }
+    }
+
     private static func sourceTime(_ source: [String: Any], selectionVersion: String) throws -> EventSourceTime? {
-        guard selectionVersion == ContextSourceFraming.currentSelectionVersion else { return nil }
+        guard ContextSourceFraming.carriesSourceTime(selectionVersion) else { return nil }
         guard let raw = source["source_time"] else { throw invalid("source calendar metadata missing") }
         if raw is NSNull { return nil }
         guard raw is [String: Any] else { throw invalid("source calendar metadata invalid") }
@@ -473,7 +504,7 @@ enum ContextComponentJournal {
         var matches = 0
         // The existing scoped metadata read carries chronology under the same
         // prepaid lease. Old journals do not reference the schema-10 column.
-        let dated = selectionVersion == ContextSourceFraming.currentSelectionVersion
+        let dated = ContextSourceFraming.carriesSourceTime(selectionVersion)
         let sql = "SELECT role,status,created_at,digest,byte_count" + (dated ? ",source_time_json" : "") + " FROM events WHERE id=? AND project_id=? AND conversation_id=?"
         try rows(database, sql, [id, projectID, conversationID]) { row in
             matches += 1

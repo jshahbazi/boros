@@ -113,4 +113,15 @@ This is a separate diagnostic hook. Native version 6 pins six complete LongMemEv
 
 ## Original date delivery
 
-Current `context-source-snapshot-v3` selections include host `captured_utc` and exact `source_time` object/null with recent messages and historical excerpts. Original payload bytes remain unchanged. The actual framing participates in serialized and provider token caps; funded source validation reads the bounded date field from the existing metadata row. Source selection and original-input receipts bind it, including unknown dates. V1/v2 use their stored framing, metadata hashes and SQL projections, including archives that lack the schema-10 column. Source dates retain their precision and explicit or unknown timezone; civil-day filtering and original date delivery do not establish temporal answer accuracy. See [source-time evidence](SOURCE-TIME.md).
+`context-source-snapshot-v3` and v4 selections include host `captured_utc` and exact `source_time` object/null with recent messages and historical excerpts. Original payload bytes remain unchanged. The actual framing participates in serialized and provider token caps; funded source validation reads the bounded date field from the existing metadata row. Source selection and original-input receipts bind it, including unknown dates. V1/v2 use their stored framing, metadata hashes and SQL projections, including archives that lack the schema-10 column. Source dates retain their precision and explicit or unknown timezone; civil-day filtering and original date delivery do not establish temporal answer accuracy. See [source-time evidence](SOURCE-TIME.md).
+
+## Quoted source framing (v4)
+
+`context-source-snapshot-v4` is the default for new selections (October 9, 2026). The component counts, caps and reductions are unchanged. What changes is the rendering of the components:
+
+- A recent component is one host-quoted **user** message per retained source, whatever its original role. The message opens with the quoted-source heading and its citation label, followed by `role:`, `capture_status:`, `captured_utc:`, `source_time:` and `quoted_text:` lines. The original text runs to the end of the message, so the chat-template message boundary still ends it. Validation checks the exact prefix for the source's delivery position and the exact original bytes, digest and byte count. It refuses an assistant role.
+- Historical blocks carry `[E<n>]` labels on their `BEGIN` and `END` lines and no `event_id:` line. Labels continue after the recent sources.
+- The selection document adds `citation_label_version` (`context-citation-labels-v1`) and `citation_labels`. Journal validation recomputes both from the recorded recent IDs and historical sources and requires exact equality. V1 to V3 documents must not carry them.
+- The System framing for v4 is a separate fixed literal (`ContextAssembler.historyFraming(selectionVersion:)`). The mandatory-message binding hashes the framing actually delivered, and original-input proofs strip the framing of the journaled selection version.
+
+Recent reduction removes the oldest half and re-frames the retained suffix from `E1`. Evidence reduction keeps the recent labels and re-renders the evidence block. V3 selections keep their exact bytes and validation path.

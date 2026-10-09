@@ -30,6 +30,9 @@ struct GenerationSettings {
     var endpointJSONOutput = false
     // Experimental multi-stage preparation, selected explicitly for this turn.
     var investigateMemory = false
+    // Context source framing for selected-model episodes. New turns use the
+    // V4 quoted framing; evaluation can pin an older version to reproduce it.
+    var contextFraming = ContextSourceFraming.defaultSelectionVersion
     var endpointAdmission: EndpointAdmissionReceipt?
     var preparedNativeBody: Data?
     // One durable allowance spans preparation, calibration and answering.

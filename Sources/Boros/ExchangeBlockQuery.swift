@@ -234,9 +234,14 @@ enum ExchangeBlockQuery {
     }
 
     static func estimatedTokens(_ hit: MemoryHit, selectionVersion: String) throws -> Int {
+        // V4 estimates deliberately use the V3 header bytes: the framing
+        // version must not reorder this experimental packing. Exact provider
+        // counts of the delivered V4 bytes still govern admission.
+        let estimateVersion = ContextSourceFraming.quotesSources(selectionVersion)
+            ? ContextSourceFraming.currentSelectionVersion : selectionVersion
         let header = try ContextSourceFraming.evidenceHeader(eventID: hit.eventID, conversationID: hit.conversationID,
             role: hit.role.rawValue, status: hit.status.rawValue, createdAt: hit.createdAt, digest: hit.digest,
-            offset: hit.excerptOffset, totalBytes: hit.totalBytes, selectionVersion: selectionVersion, sourceTime: hit.sourceTime)
+            offset: hit.excerptOffset, totalBytes: hit.totalBytes, selectionVersion: estimateVersion, sourceTime: hit.sourceTime)
         let framing = header.utf8.count + ContextSourceFraming.evidenceFooter.utf8.count + ContextSourceFraming.evidenceSeparator.utf8.count
         return Int((Double(framing) / headerBytesPerToken + Double(hit.excerpt.utf8.count) / contentBytesPerToken).rounded(.up))
     }

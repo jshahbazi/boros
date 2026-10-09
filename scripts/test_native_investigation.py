@@ -158,7 +158,13 @@ class Handler(COMPONENT.Handler):
                             state["released_search_reached_correction"] = any("Lisbon" in row["content"] for row in records_from(messages))
                 else:
                     encoded = json.dumps(messages, ensure_ascii=False)
-                    state["final_has_original_pair"] = "native-original-correction-human" in encoded and "native-original-correction-assistant" in encoded
+                    # V3 framing shows event IDs; V4 (the default) shows labelled
+                    # blocks without IDs, so the original pair is found by its text.
+                    by_id = "native-original-correction-human" in encoded and "native-original-correction-assistant" in encoded
+                    by_label = ("BEGIN HISTORICAL SOURCE [E" in encoded
+                                and "navigationCompass replace Oslo with Lisbon." in encoded
+                                and "navigationCompass corrected route: Lisbon." in encoded)
+                    state["final_has_original_pair"] = by_id or by_label
             if stage == "planner":
                 if mode == "malformed_plan":
                     answer = "{\"action\":\"finish\",\"action\":\"search\"}"

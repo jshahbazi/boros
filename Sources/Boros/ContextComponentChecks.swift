@@ -134,7 +134,7 @@ enum ContextComponentChecks {
         for index in 0..<2 { _ = try append(store, largeChat.id, "component-large-\(index)", String(repeating: "x", count: 70_000)) }
         let largeCurrent = try append(store, largeChat.id, "component-large-current", "Synthetic large allocation request")
         let large = try ContextAssembler.prepareRecent(store: store, conversationID: largeChat.id, projectID: project,
-            prompt: largeCurrent.text, system: "", excludingEventID: largeCurrent.id)
+            prompt: largeCurrent.text, system: "", excludingEventID: largeCurrent.id, selectionVersion: ContextSourceFraming.currentSelectionVersion)
         let largeFramingBytes = try large.recentSources.reduce(0) { total, source in
             total + (try ContextSourceFraming.recentPrefix(eventID: source.eventID, role: source.role.rawValue,
                 status: source.status.rawValue, selectionVersion: ContextSourceFraming.currentSelectionVersion,

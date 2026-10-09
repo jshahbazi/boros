@@ -122,7 +122,7 @@ enum MemoryChecks {
 
         let current = try store!.append(conversationID: first.id, role: .human, text: "current exact prompt", status: .complete, turnID: "current-turn", eventID: "current-human")
         // Retain both small fixtures including their counted v3 metadata.
-        let snapshot = try ContextAssembler.prepare(store: store!, conversationID: first.id, projectID: "synthetic-alpha", prompt: current.text, system: "Fixed test system", budgetBytes: 4096, excludingEventID: current.id, historicalQuery: "MIDPAYLOAD_SENTINEL", maximumRecentBytes: 768, maximumEvidenceBytes: 2048)
+        let snapshot = try ContextAssembler.prepare(store: store!, conversationID: first.id, projectID: "synthetic-alpha", prompt: current.text, system: "Fixed test system", budgetBytes: 4096, excludingEventID: current.id, historicalQuery: "MIDPAYLOAD_SENTINEL", maximumRecentBytes: 768, maximumEvidenceBytes: 2048, selectionVersion: ContextSourceFraming.currentSelectionVersion)
         checks["context_preserves_current_prompt_once"] = snapshot.messages.last?.content == current.text && snapshot.messages.filter { $0.content == current.text }.count == 1
         checks["context_matches_serialized_byte_budget"] = snapshot.serializedBytes == (try snapshot.serializedMessages().count) && snapshot.serializedBytes <= 4096
         checks["incomplete_history_explicitly_marked"] = snapshot.messages.contains { $0.role == "assistant" && $0.content.contains("capture status: cancelled") }

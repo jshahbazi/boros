@@ -229,13 +229,46 @@ enum AnswerEvaluationCommand {
     private struct InvocationOptions {
         let input: String, output: String
         let preparationMode: PreparationMode
+        /// Context source framing. Unpinned runs use the current default
+        /// (V4); `--context-framing context-source-snapshot-v3` reproduces
+        /// runs recorded before V4.
+        var framing = ContextSourceFraming.defaultSelectionVersion
+        var framingPinned = false
+        /// Optional single declared attempt (zero-based ordinal). Other
+        /// declared attempts are recorded as not selected and never generated.
+        var onlyAttempt: Int? = nil
+        /// Optional explicit existing component policy, e.g. the experimental
+        /// bounded-neighborhood policy that an earlier run froze as default.
+        var componentPolicy: ContextComponentPolicy? = nil
     }
+    static let pinnableFramings = [ContextSourceFraming.currentSelectionVersion, ContextSourceFraming.quotedSelectionVersion]
     private static func invocationOptions(_ args: [String]) throws -> InvocationOptions {
-        guard (args.count == 4 || args.count == 5), args[0] == "--answer-evaluation",
-              args[2] == "--output-directory",
-              args.count == 4 || args[4] == "--investigate-memory" else { throw Failure.arguments }
-        return InvocationOptions(input: args[1], output: args[3],
-            preparationMode: args.count == 5 ? .investigation : .ordinary)
+        guard args.count >= 4, args[0] == "--answer-evaluation", args[2] == "--output-directory" else { throw Failure.arguments }
+        if args.count == 5 {
+            guard args[4] == "--investigate-memory" else { throw Failure.arguments }
+            return InvocationOptions(input: args[1], output: args[3], preparationMode: .investigation)
+        }
+        var options = InvocationOptions(input: args[1], output: args[3], preparationMode: .ordinary)
+        var rest = Array(args.dropFirst(4)), seen = Set<String>()
+        guard rest.count % 2 == 0 else { throw Failure.arguments }
+        while !rest.isEmpty {
+            let flag = rest.removeFirst(), value = rest.removeFirst()
+            guard seen.insert(flag).inserted else { throw Failure.arguments }
+            switch flag {
+            case "--context-framing":
+                guard pinnableFramings.contains(value) else { throw Failure.arguments }
+                options.framing = value; options.framingPinned = true
+            case "--attempt":
+                guard let ordinal = Int(value), String(ordinal) == value, (0...999).contains(ordinal) else { throw Failure.arguments }
+                options.onlyAttempt = ordinal
+            case "--component-policy":
+                let policies = [ContextComponentPolicy.selectedQwen, .selectedQwenNeighborhood]
+                guard let policy = policies.first(where: { $0.version == value }) else { throw Failure.arguments }
+                options.componentPolicy = policy
+            default: throw Failure.arguments
+            }
+        }
+        return options
     }
     private struct Event: Decodable {
         let id: String
@@ -308,13 +341,15 @@ enum AnswerEvaluationCommand {
             let bytes = try readPrivateInput(input)
             let document = try decode(bytes)
             try options.preparationMode.validate(document)
+            if let only = options.onlyAttempt { guard only < document.attempts.count else { throw Failure.arguments } }
             try createNewDirectory(output)
             let session = try Session(document: document, inputDigest: digest(bytes),
-                projectionDigest: projectionSHA256(bytes), output: output, preparationMode: options.preparationMode)
+                projectionDigest: projectionSHA256(bytes), output: output, preparationMode: options.preparationMode,
+                options: options)
             DispatchQueue.global(qos: .userInitiated).async { session.begin() }
             dispatchMain()
         } catch Failure.arguments {
-            fputs("Usage: --answer-evaluation ABS_JSON --output-directory NEW_ABS [--investigate-memory].\n", stderr)
+            fputs("Usage: --answer-evaluation ABS_JSON --output-directory NEW_ABS [--investigate-memory | [--context-framing VERSION] [--attempt N] [--component-policy VERSION]].\n", stderr)
             return 2
         } catch {
             fputs("Answer evaluation input or destination failed validation.\n", stderr)
@@ -486,6 +521,8 @@ enum AnswerEvaluationCommand {
         let runtime: URL
         let archive: URL
         let preparationMode: PreparationMode
+        let options: InvocationOptions?
+        var framing: String { options?.framing ?? ContextSourceFraming.defaultSelectionVersion }
         var conversations: [String: String] = [:]
         var report: [[String: Any]] = []
         var baseline: [String: Any] = [:]
@@ -493,10 +530,10 @@ enum AnswerEvaluationCommand {
         var coordinator: AnswerAttemptCoordinator?
         var stoppedAfterOperationalFailure = false
         init(document: Document, inputDigest: String, projectionDigest: String, output: URL,
-             preparationMode: PreparationMode = .ordinary) throws {
+             preparationMode: PreparationMode = .ordinary, options: InvocationOptions? = nil) throws {
             try preparationMode.validate(document)
             self.document = document; self.inputDigest = inputDigest; self.projectionDigest = projectionDigest; self.output = output
-            self.preparationMode = preparationMode
+            self.preparationMode = preparationMode; self.options = options
             // Keep every store inside the checked private output owner. The
             // Python supervisor can remove this subtree even if this process
             // dies before native finalization. Direct CLI owners retain it on
@@ -524,6 +561,7 @@ enum AnswerEvaluationCommand {
         private func advance() {
             if stoppedAfterOperationalFailure { finish(fatal: "trial_stopped_after_operational_failure"); return }
             guard ordinal < document.attempts.count else { finish(fatal: nil); return }
+            if let only = options?.onlyAttempt, ordinal != only { ordinal += 1; advance(); return }
             let index = ordinal, attempt = document.attempts[index]
             let started = continuousSample()
             let restored = runtime.appendingPathComponent(String(format: "attempt-%04d", index), isDirectory: true)
@@ -588,10 +626,14 @@ enum AnswerEvaluationCommand {
         }
         private func answer(_ attempt: Attempt, ordinal: Int, owner: MemoryStore, semantic: SemanticIndex?,
                             construction: [String: Any], restored: URL, started: UInt64?) {
+            var settings = preparationMode.settings(document.configuration, attempt: attempt)
+            settings.contextFraming = framing
+            var limits: EpisodeLimits?
+            if let policy = options?.componentPolicy { var value = EpisodeLimits(); value.componentPolicy = policy; limits = value }
             let value = AnswerAttemptCoordinator(store: owner,
                 conversationID: conversations[key(attempt.project_id, attempt.conversation_key)]!,
                 projectID: project(attempt.project_id), prompt: attempt.effectivePrompt,
-                settings: preparationMode.settings(document.configuration, attempt: attempt), semanticIndex: semantic, retrievalStrategy: attempt.strategy,
+                settings: settings, semanticIndex: semantic, retrievalStrategy: attempt.strategy, limits: limits,
                 lexicalQueryUTF8Range: attempt.lexicalQueryUTF8Range,
                 semanticQueryUTF8Range: document.version >= 5 ? attempt.lexicalQueryUTF8Range : nil,
                 evidenceSourceIDs: attempt.evidence_source_ids,
@@ -649,6 +691,8 @@ enum AnswerEvaluationCommand {
                                let snapshot = try owner.episodeWork(episodeID: completion.identifiers.episodeID, operationID: workID)?.request.snapshot,
                                let selection = try JSONSerialization.jsonObject(with: snapshot) as? [String: Any] {
                                 item["delivered_recent_source_ids"] = selection["recent_source_ids"] ?? []
+                                item["context_framing"] = selection["version"] ?? NSNull()
+                                if let labels = selection["citation_labels"] { item["citation_labels"] = labels }
                                 for source in selection["recent_sources"] as? [[String: Any]] ?? [] {
                                     guard let id = source["eventID"], let length = source["byteCount"], let hash = source["digest"] else { throw Failure.invalid }
                                     ranges.append(["event_id": id, "offset": 0, "byte_length": length, "sha256": hash])
@@ -658,11 +702,12 @@ enum AnswerEvaluationCommand {
                         }
                         if (2...3).contains(self.document.version) {
                             item["witness_validation"] = validateWitness(document: self.document, completion: completion,
-                                directory: restored, conversationID: self.conversations[key(attempt.project_id, attempt.conversation_key)]!)
+                                directory: restored, conversationID: self.conversations[key(attempt.project_id, attempt.conversation_key)]!,
+                                framing: self.framing)
                         }
                         if self.document.version == 6 {
                             item["source_control_validation"] = validateSourceControl(document: self.document, completion: completion,
-                                directory: restored, conversations: self.conversations)
+                                directory: restored, conversations: self.conversations, framing: self.framing)
                         }
                         item["background_budget_at_completion"] = try object(owner.backgroundBudgetSnapshot())
                         item["full_host_milliseconds"] = milliseconds(started)
@@ -736,8 +781,9 @@ enum AnswerEvaluationCommand {
                 let retained = Set(report.compactMap { $0["ordinal"] as? Int })
                 for index in document.attempts.indices where !retained.contains(index) {
                     var item = attemptMetadata(document.attempts[index], ordinal: index, preparationMode: preparationMode)
-                    item["terminalized"] = false; item["failure_stage"] = "runner"
-                    item["failure"] = fatal ?? "runner_outcome_unavailable"
+                    let unselected = options?.onlyAttempt.map { $0 != index } ?? false
+                    item["terminalized"] = false; item["failure_stage"] = unselected ? "not_selected" : "runner"
+                    item["failure"] = unselected ? "attempt_not_selected_by_invocation" : fatal ?? "runner_outcome_unavailable"
                     item["episode_state"] = NSNull(); item["invocation_status"] = NSNull()
                     item["answer_bytes"] = NSNull(); item["answer_sha256"] = NSNull()
                     item["delivered_ranges"] = []; item["delivered_recent_source_ids"] = []
@@ -745,7 +791,7 @@ enum AnswerEvaluationCommand {
                 }
                 report.sort { ($0["ordinal"] as? Int ?? 0) < ($1["ordinal"] as? Int ?? 0) }
                 guard var configuration = try object(EpisodeLimits()) as? [String: Any] else { throw Failure.invalid }
-                configuration["componentPolicy"] = try object(ContextComponentPolicy.currentSelectedQwen)
+                configuration["componentPolicy"] = try object(options?.componentPolicy ?? ContextComponentPolicy.currentSelectedQwen)
                 let c = document.configuration
                 var value: [String: Any] = ["version": 1, "diagnostic": "production-answer-development-v1",
                     "split": "development", "history_id": document.history_id, "input_sha256": inputDigest,
@@ -757,7 +803,13 @@ enum AnswerEvaluationCommand {
                         "seed": c.seed, "thinking": c.thinking, "maximum_output": c.maximum_output,
                         "context_limit": c.context_limit, "safety_tokens": c.safety_tokens,
                         "episode_limits": configuration, "background_limits": try object(BackgroundIndexLimits.development)],
-                    "unknowns": ["apple_input_tokens", "local_billed_cost", "first_useful_answer"]]
+                    "unknowns": ["apple_input_tokens", "local_billed_cost", "first_useful_answer"],
+                    "context_framing": framing]
+                if let options {
+                    value["context_framing_pinned"] = options.framingPinned
+                    if let only = options.onlyAttempt { value["selected_attempt"] = only }
+                    if let policy = options.componentPolicy { value["component_policy_override"] = policy.version }
+                }
                 if document.version >= 2 {
                     if (2...3).contains(document.version) { value["witness_mode"] = witnessMode }
                     var frozenConfiguration: [String: Any] = ["endpoint": c.endpoint, "model": c.model,
@@ -817,7 +869,8 @@ enum AnswerEvaluationCommand {
     /// Verify counted source delivery independently of answer success. This
     /// offline integrity check never creates answering work or oracle content.
     private static func validateSourceControl(document: Document, completion: AnswerAttemptCompletion,
-        directory: URL, conversations: [String: String]) -> [String: Any] {
+        directory: URL, conversations: [String: String],
+        framing: String = ContextSourceFraming.defaultSelectionVersion) -> [String: Any] {
         guard completion.invocationStarted else {
             return sourceControlOutcome(document: document, failure: "source_control_outcome_unavailable")
         }
@@ -849,7 +902,8 @@ enum AnswerEvaluationCommand {
                       episodeIdentifierEqual(contextObject["source_snapshot_sha256"] as? String, preparation.sourceSelectionDigest),
                       let bodyObject = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let messages = bodyObject["messages"] as? [[String: String]], messages.count >= 2 else { throw Failure.invalid }
-                let mandatory = ContextAssembler.mandatoryMessages(prompt: attempt.effectivePrompt, system: document.configuration.system)
+                let mandatory = ContextAssembler.mandatoryMessages(prompt: attempt.effectivePrompt, system: document.configuration.system,
+                    selectionVersion: framing)
                 let declaredBytes = document.events.filter { declared.contains($0.id) }.reduce(0) { $0 + $1.text.utf8.count }
                 guard let retrieval = contextObject["retrieval"] as? [String: Any],
                       retrieval["mode"] as? String == "declared_original_sources",
@@ -924,7 +978,8 @@ enum AnswerEvaluationCommand {
     /// A separate offline integrity result. Failed validation never overwrites
     /// the operational completion, original debits or private answer IPC.
     private static func validateWitness(document: Document, completion: AnswerAttemptCompletion,
-        directory: URL, conversationID: String) -> [String: Any] {
+        directory: URL, conversationID: String,
+        framing: String = ContextSourceFraming.defaultSelectionVersion) -> [String: Any] {
         guard completion.invocationStarted else {
             return witnessOutcome(events: document.events, failure: "witness_outcome_unavailable")
         }
@@ -952,7 +1007,7 @@ enum AnswerEvaluationCommand {
                 guard let bodyObject = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let messages = bodyObject["messages"] as? [[String: String]], messages.count >= 2 else { throw Failure.invalid }
                 let mandatory = ContextAssembler.mandatoryMessages(prompt: document.attempts[0].prompt,
-                    system: document.configuration.system)
+                    system: document.configuration.system, selectionVersion: framing)
                 guard messages.first?["role"] == mandatory[0].role, messages.last?["role"] == mandatory[1].role,
                       Data((messages.first?["content"] ?? "").utf8) == Data(mandatory[0].content.utf8),
                       Data((messages.last?["content"] ?? "").utf8) == Data(mandatory[1].content.utf8) else { throw Failure.invalid }

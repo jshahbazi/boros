@@ -15,7 +15,8 @@ enum ChatContextPreparation {
         semanticIndex: SemanticIndex? = nil,
         retrievalStrategy: ContextRetrievalStrategy = .hybrid,
         episodeLease: EpisodeLease? = nil,
-        semanticRetrieval: SemanticRetrievalPolicy = .enabled
+        semanticRetrieval: SemanticRetrievalPolicy = .enabled,
+        selectionVersion: String = ContextSourceFraming.defaultSelectionVersion
     ) throws -> ContextSnapshot {
         _ = try episodeLease?.checkActive(projectID: projectID)
         let admittedIndex = semanticRetrieval.admit(semanticIndex)
@@ -23,14 +24,14 @@ enum ChatContextPreparation {
             if retrievalStrategy == .recentOnly {
                 let recent = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                     prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                    maximumEvidenceBytes: 0, episodeLease: episodeLease, operationIsNested: true)
+                    maximumEvidenceBytes: 0, episodeLease: episodeLease, operationIsNested: true, selectionVersion: selectionVersion)
                 return try recentOnlySnapshot(recent)
             }
             let lexical = historicalQuery(prompt)
             guard let semanticIndex = admittedIndex else {
                 var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                     prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                    historicalQuery: lexical, historicalMatching: .anyTerm, expandFollowingAssistant: true, episodeLease: episodeLease, operationIsNested: true)
+                    historicalQuery: lexical, historicalMatching: .anyTerm, expandFollowingAssistant: true, episodeLease: episodeLease, operationIsNested: true, selectionVersion: selectionVersion)
                 var fields: [String: Any] = ["mode": "lexical", "semantic_available": false]
                 if semanticRetrieval == .disabledByPolicy {
                     // Lexical selection is the intended path, not a degraded one.
@@ -43,7 +44,7 @@ enum ChatContextPreparation {
             }
             let recent = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                 prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                maximumEvidenceBytes: 0, episodeLease: episodeLease, operationIsNested: true)
+                maximumEvidenceBytes: 0, episodeLease: episodeLease, operationIsNested: true, selectionVersion: selectionVersion)
             let report: SemanticSearchReport
             do {
                 report = try semanticIndex.search(query: prompt, lexicalQuery: lexical ?? "", projectID: projectID,
@@ -61,7 +62,7 @@ enum ChatContextPreparation {
                 // Raw lexical fallback is revalidated by the same assembler.
                 var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                     prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                    historicalQuery: lexical, historicalMatching: .anyTerm, expandFollowingAssistant: true, episodeLease: episodeLease, operationIsNested: true)
+                    historicalQuery: lexical, historicalMatching: .anyTerm, expandFollowingAssistant: true, episodeLease: episodeLease, operationIsNested: true, selectionVersion: selectionVersion)
                 try appendAudit(to: &snapshot, fields: ["mode": "lexical_fallback",
                     "semantic_available": false, "failure": "semantic_search_failed"])
                 if snapshot.retrievalNotice == nil { snapshot.retrievalNotice = "Semantic recall failed; archive recall used lexical search." }
@@ -76,7 +77,7 @@ enum ChatContextPreparation {
                 episodeLease: episodeLease, operationIsNested: true)
             var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                 prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
-                historicalHits: expanded.hits, episodeLease: episodeLease, operationIsNested: true)
+                historicalHits: expanded.hits, episodeLease: episodeLease, operationIsNested: true, selectionVersion: selectionVersion)
             snapshot.retrievalManifestID = report.manifestID
             snapshot.retrievalManifestJSON = try report.serializedManifest()
             let coverage = report.manifest.coverage

@@ -83,16 +83,6 @@ enum AuthorityInputProofJournal {
               let route = URLComponents(string: provider), route.scheme == "http",
               ["localhost", "127.0.0.1", "::1", "[::1]"].contains(route.host ?? ""),
               route.user == nil, route.password == nil, route.query == nil, route.fragment == nil else { throw AuthorityStateError.integrity }
-        let systemBytes = Data(system.utf8)
-        let framing = Data(ContextAssembler.mandatoryMessages(prompt: "", system: "")[0].content.utf8)
-        let separator = Data("\n\n".utf8) + framing
-        let host: Data
-        if systemBytes == framing { host = Data() }
-        else {
-            guard systemBytes.count > separator.count, systemBytes.suffix(separator.count) == separator else { throw AuthorityStateError.integrity }
-            host = Data(systemBytes.dropLast(separator.count))
-        }
-        guard digest(host) == funding.hostInstructionsSHA256 else { throw AuthorityStateError.integrity }
         let context = try object(contextBytes)
         guard let selectionID = context["selection_work_id"] as? String,
               let selectionDigest = context["source_snapshot_sha256"] as? String else { throw AuthorityStateError.integrity }
@@ -102,12 +92,25 @@ enum AuthorityInputProofJournal {
         guard selectionRows.count == 1, let selectionBytes = selectionRows[0][0].bytes,
               selectionBytes.count <= 4 * 1_048_576, digest(selectionBytes) == selectionDigest else { throw AuthorityStateError.integrity }
         let selection = try object(selectionBytes)
+        // The host framing suffix is the one of the journaled selection version.
+        guard let selectionVersion = selection["version"] as? String,
+              ContextSourceFraming.isSupportedSelectionVersion(selectionVersion) else { throw AuthorityStateError.integrity }
+        let systemBytes = Data(system.utf8)
+        let framing = Data(ContextAssembler.mandatoryMessages(prompt: "", system: "", selectionVersion: selectionVersion)[0].content.utf8)
+        let separator = Data("\n\n".utf8) + framing
+        let host: Data
+        if systemBytes == framing { host = Data() }
+        else {
+            guard systemBytes.count > separator.count, systemBytes.suffix(separator.count) == separator else { throw AuthorityStateError.integrity }
+            host = Data(systemBytes.dropLast(separator.count))
+        }
+        guard digest(host) == funding.hostInstructionsSHA256 else { throw AuthorityStateError.integrity }
         guard let recent = selection["recent_sources"] as? [[String: Any]],
               let historical = selection["historical_sources"] as? [[String: Any]],
               recent.count + historical.count + 1 <= maximumDependencies else { throw AuthorityStateError.limit }
         var dependencies: [Data: AuthoritySourceDependency] = [:]
         func append(_ id: String, offset: Int = 0, length: Int? = nil, excerpt: String? = nil) throws {
-            let source = try source(database: database, id: id, dated: selection["version"] as? String == ContextSourceFraming.currentSelectionVersion)
+            let source = try source(database: database, id: id, dated: ContextSourceFraming.carriesSourceTime(selectionVersion))
             guard episodeIdentifierEqual(source.projectID, project) else { throw AuthorityStateError.integrity }
             let count = length ?? source.byteCount
             guard offset >= 0, count >= 0, offset <= source.byteCount, count <= source.byteCount - offset,

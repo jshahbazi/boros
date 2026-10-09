@@ -327,7 +327,7 @@ final class NativeInvestigationPreparationOperation: AnswerContextPreparing {
             var base = try ContextAssembler.prepareRecent(store: store, conversationID: conversationID,
                 projectID: projectID, prompt: prompt, system: settings.system, excludingEventID: humanEventID,
                 budgetBytes: policy.maximumMessageBytes, maximumRecentBytes: 0,
-                maximumRecentRows: policy.recentCandidates, episodeLease: lease)
+                maximumRecentRows: policy.recentCandidates, episodeLease: lease, selectionVersion: settings.contextFraming)
             // Selecting zero recent originals does not change the accepted
             // component ceiling. The durable journal validates frozen caps.
             base.selectionAudit?.maximumRecentBytes = policy.recentBytes

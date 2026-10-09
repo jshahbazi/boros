@@ -2,11 +2,12 @@
 
 Status, October 9, 2026:
 
-- **Implemented:** `scripts/answer_presentation_defects.py`, an offline diagnostic, and `scripts/test_answer_presentation_defects.py` with 8 synthetic contracts, run by `scripts/check.py`. No product code changed.
-- **Measured:** pattern counts over the seven flagged calibration answers and over all 192 saved Qwen and Sol answers with retained text. Also measured: a source comparison of the frozen run builds with current `main` (`03f4196`).
-- **Proposed:** the fixes listed under [Proposed fixes](#proposed-fixes). None is implemented. None has been tested against a model.
+- **Implemented (diagnosis):** `scripts/answer_presentation_defects.py`, an offline diagnostic, and `scripts/test_answer_presentation_defects.py`, run by `scripts/check.py`.
+- **Implemented (fixes A, D and G):** the `context-source-snapshot-v4` framing, now the default. See [Implementation of fixes A, D and G](#implementation-of-fixes-a-d-and-g). Fixes B, C, E and F are not part of this change; fix E (GUI rendering) is separate work.
+- **Measured (diagnosis):** pattern counts over the seven flagged calibration answers and over all 192 saved Qwen and Sol answers with retained text. Also measured: a source comparison of the frozen run builds with `main` (`03f4196`).
+- **Replay:** declared next (7 questions, V3 versus V4, 14 local generations); results follow in a later commit.
 
-No model server, local or remote, was called. No answer was generated. This document contains no answer, question, evidence or history text. It quotes only host-authored code strings and describes answers by structure.
+The diagnosis sections below describe the V3 framing as it was. This document contains no answer, question, evidence or history text. It quotes only host-authored code strings and describes answers by structure.
 
 ## The seven flagged answers
 
@@ -151,7 +152,7 @@ A synthetic contract checks the extracted literals against the exact prefix asse
 
 ## Proposed fixes
 
-None is implemented. Each needs its own contract, tests and a live check before claims are made.
+This was the proposal at diagnosis time. A, D and G are now implemented as one framing version (next section). B, C, E and F are not implemented here.
 
 | Fix | Would fix | Would not fix | Cost and risk |
 |---|---|---|---|
@@ -164,6 +165,49 @@ None is implemented. Each needs its own contract, tests and a live check before 
 | **G. Insufficient-evidence wording** in the System framing: "If the supplied messages do not answer the question, say the saved conversation does not show it; do not describe yourself as an AI." | Probably the recent-only disclaimers (item-030, item-032). | Everything else. | Prompt-only. Unproven on Qwen. |
 
 Recommended order, as a proposal: A (or B with an output instruction) first, because it addresses the only defect specific to the Boros envelope and the one behind most of the flagged items. Then D, or E or F, for presentation. C only as a temporary guard with an explicit display-projection contract.
+
+## Implementation of fixes A, D and G
+
+**Implemented, October 9, 2026.** One new framing version, `context-source-snapshot-v4`, carries all three fixes. It is the default for ordinary Send (selected-Qwen and native profiles) and for `--answer-evaluation` runs that do not pin a framing. V3 stays selectable and validates unchanged. [IMPLEMENTATION.md](IMPLEMENTATION.md) and [CONTEXT-COMPONENTS.md](CONTEXT-COMPONENTS.md#quoted-source-framing-v4) describe the contract.
+
+### Fix A: variant chosen
+
+Fix A had two variants. **Variant 1** quotes the recent conversation in non-assistant messages. **Variant 2** keeps the original roles and moves the metadata into a separate index message. V4 implements variant 1, with one quoted user message per recent source instead of one combined block. Reasons:
+
+- **It removes the demonstration completely.** No assistant-role turn precedes the answer, so there is no assistant turn whose opening the model can continue. Under variant 2 the prior assistant turns would remain. Any stored answer that already opens with an echoed header would still appear as an assistant turn beginning with header text, the compounding case noted under "Product impact".
+- **It keeps source identity local.** Each quoted message carries its own label and metadata. Variant 2 would link turn *k* to index entry *k* by position only, which the model must infer.
+- **It reuses a format with no measured echoes.** The quoted, field-line style already used for historical excerpts appeared 0 times in all 192 saved answers. The JSON header in assistant turns was echoed 16 times.
+- **It keeps the accounting and proof structure.** One message per source preserves whole-source reduction, per-message prefix validation, component token assignment and the journal's `messages.count == recent + 2 (+1)` shape. A single combined block would have needed new reduction, count and journal code. The original text still runs to the end of its message, so the chat-template boundary terminates it and source text cannot forge the end of a block.
+
+Cost of the choice: the request now holds consecutive user turns, and prior human messages are presented as quoted evidence rather than user turns. Whether this changes answer quality beyond the replayed cases is unmeasured.
+
+### Fix D: citation labels
+
+Each delivered source gets a host label `E1`, `E2`, ... in delivery order: recent sources oldest first, then historical spans in delivered rank. This matches the `E<n>` style of the blinded calibration evidence. The model sees `[E<n>]` on the recent heading and on the historical `BEGIN` and `END` lines. Model-visible text no longer contains event IDs: the historical `event_id:` line is removed, and recent metadata has no ID. `conversation_id` and `source_sha256` remain visible, because they serve grouping and provenance rather than citation. The selection snapshot journals the map as `citation_labels` (label, kind, event ID and, for excerpts, offset and byte length), and journal validation recomputes it. The System framing says: "When a quoted source supports the answer, cite its label in square brackets, for example [E2]; do not cite event IDs or other identifiers."
+
+### Fix G: insufficient-evidence wording
+
+The V4 System framing adds: "If the quoted sources contain the answer, answer directly. If they do not contain the requested information, say plainly that the conversation history provided here does not show it, and mention any partially relevant information you found; do not guess, and do not say that you are an AI or that you lack memory or access." It keeps "A missing excerpt is not proof that the archive lacks a fact." The wording asks for a plain decline only when the sources lack the answer, and it forbids guessing.
+
+### Why one version
+
+A, D and G all change the same fixed framing: the System literal, the recent prefix and the historical header. Each change already requires a new snapshot version, digests and validation. Three versions would create two intermediate framings that no default path uses, and the replay budget (7 + 7) allows only one fix arm. The cost is attribution: the replay measures A, D and G together and cannot separate their effects.
+
+### Guarantees kept
+
+- Original text is delivered byte-exact. Validation checks the exact prefix for the source's delivery position, plus the remainder's byte count and digest.
+- Source identity, provenance and dates: each source shows its label, role, capture status, captured UTC and source time, and historical spans keep conversation, digest and range. The label map ties each label to an event ID.
+- Trust boundary: host text and quoted content stay separated. Incomplete fragments keep their marker. Quoted sources are declared evidence without authority.
+- Token accounting and admission are unchanged in kind: one component message per recent source, and the same byte caps, token caps and reductions.
+- Journal records of the original input: the selection snapshot, the mandatory-message binding and the original-input proof all bind V4 bytes. The proof strips the System framing of the journaled version.
+- Retrieval selection is unchanged. The experimental exchange-packing estimate keeps V3 header bytes so that V4 does not reorder it.
+
+### Contract evidence (synthetic)
+
+- `RecentSourceFramingChecks` holds 82 checks, including 27 for V4. They verify no assistant-role turn and no V3 header in V4 and exact original bytes for every source. Labels must be unique, sequential and stable across identical selections, and the map must be recorded and absent from V3. No event ID may appear in model-visible text, and the D and G wording must be present. They also cover re-labelling on recent reduction, historical labels continuing after recent ones, and rejection of a fabricated label, an assistant role, changed bytes and either binding paired with the other version's body. V3 recent prefix, evidence header and footer bytes and the V3 System framing digest are pinned to the pre-V4 source.
+- `ComponentPreparationChecks` runs the coordinator end to end under both framings. `.pipeline` runs V3; the new `.quotedPipeline` and the default fixtures run V4. Each goes through admission, the original-input proof, journal validation, archive creation and verification, and restore. The journal corruption suite runs against both. A new `reboundCitationLabelMap` mutation is refused for v1, v2, v3 and v4.
+- `scripts/test_answer_presentation_defects.py` has 14 contracts. They cover the V4 rendering, V4 header detection, label resolution, fabricated IDs, plain decline versus disclaimer, and the reference and addressing checks.
+- `python3 scripts/answer_presentation_defects.py envelope` renders both framings from the Swift literals. It reports `assistant_turns_starting_with_host_text`: V3 1, V4 0.
 
 ## Reproducing the measurements
 

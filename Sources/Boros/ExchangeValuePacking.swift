@@ -49,7 +49,7 @@ extension ExchangeBlockQuery {
                 "role": hit.role.rawValue, "capture_status": hit.status.rawValue, "source_created_utc": hit.createdAt,
                 "source_sha256": hit.digest, "source_bytes": hit.totalBytes, "excerpt_offset": hit.excerptOffset,
                 "excerpt_bytes": hit.excerpt.utf8.count, "excerpt_sha256": MeteredRetrieval.digest(Data(hit.excerpt.utf8))]
-            if selectionVersion == ContextSourceFraming.currentSelectionVersion {
+            if ContextSourceFraming.carriesSourceTime(selectionVersion) {
                 source.removeValue(forKey: "source_created_utc")
                 source["captured_utc"] = hit.createdAt
                 source["source_time"] = hit.sourceTime?.object as Any? ?? NSNull()

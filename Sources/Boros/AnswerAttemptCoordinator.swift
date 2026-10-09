@@ -169,7 +169,8 @@ final class AnswerAttemptCoordinator {
         // Validate the endpoint/envelope before accepting content. Optional
         // history is selected only inside the metered preparation operation.
         var mandatory = settings
-        mandatory.messagesOverride = ContextAssembler.mandatoryMessages(prompt: prompt, system: settings.system)
+        mandatory.messagesOverride = ContextAssembler.mandatoryMessages(prompt: prompt, system: settings.system,
+            selectionVersion: settings.contextFraming)
             .map { ["role": $0.role, "content": $0.content] }
         _ = try EndpointRequest.build(prompt: prompt, settings: mandatory, conversation: conversation)
         let sampled = try clock.now()
