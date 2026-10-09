@@ -8,6 +8,12 @@ Commands:
 - ``assemble``: select a stratified, seeded calibration set and write a private,
   blinded adjudication set, a separate private key and a self-contained local
   HTML adjudication form.
+- ``assemble-extension``: select a likely-wrong extension set (self-corrections found
+  by a lexical heuristic, earlier rejected answers, recent-only answers and
+  insufficient-pack answers), excluding the base set's answers, from the saved
+  captures and finished answer-presentation replays; written like ``assemble``.
+- ``subset``: copy chosen items of existing sets into a new verdict set under new
+  opaque item IDs (for judging a few answers under one declaration).
 - ``form``: regenerate the local adjudication form for an existing set into a
   fresh private file (the set directory is not modified).
 - ``score``: compare adjudications (format v1, or v2 with the faithful field and
@@ -79,6 +85,10 @@ PRIOR_JUDGES = {
                          "input": "question, reference, answer, evidence (four-field rubric)"},
     "sol-sufficiency": {"family": "openai", "model": "gpt-6.1-sol",
                         "input": "question and evidence only (source-only sufficiency)"},
+    # The default judge's verdicts on October 9 replay answers (majority of three; prompt set v3).
+    "vertex-sonnet-default-qa": {"family": "anthropic", "model": "claude-sonnet-5-5",
+                                 "input": "question, reference, answer (upstream LongMemEval QA prompt plus the "
+                                          "reply-format line, prompt set v3, majority of three)"},
 }
 MODEL_FAMILIES = {"ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit": "qwen", "gpt-6.1-sol": "openai",
                   "claude-opus-5-5": "anthropic", "claude-sonnet-5-5": "anthropic"}
@@ -542,6 +552,93 @@ def native_investigation_candidates(roots, dataset):
     return out
 
 
+REPLAY_PRIOR_JUDGE = "vertex-sonnet-default-qa"
+
+
+def replay_prior_verdicts(directory: Path):
+    """{run index: majority verdict} from a replay's judge set and default-judge labels, else {}.
+
+    Uses the judge set's key (item ID to run index) and the single complete labels file in the replay
+    directory whose set ID matches; a tie or an unparseable majority is omitted (never a verdict)."""
+    key_path, manifest_path = directory / "judge-set" / "key.json", directory / "judge-set" / "manifest.json"
+    if not (key_path.exists() and manifest_path.exists()):
+        return {}
+    manifest = load_json(manifest_path)
+    matching = []
+    for path in sorted(directory.glob("judge-labels-*.json")):
+        document = load_json(path)
+        if (document.get("format") == LABELS_FORMAT and document.get("set_id") == manifest["set_id"]
+                and document.get("items_sha256") == manifest["items_sha256"]):
+            matching.append(document)
+    require(len(matching) <= 1, "replay_labels_ambiguous")
+    if not matching:
+        return {}
+    by_item = {entry["item_id"]: entry["run_index"] for entry in load_json(key_path)["items"]}
+    out = {}
+    for item_id, rows in matching[0]["labels"].items():
+        verdicts = [row.get("verdict") for row in rows]
+        for verdict in ("accept", "reject"):
+            if 2 * verdicts.count(verdict) > len(verdicts):  # strict majority over all replicates
+                out[by_item[item_id]] = verdict
+    return out
+
+
+def replay_candidates(replay_dirs, dataset):
+    """Candidates from finished answer-presentation replay directories (answer_presentation_replay.py).
+
+    Read-only. Each declared run is one candidate: the answer of the declared attempt (verified against
+    the runner's answer digest), its delivered evidence resolved from the pinned dataset (byte ranges
+    verified by digest), gold delivery from the replay's own measure.json, and the default judge's
+    majority verdict as a prior label when the replay was judged."""
+    out = []
+    for directory in replay_dirs:
+        declaration = load_json(directory / "declaration.json")
+        ledger = [json.loads(line) for line in (directory / "ledger.jsonl").read_text().splitlines() if line.strip()]
+        measure_path = directory / "measure.json"
+        rows = load_json(measure_path)["rows"] if measure_path.exists() else [None] * len(declaration["runs"])
+        require(len(rows) == len(declaration["runs"]), "replay_measure_mismatch")
+        priors = replay_prior_verdicts(directory)
+        run = "replay-" + directory.name
+        for index, (entry, row) in enumerate(zip(declaration["runs"], rows)):
+            require(row is None or (row["question_id"], row["arm"]) == (entry["question_id"], entry["arm"]),
+                    "replay_measure_mismatch")
+            arm = "-".join(part for part in (entry.get("strategy"), entry.get("retrieval_arm"), entry["arm"]) if part)
+            finished = [line for line in ledger if line["run"] == index and line.get("invocation_started") is True]
+            attempt, answer = None, None
+            if finished and (directory / finished[-1]["directory"] / "report.json").exists():
+                native = directory / finished[-1]["directory"]
+                attempts = [item for item in load_json(native / "report.json")["attempts"]
+                            if item["ordinal"] == entry["attempt"]]
+                attempt = attempts[0] if len(attempts) == 1 else None
+                if attempt is not None and (native / attempt["answer_file"]).exists():
+                    answer = (native / attempt["answer_file"]).read_text()
+            complete = bool(attempt and attempt.get("failure") is None and attempt.get("invocation_status") == "complete")
+            candidate = new_candidate(run=run, run_family="answer-presentation-replay", arm=arm,
+                                      question_id=entry["question_id"], abstention=bool(entry.get("abstention")),
+                                      answer_model=declaration.get("model"), operational_complete=complete,
+                                      answer_sha256=(attempt or {}).get("answer_sha256"))
+            if complete:
+                verify_answer(candidate, answer)
+            attach_question(candidate, dataset)
+            evidence, verified, issue = ranges_to_evidence((attempt or {}).get("delivered_ranges"),
+                                                           (attempt or {}).get("delivered_recent_source_ids"),
+                                                           lambda event_id: dataset_message(dataset, event_id))
+            candidate.update(evidence=evidence, evidence_verified=verified and bool(evidence),
+                             evidence_retention="pointer" if evidence else "missing",
+                             evidence_issue=candidate["evidence_issue"] or issue)
+            candidate["scrub_ids"].update(piece["source_id"] for piece in evidence)
+            if not candidate["abstention"] and row is not None:
+                if "gold_delivery" in row:
+                    candidate["all_annotated_delivered"] = {"whole": True, "partial": False, "none": False}.get(
+                        row["gold_delivery"])
+                elif not row.get("delivered_gold_turns"):
+                    candidate["all_annotated_delivered"] = False
+            if index in priors:
+                candidate["prior_labels"][REPLAY_PRIOR_JUDGE] = {"verdict": priors[index]}
+            out.append(candidate)
+    return out
+
+
 def collect_candidates(roots, dataset):
     candidates = (native_longmemeval_candidates(roots, dataset) + openai_candidates(roots, dataset)
                   + orientation_candidates(roots, dataset) + native_investigation_candidates(roots, dataset))
@@ -633,9 +730,27 @@ def summarize_inventory(rows):
 # --------------------------------------------------------------------------- selection
 
 
-def select(candidates, seed: str, per_stratum: int = 10, minimum: int = 50, max_per_question: int = 2):
+def select(candidates, seed: str, per_stratum: int = 10, minimum: int = 50, max_per_question: int = 2,
+           strata=STRATA, quotas=None, stratum_max_per_question=None):
     """Deterministic stratified selection. Order inside a stratum is a seeded hash of the
-    candidate key and never inspects answers, references or label values."""
+    candidate key and never inspects answers, references or label values. `strata` and per-stratum
+    `quotas` (default `per_stratum` each) let an extension set use its own strata, and
+    `stratum_max_per_question` lets one stratum admit more items of a question than
+    `max_per_question`; one question and run family never exceed `max_per_question` in any stratum.
+    With the defaults the base set's selection is unchanged."""
+    quotas = {name: (quotas or {}).get(name, per_stratum) for name in strata}
+    question_caps = dict(stratum_max_per_question or {})
+    per_family = Counter()
+
+    def blocked(candidate, name):
+        return (per_question[candidate["question_id"]] >= question_caps.get(name, max_per_question)
+                or per_family[(candidate["question_id"], candidate["run_family"])] >= max_per_question)
+
+    def take(candidate, name, fill):
+        chosen.append({"candidate": candidate, "stratum": name, "fill": fill})
+        chosen_keys.add(candidate["key"])
+        per_question[candidate["question_id"]] += 1
+        per_family[(candidate["question_id"], candidate["run_family"])] += 1
     require(isinstance(seed, str) and seed, "seed_required")
     pool, seen = [], set()
     for candidate in sorted((c for c in candidates if c["eligible"]), key=lambda c: rank(seed, c["key"])):
@@ -644,30 +759,28 @@ def select(candidates, seed: str, per_stratum: int = 10, minimum: int = 50, max_
             continue
         seen.add(identity)
         pool.append(candidate)
-    by_stratum = {name: [c for c in pool if c["stratum"] == name] for name in STRATA}
+    by_stratum = {name: [c for c in pool if c["stratum"] == name] for name in strata}
     chosen, per_question, taken, pointer = [], Counter(), Counter(), Counter()
     chosen_keys = set()
     progress = True
     while progress:
         progress = False
-        for name in STRATA:
-            if taken[name] >= per_stratum:
+        for name in strata:
+            if taken[name] >= quotas[name]:
                 continue
             members = by_stratum[name]
             while pointer[name] < len(members):
                 candidate = members[pointer[name]]
                 pointer[name] += 1
-                if per_question[candidate["question_id"]] >= max_per_question:
+                if blocked(candidate, name):
                     continue
-                chosen.append({"candidate": candidate, "stratum": name, "fill": False})
-                chosen_keys.add(candidate["key"])
-                per_question[candidate["question_id"]] += 1
+                take(candidate, name, False)
                 taken[name] += 1
                 progress = True
                 break
-    shortfalls = {name: per_stratum - taken[name] for name in STRATA if taken[name] < per_stratum}
+    shortfalls = {name: quotas[name] - taken[name] for name in strata if taken[name] < quotas[name]}
     # Fill to the minimum round-robin across strata that still have candidates, unlabeled last.
-    fill_order = STRATA + ("unlabeled",)
+    fill_order = tuple(strata) + ("unlabeled",)
     by_stratum["unlabeled"] = [c for c in pool if c["stratum"] == "unlabeled"]
     progress = True
     while progress and len(chosen) < minimum:
@@ -679,11 +792,9 @@ def select(candidates, seed: str, per_stratum: int = 10, minimum: int = 50, max_
             while pointer[name] < len(members):
                 candidate = members[pointer[name]]
                 pointer[name] += 1
-                if candidate["key"] in chosen_keys or per_question[candidate["question_id"]] >= max_per_question:
+                if candidate["key"] in chosen_keys or blocked(candidate, name):
                     continue
-                chosen.append({"candidate": candidate, "stratum": name, "fill": True})
-                chosen_keys.add(candidate["key"])
-                per_question[candidate["question_id"]] += 1
+                take(candidate, name, True)
                 progress = True
                 break
     chosen.sort(key=lambda entry: rank(seed, "order", entry["candidate"]["key"]))
@@ -973,10 +1084,18 @@ def regenerate_form(set_dir: Path, output: Path):
 # --------------------------------------------------------------------------- assembly
 
 
-def assemble(candidates, seed, output: Path, *, per_stratum=10, minimum=50, max_per_question=2):
-    chosen, shortfalls, available = select(candidates, seed, per_stratum, minimum, max_per_question)
+def assemble(candidates, seed, output: Path, *, per_stratum=10, minimum=50, max_per_question=2, strata=STRATA,
+             quotas=None, extension=None, stratum_max_per_question=None):
+    """Select, blind and write a set. With `extension` (a metadata dict, see assemble_extension) the set
+    uses its own strata and quotas, its ID has the prefix `jx-` and the dict enters the ID hash; without
+    it the base set's ID, selection and files are unchanged."""
+    chosen, shortfalls, available = select(candidates, seed, per_stratum, minimum, max_per_question, strata, quotas,
+                                           stratum_max_per_question)
     keys = [entry["candidate"]["key"] for entry in chosen]
-    set_id = "jc-" + sha256_bytes(canonical({"seed": seed, "keys": sorted(keys), "tool": TOOL_VERSION}))[:16]
+    identity = {"seed": seed, "keys": sorted(keys), "tool": TOOL_VERSION}
+    if extension is not None:
+        identity["extension"] = extension
+    set_id = ("jx-" if extension is not None else "jc-") + sha256_bytes(canonical(identity))[:16]
     items, key_entries, substitutions = [], [], 0
     for position, entry in enumerate(chosen, start=1):
         candidate = entry["candidate"]
@@ -995,20 +1114,29 @@ def assemble(candidates, seed, output: Path, *, per_stratum=10, minimum=50, max_
                             "evidence_retention": candidate["evidence_retention"],
                             "answer_sha256": candidate["answer_sha256"],
                             "item_sha256": sha256_bytes(canonical(item)), "identifier_substitutions": replaced})
+        if extension is not None:
+            key_entries[-1]["self_correction_signals"] = list(candidate.get("self_correction_signals") or [])
     items_document = {"format": ITEMS_FORMAT, "set_id": set_id, "items": items}
     key_document = {"format": "boros-judge-calibration-key-v1", "set_id": set_id, "seed": seed,
                     "prior_judges": PRIOR_JUDGES, "items": key_entries}
     violations = blinding_violations(items_document, key_document)
     require(not violations, "blinding_violation")
+    if extension is not None:
+        selected = Counter(entry["stratum"] for entry in key_entries)
+        require(selected["self_correction"] >= extension["self_correction_minimum"], "self_correction_shortfall")
+        require(len(items) >= minimum, "extension_below_minimum")
     make_private_directory(output, fresh=True)
     items_sha = write_private_json(output / "items.json", items_document)
     key_sha = write_private_json(output / "key.json", key_document)
     form = render_form(items_document, items_sha)
     write_private(output / "adjudication-form.html", form)
+    parameters = {"per_stratum": per_stratum, "minimum": minimum, "max_per_question": max_per_question}
+    if extension is not None:
+        parameters.update(strata=list(strata), quotas=dict(quotas or {}),
+                          stratum_max_per_question=dict(stratum_max_per_question or {}))
     manifest = {
         "format": "boros-judge-calibration-manifest-v1", "tool_version": TOOL_VERSION, "set_id": set_id,
-        "seed": seed, "parameters": {"per_stratum": per_stratum, "minimum": minimum,
-                                     "max_per_question": max_per_question},
+        "seed": seed, "parameters": parameters,
         "item_count": len(items), "items_sha256": items_sha, "key_sha256": key_sha,
         "form_sha256": sha256_bytes(form),
         "available_after_deduplication": available, "shortfalls": shortfalls,
@@ -1023,6 +1151,173 @@ def assemble(candidates, seed, output: Path, *, per_stratum=10, minimum=50, max_
         "prior_label_coverage": dict(Counter(judge for entry in key_entries for judge in entry["prior_labels"])),
         "judge_prompt_sha256": judge_prompt_sha256(),
     }
+    if extension is not None:
+        manifest["extension"] = extension
+        manifest["self_correction_signals"] = dict(Counter(
+            signal for entry in key_entries for signal in entry["self_correction_signals"]))
+    write_private_json(output / "manifest.json", manifest)
+    return manifest
+
+
+# --------------------------------------------------------------------------- likely-wrong extension
+
+# Extension strata for the likely-wrong calibration extension, by precedence. Membership of every
+# stratum except self_correction uses run metadata and prior labels only, as in the base set.
+# self_correction is chosen by a lexical heuristic over the answer and the reference, so its
+# membership is necessarily answer-dependent; order inside every stratum is still a seeded hash.
+EXTENSION_STRATA = ("self_correction", "rejected", "recent_only", "insufficient_pack")
+EXTENSION_QUOTAS = {"self_correction": 8, "rejected": 8, "recent_only": 7, "insufficient_pack": 7}
+RECENT_ONLY_ARM = re.compile(r"(?:^|-)recent_only(?:-|$)")
+SELF_CORRECTION_HEURISTIC = {
+    "version": "boros-judge-calibration-self-correction-heuristic-v1",
+    "explicit_revision": "an explicit revision marker: a line or emphasis starting with 'correction', 'wait,', "
+                         "'actually,', 'let me re-read / re-check / double-check / recalculate / recount / "
+                         "reconsider / correct', 'on closer look', an apology for an error, 'my mistake', "
+                         "'I made an error', 'I misspoke', 'upon re-checking'",
+    "late_reference": "answerable question with a short reference (at most 6 normalized tokens); the answer has at "
+                      "least two paragraphs; its first paragraph states a bold headline of the reference's kind "
+                      "(numeric or not) and does not contain the reference; its last paragraph contains it",
+    "normalization": "lowercase, emphasis removed, number words zero to twenty as digits, punctuation other than $ "
+                     "and apostrophes as spaces, whitespace collapsed",
+}
+EXPLICIT_REVISION = re.compile(
+    r"(?:^|\n|\*)\s*correction\b|\bwait[,.]\s|\bactually,|\blet me (?:re-?read|re-?check|re-?examine|"
+    r"re-?calculate|recount|reconsider|double-check|correct)\b|\bon closer (?:look|inspection|reading)\b|"
+    r"\bi apologi[sz]e for (?:the|my) (?:error|mistake|miscount|oversight)\b|\bmy (?:mistake|error)\b|"
+    r"\bi made an? (?:error|mistake)\b|\bi misspoke\b|\bupon (?:re-?checking|re-?reading|closer)\b", re.I)
+BOLD_SPAN = re.compile(r"\*\*(.+?)\*\*", re.S)
+NUMBER_WORDS = {word: str(value) for value, word in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+    "seventeen eighteen nineteen twenty".split())}
+NUMBER_WORD = re.compile(r"\b(" + "|".join(NUMBER_WORDS) + r")\b")
+
+
+def _normalize_for_heuristic(text: str) -> str:
+    text = text.lower().replace("*", "").replace("’", "'")
+    text = NUMBER_WORD.sub(lambda match: NUMBER_WORDS[match.group(1)], text)
+    text = re.sub(r"[^a-z0-9$' ]+", " ", text)
+    return " " + " ".join(text.split()) + " "
+
+
+def self_correction_signals(answer: str, reference: str, abstention: bool) -> list:
+    """Lexical signals that an answer states a wrong answer and then corrects or contradicts it.
+    A candidate generator for human adjudication, not a classifier; precision is unmeasured."""
+    signals = []
+    if EXPLICIT_REVISION.search(answer or ""):
+        signals.append("explicit_revision")
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", (answer or "").strip()) if part.strip()]
+    target = _normalize_for_heuristic(str(reference or "").strip().rstrip("."))
+    if not abstention and target.strip() and len(target.split()) <= 6 and len(paragraphs) >= 2:
+        headline = BOLD_SPAN.findall(paragraphs[0])
+        numeric = any(character.isdigit() for character in target)
+        if (headline and any(character.isdigit() for character in _normalize_for_heuristic(headline[0])) == numeric
+                and target not in _normalize_for_heuristic(paragraphs[0])
+                and target in _normalize_for_heuristic(paragraphs[-1])):
+            signals.append("late_reference")
+    return signals
+
+
+def extension_stratum(candidate):
+    """Extension stratum by precedence, or None when the candidate is not a likely-wrong candidate."""
+    if candidate.get("self_correction_signals"):
+        return "self_correction"
+    verdicts = [label.get("verdict") for label in candidate["prior_labels"].values()]
+    verdicts = [verdict for verdict in verdicts if verdict in ("accept", "reject")]
+    if verdicts and "accept" not in verdicts:
+        return "rejected"
+    if candidate["abstention"] or candidate["all_annotated_delivered"] is not False:
+        return None
+    return "recent_only" if RECENT_ONLY_ARM.search(candidate["arm"] or "") else "insufficient_pack"
+
+
+def assemble_extension(candidates, seed, output: Path, base_set: Path, *, minimum=25, max_per_question=2,
+                       quotas=None, self_correction_minimum=6, self_correction_max_per_question=3):
+    """Likely-wrong extension set: candidates already in the base set (same question and answer
+    digest) are excluded, the rest are stratified by extension_stratum, and the set is written with the
+    same blinding, opaque item IDs, key, manifest and local form as the base set. Self-contradicting
+    answers are concentrated on few questions, so the self_correction stratum may take up to
+    `self_correction_max_per_question` items of one question, never more than `max_per_question` of one
+    question from one run family (for example at most two answers of one replay question)."""
+    base_manifest = load_json(base_set / "manifest.json")
+    base_key = load_json(base_set / "key.json")
+    require(base_key["set_id"] == base_manifest["set_id"], "key_set_mismatch")
+    excluded = {(entry["question_id"], entry["answer_sha256"]) for entry in base_key["items"]}
+    pool = []
+    for candidate in candidates:
+        if not candidate["eligible"] or (candidate["question_id"], candidate["answer_sha256"]) in excluded:
+            continue
+        candidate = dict(candidate)
+        candidate["self_correction_signals"] = self_correction_signals(
+            candidate["answer_text"], candidate["reference"], bool(candidate["abstention"]))
+        candidate["stratum"] = extension_stratum(candidate)
+        if candidate["stratum"] is not None:
+            pool.append(candidate)
+    quotas = dict(quotas or EXTENSION_QUOTAS)
+    extension = {"base_set_id": base_manifest["set_id"], "base_items_sha256": base_manifest["items_sha256"],
+                 "excluded_base_answers": len(excluded), "strata": list(EXTENSION_STRATA), "quotas": quotas,
+                 "self_correction_minimum": self_correction_minimum,
+                 "self_correction_max_per_question": self_correction_max_per_question,
+                 "max_per_question_and_run_family": max_per_question,
+                 "self_correction_heuristic": SELF_CORRECTION_HEURISTIC["version"],
+                 "self_correction_heuristic_sha256": sha256_bytes(canonical(SELF_CORRECTION_HEURISTIC)),
+                 "candidates_by_stratum": dict(Counter(candidate["stratum"] for candidate in pool))}
+    return assemble(pool, seed, output, per_stratum=0, minimum=minimum, max_per_question=max_per_question,
+                    strata=EXTENSION_STRATA, quotas=quotas, extension=extension,
+                    stratum_max_per_question={"self_correction": self_correction_max_per_question})
+
+
+# --------------------------------------------------------------------------- subsets of existing sets
+
+
+def subset_set(sources, seed: str, output: Path):
+    """A new verdict set holding chosen items of existing sets, for example one question's answers from two
+    replay judge sets. sources: [(set directory, item ID)]. Items are copied unchanged except for a new
+    opaque ID in a seeded order; each source set's items hash is verified and its key supplies only the
+    metadata the blinding check needs. Writes items.json, key.json and manifest.json (no form)."""
+    require(isinstance(seed, str) and seed, "seed_required")
+    require(sources, "subset_empty")
+    loaded, picked = {}, []
+    for set_dir, item_id in sources:
+        set_dir = Path(set_dir)
+        if set_dir not in loaded:
+            manifest = load_json(set_dir / "manifest.json")
+            raw = (set_dir / "items.json").read_bytes()
+            require(sha256_bytes(raw) == manifest["items_sha256"], "items_hash_mismatch")
+            document = json.loads(raw)
+            require(document.get("format") == ITEMS_FORMAT and document.get("set_id") == manifest["set_id"],
+                    "items_document_invalid")
+            key = load_json(set_dir / "key.json")
+            require(key.get("set_id") == manifest["set_id"], "key_set_mismatch")
+            loaded[set_dir] = (manifest, {item["item_id"]: item for item in document["items"]},
+                               {entry["item_id"]: entry for entry in key["items"]})
+        manifest, items, keys = loaded[set_dir]
+        require(item_id in items and item_id in keys, "subset_item_missing")
+        picked.append((manifest, items[item_id], keys[item_id]))
+    require(len({(manifest["set_id"], item["item_id"]) for manifest, item, _ in picked}) == len(picked),
+            "subset_duplicate_item")
+    picked.sort(key=lambda value: rank(seed, value[0]["set_id"], value[1]["item_id"]))
+    items, key_entries = [], []
+    for position, (manifest, item, key) in enumerate(picked, start=1):
+        renamed = dict(item, item_id=f"item-{position:03d}")
+        items.append(renamed)
+        key_entries.append({"item_id": renamed["item_id"], "source_set_id": manifest["set_id"],
+                            "source_items_sha256": manifest["items_sha256"], "source_item_id": item["item_id"],
+                            "question_id": key["question_id"], "run": key["run"], "arm": key["arm"],
+                            "question_type": item["question_type"], "abstention": bool(item["abstention"]),
+                            "answer_sha256": key.get("answer_sha256"),
+                            "item_sha256": sha256_bytes(canonical(renamed))})
+    set_id = "js-" + sha256_bytes(canonical({"seed": seed, "sources": [
+        [entry["source_set_id"], entry["source_item_id"]] for entry in key_entries]}))[:16]
+    items_document = {"format": ITEMS_FORMAT, "set_id": set_id, "items": items}
+    key_document = {"format": "boros-judge-calibration-subset-key-v1", "set_id": set_id, "seed": seed,
+                    "items": key_entries}
+    require(not blinding_violations(items_document, key_document), "blinding_violation")
+    make_private_directory(output, fresh=True)
+    items_sha = write_private_json(output / "items.json", items_document)
+    key_sha = write_private_json(output / "key.json", key_document)
+    manifest = {"format": "boros-judge-calibration-subset-manifest-v1", "tool_version": TOOL_VERSION,
+                "set_id": set_id, "seed": seed, "item_count": len(items), "items_sha256": items_sha,
+                "key_sha256": key_sha, "source_sets": sorted({entry["source_set_id"] for entry in key_entries})}
     write_private_json(output / "manifest.json", manifest)
     return manifest
 
@@ -1123,7 +1418,8 @@ def render_evidence(item) -> str:
         for entry in item["evidence"])
 
 
-def judge_messages(item, stage: str, prompt_function=None, reply_instruction: bool = False):
+def judge_messages(item, stage: str, prompt_function=None, reply_instruction: bool = False,
+                   verdict_rubric: bool = False):
     """Offline rendering of one judge request from blinded item fields only.
 
     The sufficiency request omits the answer. The verdict request is the unchanged upstream QA prompt
@@ -1132,6 +1428,9 @@ def judge_messages(item, stage: str, prompt_function=None, reply_instruction: bo
     With `reply_instruction` (prompt set v3, Vertex declaration v3 only), the stage's fixed line from
     REPLY_INSTRUCTIONS is added as one more system message after the stage's own system text, if any,
     and before the user message. The prompt texts themselves are unchanged.
+
+    With `verdict_rubric` (prompt set v4, Vertex declaration v4 only), the verdict prompt also carries
+    the VERDICT_RUBRIC sentence (insert_verdict_rubric); the sufficiency request is unchanged.
     """
     require(stage in ("sufficiency", "verdict"), "stage_invalid")
     if stage == "sufficiency":
@@ -1148,6 +1447,8 @@ def judge_messages(item, stage: str, prompt_function=None, reply_instruction: bo
         except NotImplementedError:
             raise CalibrationError("upstream_prompt_category_unsupported") from None
         require(isinstance(prompt, str) and prompt.strip(), "upstream_prompt_invalid")
+        if verdict_rubric:
+            prompt = insert_verdict_rubric(prompt)
         messages = [{"role": "user", "content": prompt}]
     if reply_instruction:
         messages.insert(len(messages) - 1, {"role": "system", "content": REPLY_INSTRUCTIONS[stage]})
@@ -1301,6 +1602,47 @@ def parse_instructed_reply_detail(text, stage: str):
 def parse_instructed_reply(text, stage: str):
     """Instructed JSON reply -> label, or None when it is off shape (never coerced)."""
     return parse_instructed_reply_detail(text, stage)[0]
+
+
+# Prompt set v4: prompt set v3 plus one rubric sentence in the verdict prompt, applying the user's
+# decision of October 9, 2026 that self-corrections are rejected. The sentence is inserted into the
+# rendered upstream prompt at the end of its rubric paragraph, immediately before the first
+# "\n\nQuestion: " (every upstream category template has exactly that boundary, and it precedes all
+# item text). Everything else, including the reply-format line, the sufficiency prompt and the
+# upstream function itself, is byte-identical to prompt set v3.
+VERDICT_RUBRIC = {
+    "version": "boros-judge-calibration-verdict-rubric-v1",
+    "decision": "user decision of October 9, 2026: an answer that states a wrong answer and then corrects "
+                "itself, or contradicts itself, is a reject even when the correct value appears",
+    "sentence": ("If the response contradicts itself, for example by first stating a wrong answer and then "
+                 "correcting it, answer no, even if the correct answer also appears in the response."),
+    "anchor": "\n\nQuestion: ",
+    "placement": "inserted once into the rendered upstream verdict prompt immediately before the first anchor, "
+                 "that is at the end of the upstream rubric paragraph, preceded by one space unless the paragraph "
+                 "already ends with a space; every other byte of the prompt is unchanged; all categories, "
+                 "abstention included",
+}
+JUDGE_PROMPTS_V4 = {"version": "boros-judge-calibration-prompts-v4", "base_version": JUDGE_PROMPTS_V3["version"],
+                    "verdict": VERDICT_PROMPT, "verdict_rubric": VERDICT_RUBRIC, "sufficiency": SUFFICIENCY_PROMPT,
+                    "reply_instructions": REPLY_INSTRUCTIONS}
+
+
+def verdict_rubric_sha256() -> str:
+    return sha256_bytes(canonical(VERDICT_RUBRIC))
+
+
+def judge_prompt_v4_sha256() -> str:
+    """Hash of prompt set v4: prompt set v3 plus the self-correction rubric sentence."""
+    return sha256_bytes(canonical(JUDGE_PROMPTS_V4))
+
+
+def insert_verdict_rubric(prompt: str) -> str:
+    """The rendered upstream verdict prompt with the v4 rubric sentence inserted (fails closed)."""
+    anchor = VERDICT_RUBRIC["anchor"]
+    position = prompt.find(anchor)
+    require(position > 0, "upstream_prompt_rubric_anchor_missing")
+    separator = "" if prompt[position - 1] == " " else " "
+    return prompt[:position] + separator + VERDICT_RUBRIC["sentence"] + prompt[position:]
 
 
 # --------------------------------------------------------------------------- scoring
@@ -1702,7 +2044,11 @@ DECLARATION_FORMAT_V2 = "boros-judge-calibration-vertex-declaration-v2"
 # Vertex declaration v3: instructed JSON replies (no `output_config.format`, which the llm-train
 # organization policy blocks), the v2 per-model thinking controls, and prompt set v3.
 DECLARATION_FORMAT_V3 = "boros-judge-calibration-vertex-declaration-v3"
-VERTEX_DECLARATION_FORMATS = (DECLARATION_FORMAT, DECLARATION_FORMAT_V2, DECLARATION_FORMAT_V3)
+# Vertex declaration v4: version 3 unchanged (instructed JSON, thinking controls, reply format) with
+# prompt set v4, whose verdict prompt adds the self-correction rubric sentence.
+DECLARATION_FORMAT_V4 = "boros-judge-calibration-vertex-declaration-v4"
+INSTRUCTED_DECLARATION_FORMATS = (DECLARATION_FORMAT_V3, DECLARATION_FORMAT_V4)
+VERTEX_DECLARATION_FORMATS = (DECLARATION_FORMAT, DECLARATION_FORMAT_V2, DECLARATION_FORMAT_V3, DECLARATION_FORMAT_V4)
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PROVIDER_DEFAULT = "provider-default"
 THINKING_OMITTED = "omitted-adaptive"  # no `thinking` field is sent; the model thinks adaptively
@@ -1756,27 +2102,35 @@ def reply_format_declaration():
 
 def prompts_declaration(document=None):
     """The `prompts` fields a declaration pins: prompt set v3 for a v3 Vertex declaration (with the
-    unchanged component hashes and the reply-instruction hash), else prompt set v2."""
+    unchanged component hashes and the reply-instruction hash), prompt set v4 for a v4 Vertex declaration
+    (the same plus the verdict rubric hash), else prompt set v2."""
     fields = {"version": JUDGE_PROMPTS["version"], "sha256": judge_prompt_sha256(),
               "verdict_sha256": verdict_prompt_sha256(), "sufficiency_sha256": sufficiency_prompt_sha256(),
               "upstream_protocol_sha256": UPSTREAM_QA_PROTOCOL_SHA256}
-    if isinstance(document, dict) and document.get("format") == DECLARATION_FORMAT_V3:
+    form = document.get("format") if isinstance(document, dict) else None
+    if form == DECLARATION_FORMAT_V3:
         fields.update(version=JUDGE_PROMPTS_V3["version"], sha256=judge_prompt_v3_sha256(),
                       reply_instructions_sha256=reply_instructions_sha256())
+    elif form == DECLARATION_FORMAT_V4:
+        fields.update(version=JUDGE_PROMPTS_V4["version"], sha256=judge_prompt_v4_sha256(),
+                      reply_instructions_sha256=reply_instructions_sha256(),
+                      verdict_rubric_sha256=verdict_rubric_sha256())
     return fields
 
 
 def vertex_request_controls(document):
     """Request controls of a Vertex declaration: None for v1 (unconstrained, no thinking field),
-    else {"structured": bool, "instructed": bool, "thinking": dict or None, "effort": str or None}:
-    v2 is structured (`output_config.format`), v3 is instructed (the reply-format system line).
+    else {"structured": bool, "instructed": bool, "verdict_rubric": bool, "thinking": dict or None,
+    "effort": str or None}: v2 is structured (`output_config.format`), v3 and v4 are instructed (the
+    reply-format system line), and v4 adds the verdict rubric sentence (prompt set v4).
     check_declaration validates the values; the adapter validates them again when it renders a body."""
-    if document.get("format") not in (DECLARATION_FORMAT_V2, DECLARATION_FORMAT_V3):
+    if document.get("format") not in (DECLARATION_FORMAT_V2,) + INSTRUCTED_DECLARATION_FORMATS:
         return None
     execution = document.get("execution") or {}
     thinking, effort = execution.get("thinking"), execution.get("effort")
     v2 = document.get("format") == DECLARATION_FORMAT_V2
-    return {"structured": v2, "instructed": not v2, "thinking": thinking if isinstance(thinking, dict) else None,
+    return {"structured": v2, "instructed": not v2, "verdict_rubric": document.get("format") == DECLARATION_FORMAT_V4,
+            "thinking": thinking if isinstance(thinking, dict) else None,
             "effort": None if effort == PROVIDER_DEFAULT else effort}
 
 
@@ -1904,7 +2258,7 @@ def check_declaration(document, set_dir: Path | None = None):
             problems.append("cost_gate")
         if document.get("format") == DECLARATION_FORMAT_V2:
             _check_vertex_v2(document, DECLARATION_MODELS[judge], problems)
-        elif document.get("format") == DECLARATION_FORMAT_V3:
+        elif document.get("format") in INSTRUCTED_DECLARATION_FORMATS:  # v4 adds only the verdict rubric
             _check_vertex_v3(document, DECLARATION_MODELS[judge], problems)
         else:  # version 1, kept for runs made under it: no thinking field, no reply constraint
             if execution.get("extended_thinking") is not False:
@@ -1981,6 +2335,24 @@ def main(argv=None):
     commands.choices["assemble"].add_argument("--per-stratum", type=int, default=10)
     commands.choices["assemble"].add_argument("--minimum", type=int, default=50)
     commands.choices["assemble"].add_argument("--max-per-question", type=int, default=2)
+    extension = commands.add_parser("assemble-extension")
+    extension.add_argument("--evaluation-root", action="append", required=True,
+                           help="read-only directory holding saved answer captures; repeat for worktrees")
+    extension.add_argument("--replay", action="append", default=[], type=Path,
+                           help="read-only finished answer-presentation replay directory; repeatable")
+    extension.add_argument("--dataset", type=Path, required=True, help="pinned longmemeval_s_cleaned.json")
+    extension.add_argument("--base-set", type=Path, required=True, help="set whose answers are excluded")
+    extension.add_argument("--seed", required=True)
+    extension.add_argument("--minimum", type=int, default=25)
+    extension.add_argument("--max-per-question", type=int, default=2)
+    extension.add_argument("--self-correction-minimum", type=int, default=6)
+    extension.add_argument("--self-correction-max-per-question", type=int, default=3)
+    extension.add_argument("--output", type=Path, required=True,
+                           help="fresh private directory under this checkout's .build/judge-calibration")
+    subset = commands.add_parser("subset")
+    subset.add_argument("--item", action="append", required=True, help="SET_DIRECTORY:item-NNN; repeatable")
+    subset.add_argument("--seed", required=True)
+    subset.add_argument("--output", type=Path, required=True, help="fresh private directory under .build")
     scoring = commands.add_parser("score")
     scoring.add_argument("--set", type=Path, required=True)
     scoring.add_argument("--adjudications", type=Path, required=True)
@@ -1998,7 +2370,32 @@ def main(argv=None):
     declaration.add_argument("--set", type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.command in ("inventory", "assemble"):
+        if args.command == "assemble-extension":
+            output = check_private_destination(args.output)
+            roots = parse_roots(args.evaluation_root)
+            dataset = load_dataset(args.dataset)
+            replays = [path.resolve() for path in args.replay]
+            for path in replays:
+                require(path.is_dir(), "replay_directory_missing")
+            candidates = collect_candidates(roots, dataset)
+            for candidate in replay_candidates(replays, dataset):
+                candidate["eligible"] = eligibility(candidate) is None
+                candidate["stratum"] = stratum_of(candidate)
+                candidates.append(candidate)
+            manifest = assemble_extension(candidates, args.seed, output, args.base_set, minimum=args.minimum,
+                                          max_per_question=args.max_per_question,
+                                          self_correction_minimum=args.self_correction_minimum,
+                                          self_correction_max_per_question=args.self_correction_max_per_question)
+            print(json.dumps(manifest, sort_keys=True, indent=1))
+        elif args.command == "subset":
+            sources = []
+            for value in args.item:
+                directory, separator, item_id = value.rpartition(":")
+                require(separator and directory and re.fullmatch(r"item-\d{3}", item_id), "subset_item_argument")
+                sources.append((Path(directory), item_id))
+            print(json.dumps(subset_set(sources, args.seed, check_private_destination(args.output)),
+                             sort_keys=True, indent=1))
+        elif args.command in ("inventory", "assemble"):
             output = check_private_destination(args.output)
             roots = parse_roots(args.evaluation_root)
             dataset = load_dataset(args.dataset)
