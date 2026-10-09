@@ -576,6 +576,8 @@ def judge_items(cohort_name, answered, dataset_records, seed):
                                      operational_complete=True, answer_sha256=digest(answer.encode()))
         jc.attach_question(candidate, dataset_records)
         require(candidate["reference"] is not None, "question_missing_from_dataset")
+        # As in calibration, source IDs map to [source]; the generic patterns catch the rest.
+        candidate["scrub_ids"].update(event["id"] for event in _history["events"])
         jc.verify_answer(candidate, answer)
         candidates.append((jc.rank(seed, str(index), entry["question_id"], entry["arm"]), index, entry, candidate))
     candidates.sort(key=lambda value: value[0])
@@ -603,20 +605,28 @@ def judge_set(args):
     require(all(answer is not None for _, _, _, answer in answered), "replay_incomplete")
     seed = digest((output / "declaration.json").read_bytes())
     items_document, key_document = judge_items(declaration["cohort"], answered, jc.load_dataset(args.dataset), seed)
-    destination = output / "judge-set"
+    manifest = write_judge_set(output / "judge-set", items_document, key_document, declaration["cohort"], seed)
+    print(json.dumps({"set_id": manifest["set_id"], "items": manifest["item_count"],
+                      "items_sha256": manifest["items_sha256"], "key_sha256": manifest["key_sha256"],
+                      "identifier_substitutions": manifest["identifier_substitutions"],
+                      "identity_mention_items": len(manifest["identity_mention_items"])}))
+
+
+def write_judge_set(destination: Path, items_document, key_document, cohort_name, seed):
+    """Private items.json, key.json and manifest.json; the manifest fields are those the judge runner
+    verifies (set ID, item count, items SHA-256). No-clobber, 0600 files in a fresh 0700 directory."""
+    import judge_calibration as jc
     jc.make_private_directory(destination, fresh=True)
     items_sha = jc.write_private_json(destination / "items.json", items_document)
     key_sha = jc.write_private_json(destination / "key.json", key_document)
     manifest = {"format": JUDGE_SET_FORMAT, "set_id": items_document["set_id"], "item_count": len(items_document["items"]),
-                "items_sha256": items_sha, "key_sha256": key_sha, "seed": seed, "cohort": declaration["cohort"],
+                "items_sha256": items_sha, "key_sha256": key_sha, "seed": seed, "cohort": cohort_name,
                 "replay_declaration_sha256": seed, "tasks": ["verdict"],
                 "item_builder": "judge_calibration.attach_question + blind_item with no evidence",
                 "identifier_substitutions": sum(entry["identifier_substitutions"] for entry in key_document["items"]),
                 "identity_mention_items": jc.identity_mentions(items_document)}
     jc.write_private_json(destination / "manifest.json", manifest)
-    print(json.dumps({"set_id": manifest["set_id"], "items": manifest["item_count"], "items_sha256": items_sha,
-                      "key_sha256": key_sha, "identifier_substitutions": manifest["identifier_substitutions"],
-                      "identity_mention_items": len(manifest["identity_mention_items"])}))
+    return manifest
 
 
 def majority_of_three(verdicts):

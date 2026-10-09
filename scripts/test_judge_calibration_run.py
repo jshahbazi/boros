@@ -957,6 +957,67 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(jc.CalibrationError, "resume_capture_mismatch"):
             run.prior_state(captures, run.VertexTransport(sonnet, structured=True, token_fn=lambda: "t"), plan)
 
+    def test_verdict_only_declaration_plans_identical_verdict_requests_and_nothing_else(self):
+        items = run.load_set(self.set_dir)[1]
+        full = self.v3("vertex-sonnet")
+        verdict_only = self.v3("vertex-sonnet", **{"execution.stages_per_item": ["verdict"],
+                                                    "budget.max_generation_requests": 3 * 3,
+                                                    "budget.max_count_requests": 3})
+        self.assertEqual(jc.check_declaration(verdict_only, self.set_dir), [])
+        self.assertEqual(jc.declared_stages(verdict_only), ("verdict",))
+        self.assertEqual(jc.declared_stages(full), jc.STAGES)
+        for template in ("vertex-sonnet.v3.template.json", "vertex-opus.v3.template.json", "jevk5.template.json",
+                         "qwen-local.template.json"):
+            self.assertEqual(json.loads((TEMPLATES / template).read_text())["execution"]["stages_per_item"],
+                             list(jc.STAGES), template)
+        # Only the two accepted plans pass; limits are checked against the verdict-only plan.
+        for stages in (["sufficiency"], ["verdict", "sufficiency"], ["verdict", "verdict"], [], "verdict", None):
+            bad = copy.deepcopy(verdict_only)
+            bad["execution"]["stages_per_item"] = stages
+            self.assertIn("stages" if stages is not None else "unfilled:execution.stages_per_item",
+                          jc.check_declaration(bad, self.set_dir), stages)
+        low = copy.deepcopy(verdict_only)
+        low["budget"].update(max_generation_requests=8, max_count_requests=2)
+        self.assertTrue({"generation_limit_below_plan", "count_limit_below_plan"}
+                        <= set(jc.check_declaration(low, self.set_dir)))
+        # The verdict requests are byte-identical to the verdict requests of the full plan.
+        full_plan = run.build_plan(items, full, fake_prompt)
+        plan = run.build_plan(items, verdict_only, fake_prompt)
+        self.assertEqual({entry["stage"] for entry in plan}, {"verdict"})
+        self.assertEqual([(entry["request_id"], entry["body_sha256"], entry["count_body"]) for entry in plan],
+                         [(entry["request_id"], entry["body_sha256"], entry["count_body"]) for entry in full_plan
+                          if entry["stage"] == "verdict"])
+        self.assertEqual(plan[0]["body"]["system"], VERDICT_LINE)
+        patches = no_network()
+        for patcher in patches:
+            patcher.start()
+        try:
+            dry = run.dry_run(self.set_dir, self.declaration("vertex-sonnet", template="vertex-sonnet.v3.template.json",
+                                                             **{"execution.stages_per_item": ["verdict"]}),
+                              self.root / ".build" / "judge-calibration" / "dry", fake_prompt, root=self.root,
+                              git_ignore=False)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+        self.assertEqual((dry["network_calls"], dry["files_written"]), (0, 0))
+        self.assertEqual((dry["requests"], dry["unique_requests"], dry["count_requests_needed"], sorted(dry["by_stage"])),
+                         (9, 3, 3, ["verdict"]))
+        # A full fake run sends verdict requests only and leaves sufficiency unlabelled.
+        path = self.declaration("vertex-sonnet", template="vertex-sonnet.v3.template.json",
+                                **{"execution.stages_per_item": ["verdict"], "budget.max_generation_requests": 9,
+                                   "budget.max_count_requests": 3})
+        transport, fake = self.transport("vertex-sonnet")
+        report = self.execute("vertex-sonnet", path, output="verdict-only", transport=transport)
+        self.assertTrue(report["complete"])
+        self.assertEqual((report["planned_requests"], report["generation_requests_total"],
+                          report["count_requests_total"], report["access_probe"]), (9, 9, 3, "reachable"))
+        self.assertTrue(all(body.get("system") == VERDICT_LINE for body in fake.generation_bodies))
+        labels = json.loads((self.root / ".build/judge-calibration/labels-vertex-sonnet.json").read_text())
+        self.assertEqual(labels["prompts"]["version"], "boros-judge-calibration-prompts-v3")
+        for rows in labels["labels"].values():
+            self.assertEqual([row["sufficiency"] for row in rows], [None, None, None])
+            self.assertEqual([row["verdict"] for row in rows], ["accept"] * 3)
+
     def test_v3_declaration_checks(self):
         sonnet, opus = self.v3("vertex-sonnet"), self.v3("vertex-opus")
         v2_prompts = fill("vertex-sonnet", self.manifest)["prompts"]
