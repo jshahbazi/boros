@@ -3,7 +3,9 @@
 Status, October 9, 2026:
 
 - **Implemented (diagnosis):** `scripts/answer_presentation_defects.py`, an offline diagnostic, and `scripts/test_answer_presentation_defects.py`, run by `scripts/check.py`.
-- **Implemented (fixes A, D and G):** the `context-source-snapshot-v4` framing, now the default. See [Implementation of fixes A, D and G](#implementation-of-fixes-a-d-and-g). Fixes B, C, E and F are not part of this change; fix E (GUI rendering) is separate work.
+- **Implemented (fixes A, D and G):** the `context-source-snapshot-v4` framing, now the default. See [Implementation of fixes A, D and G](#implementation-of-fixes-a-d-and-g).
+- **Implemented (fix E):** rendered Markdown and inline math in the GUI answer display. Display only. See [Fix E](#fix-e-rendered-answer-display).
+- **Not implemented:** fixes B, C and F.
 - **Measured (diagnosis):** pattern counts over the seven flagged calibration answers and over all 192 saved Qwen and Sol answers with retained text. Also measured: a source comparison of the frozen run builds with `main` (`03f4196`).
 - **Replay:** declared next (7 questions, V3 versus V4, 14 local generations); results follow in a later commit.
 
@@ -152,7 +154,7 @@ A synthetic contract checks the extracted literals against the exact prefix asse
 
 ## Proposed fixes
 
-This was the proposal at diagnosis time. A, D and G are now implemented as one framing version (next section). B, C, E and F are not implemented here.
+This was the proposal at diagnosis time. A, D and G are now implemented as one framing version (next section). E is implemented separately (last section). B, C and F are not implemented.
 
 | Fix | Would fix | Would not fix | Cost and risk |
 |---|---|---|---|
@@ -233,7 +235,7 @@ python3 scripts/test_answer_presentation_defects.py
 
 ## Fix E: rendered answer display
 
-**Implemented October 9, 2026, with the user's authorization.** For fix E only, this section supersedes "None is implemented" above. Fixes A, B, C, D, F and G are tracked separately. Fix E changes the display only. It changes no prompt, stored text, export, backup or model request. It does not fix the envelope echo, raw IDs or disclaimers. An echoed header that is rendered is still wrong. The private adjudication form in `scripts/judge_calibration.py` is unchanged.
+**Implemented October 9, 2026, with the user's authorization.** Fixes A, D and G are implemented separately, in the V4 framing described above. B, C and F are not implemented. Fix E changes the display only. It changes no prompt, stored text, export, backup or model request. It does not fix the envelope echo, raw IDs or disclaimers. An echoed header that is rendered is still wrong. The private adjudication form in `scripts/judge_calibration.py` is unchanged.
 
 ### What it does
 
