@@ -2,8 +2,8 @@
 
 Prepared October 8, 2026 for work package P4 of the [design repair plan](DESIGN-REPAIR-PLAN.md#p4-judge-calibration). This record separates three kinds of statement:
 
-- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form with the faithful field, form regeneration, v1 and v2 adjudication loading with revision checks, scoring, declaration check, frozen judge prompts, Vertex reply schemas), `scripts/test_judge_calibration.py` (21 synthetic contracts), the [judge runner](#judge-runner-implemented-not-run) `scripts/judge_calibration_run.py` with `scripts/test_judge_calibration_run.py` (22 synthetic contracts), `scripts/vertex_anthropic.py` parameterized by model with opt-in structured outputs and thinking controls (15 synthetic contracts), and six declaration templates under `scripts/judge_calibration_declarations/` (version 2 for the two Vertex judges, version 1 kept for runs made under it).
-- **Measured:** the inventory counts below, the composition of the assembled set, and the runner's dry-run counts over that set. They are metadata counts. Since October 9, 2026 also: the user's [human adjudication](#human-adjudication-measured-october-9-2026) of all 50 items, its [revision](#revision-of-october-9-2026), the earlier judges' error rates against the revised file, and one live version 1 Vertex Sonnet pass. No candidate judge has a calibrated rate from a complete run yet.
+- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form with the faithful field, form regeneration, v1 and v2 adjudication loading with revision checks, scoring, declaration check, frozen judge prompts, Vertex reply schemas; since October 9, 2026 also prompt set v4, the likely-wrong extension assembly with replay candidates and the self-correction heuristic, and the `subset` command), `scripts/test_judge_calibration.py` (25 synthetic contracts), the [judge runner](#judge-runner-implemented-not-run) `scripts/judge_calibration_run.py` with `scripts/test_judge_calibration_run.py` (31 synthetic contracts), `scripts/vertex_anthropic.py` parameterized by model with opt-in structured outputs and thinking controls (15 synthetic contracts), and nine declaration templates under `scripts/judge_calibration_declarations/` (version 4 for Sonnet, version 3 and version 2 for the two Vertex judges, version 1 kept for runs made under it, and the two local judges).
+- **Measured:** the inventory counts below, the composition of the assembled set, and the runner's dry-run counts over that set. They are metadata counts. Since October 9, 2026 also: the user's [human adjudication](#human-adjudication-measured-october-9-2026) of all 50 items, its [revision](#revision-of-october-9-2026), the earlier judges' error rates against the revised file, one live version 1 Vertex Sonnet pass, the [version 3 Sonnet run](#vertex-sonnet-declaration-version-3-measured-october-9-2026) that became the default judge, the [prompt set v4 candidate run](#vertex-sonnet-prompt-set-v4-candidate-measured-october-9-2026), and the composition of the [likely-wrong extension set](#likely-wrong-extension-set-assembled-october-9-2026-not-adjudicated) (not adjudicated).
 - **Proposed:** the adjudication protocol, the self-preference handling and the filled run declarations. The runner and its prompts have been exercised only against fake transports, never against a model.
 
 No generation, judge, token-count, access-probe, MCP or local model server call was made, including during the dry runs. No question, reference, evidence, answer or note text appears in this document, in test fixtures or in command output. The tools print counts, identifiers and hashes only.
@@ -146,7 +146,7 @@ Used by the user for the October 9, 2026 adjudication; the verdict rubric and th
 4. Reveal the answer. Revealing is enabled only after a sufficiency choice. If sufficiency is changed after the reveal, both values are kept and reported.
 5. Record the **answer verdict**. The verdict means agreement with the reference under the LongMemEval [category tolerances](#category-tolerances-user-decision-october-8-2026):
    - *Accept:* the answer addresses every part of the question, agrees with the reference on the essential facts, and makes no material claim the evidence does not support. For an unanswerable question, accept means the answer declines or states that the information is unavailable.
-   - *Reject:* any of those conditions fails. A decline ("no record of that") on an answerable question is a reject, even when the delivered evidence lacked the answer; pack sufficiency, not the verdict, records that retrieval failure.
+   - *Reject:* any of those conditions fails. A decline ("no record of that") on an answerable question is a reject, even when the delivered evidence lacked the answer; pack sufficiency, not the verdict, records that retrieval failure. A self-correction or self-contradiction is a reject even when the correct value appears; see [Self-corrections](#self-corrections-user-decision-october-9-2026).
    - *Unsure:* the item is excluded from rate denominators and counted separately.
 6. If the only reason for a reject is an unsupported claim in an answer that agrees with the reference, also tick **unsupported claims**. This lets scoring compute a reference-only variant.
 7. Record **faithful to the evidence**: whether the answer is honest about and consistent with the delivered evidence, independent of the reference.
@@ -187,6 +187,14 @@ The user decided that adjudication applies the tolerances built into the pinned 
 - **Abstention:** correct when the response identifies the question as unanswerable, for example by saying the information is incomplete or never mentioned.
 
 These tolerances do not relax step 5's support condition: an answer that agrees with the reference only through a claim the evidence does not support is still ticked as unsupported, so the grounded and reference-only variants stay separable.
+
+### Self-corrections (user decision, October 9, 2026)
+
+The user decided in chat on October 9, 2026 that **self-corrections are rejected**. An answer that first states a wrong answer and then corrects itself, or that contradicts itself (for example, a wrong headline followed by reasoning that reaches the reference), is a reject even if the correct value appears in it. The rule applies to every category, abstention included.
+
+- **Scope.** The rule is about the answer contradicting itself. It does not change the knowledge-update tolerance: an answer that reports earlier, superseded information as earlier and gives the updated value as its answer does not contradict itself. Nor does it change the temporal off-by-one tolerance, which decides whether a value counts as wrong at all.
+- **Where it differs from upstream.** The upstream LongMemEval prompt accepts a response that "contains" the correct answer. Judges that use that prompt unchanged therefore tend to accept self-corrections. That covers the default judge (prompt set v3), the Qwen and JevK5 graders and the Sol upstream labels. Prompt set v4 adds one sentence for this rule; see [Prompt set v4](#prompt-set-v4-self-correction-rubric-implemented-october-9-2026).
+- **Consistency of the revised adjudication.** Checked October 9, 2026 by reading the 50 items locally. The revised file already applies the rule, so no item changes and no v3 adjudication file was produced. The two self-corrections, item-010 and item-011, are rejects. None of the 30 accepted items is a self-correction. The nearest case is item-003, an abstention item: it reports team sizes for a different role than the one asked about, then says the asked-about role is not in the records. It never states a count for the asked-about role, so it does not contradict itself.
 
 ## Scoring (implemented)
 
@@ -302,6 +310,17 @@ Approved by the user on October 9, 2026 as the fallback while structured outputs
 - **Parsing (strict).** Exactly one JSON object with exactly the shape's single field and one of its enum values; duplicate keys are refused. Tolerated around it: surrounding whitespace, and one surrounding Markdown code fence (an opening line of three backticks, optionally followed by `json`, and a closing line of three backticks). The fence tolerance is declared in the `reply_format` block (`parse_tolerance`) and in the hashed parse rule. Anything else, including prose before or after the object, a second object, another key, another value or another fence language, is `output_off_schema` (status `parse_failed`). A reply stopped by `max_tokens` is `response_incomplete` and a refusal is `refusal` (status `response_invalid`). Prose is never coerced to a label. Each completed receipt records `reply_wrapper` (`bare` or `fenced`), and each session report counts them in `replies_session.wrappers`.
 - **Requests.** Sonnet: `thinking: {"type": "between_tools"}`, provider-default effort (not sent), 512 output tokens. Opus: `output_config: {"effort": "low"}` without `format`, no `thinking` field, 2,048 output tokens. Count bodies carry the same `system` and `messages`, and no `output_config`.
 - **Comparability caveat.** Version 3 labels come from prompt set v3, not from the prompt set v2 that the upstream-only judges (Qwen local, JevK5) and the earlier records use. The added line is format-only, but the verdict judge sees one system line that the upstream protocol does not have, and the effect of that line on verdicts is unmeasured. Report version 3 Vertex labels with their prompt set version, and do not pool them with v2 labels as if they came from one protocol.
+
+### Prompt set v4: self-correction rubric (implemented October 9, 2026)
+
+Prompt set `boros-judge-calibration-prompts-v4` (SHA-256 `2ba6fa7c060c9441db2cf8de37778b038fb1233eef3baabf82ab02ea6bbd7786`) is prompt set v3 plus one sentence in the verdict prompt. The sentence applies the user's [self-correction decision](#self-corrections-user-decision-october-9-2026):
+
+> If the response contradicts itself, for example by first stating a wrong answer and then correcting it, answer no, even if the correct answer also appears in the response.
+
+- **Placement.** The upstream function still renders the prompt. The sentence is then inserted once, at the end of the upstream rubric paragraph, immediately before the first `\n\nQuestion: `. Every upstream category template, abstention included, has exactly that boundary, and it comes before any item text. It is preceded by one space unless the paragraph already ends with a space, so removing the space and the sentence gives back the v3 prompt byte for byte. A rendered prompt without the boundary is refused (`upstream_prompt_rubric_anchor_missing`); it is never sent without the sentence.
+- **Unchanged from v3:** the upstream function and its pin, the reply-format system line, the sufficiency prompt and its line, parsing, thinking `between_tools`, the provider-default effort and 512 output tokens. The component hashes are unchanged: verdict `85fa445a…c40c`, sufficiency `c6044858…b857`, upstream `ecce9c4c…5251`, reply instructions `8ecc9d7d…cbcb`, prompt set v3 `b6bcccc2…317c`. The new component is `VERDICT_RUBRIC` (version `boros-judge-calibration-verdict-rubric-v1`, SHA-256 `c48e871665f960068000822f9b017a0dcf36b0bf7785f750c97e4cad665954af`). Verdict prompts grow by 171 characters.
+- **Declaration version 4.** Format `boros-judge-calibration-vertex-declaration-v4`, template `scripts/judge_calibration_declarations/vertex-sonnet.v4.template.json` (Sonnet only). It is the version 3 template with a new format, a new status and a `prompts` block that pins prompt set v4 and adds `verdict_rubric_sha256`. `check-declaration` applies every version 3 rule. It refuses (`prompt_hash`) a v3 prompts block in a v4 declaration, a v4 block in a v3 declaration, and a missing or changed rubric hash. The runner records prompt set v4 and the rubric hash in the run record, the labels and every report. Version 1, 2 and 3 declarations, and their request bodies, are unchanged.
+- **Status.** Prompt set v4 is a candidate. It is not the default judge.
 
 ## Judge runner (implemented, not run)
 
@@ -443,7 +462,7 @@ JevK5 finding: its context is 8,192 tokens, and the template bound of 24,000 cha
 
 ## Run declarations (templates)
 
-Templates under `scripts/judge_calibration_declarations/` contain no private data. Copy a template to `.build/judge-calibration/declarations/` before filling it, because a filled declaration holds the user's authorization record. New Vertex runs in `llm-train-482420` use the version 3 templates `vertex-opus.v3.template.json` and `vertex-sonnet.v3.template.json`, format `boros-judge-calibration-vertex-declaration-v3`, while the organization policy blocks structured outputs. The version 2 templates stay at `vertex-opus.template.json` and `vertex-sonnet.template.json`, format `boros-judge-calibration-vertex-declaration-v2`, for a project or policy where structured outputs are allowed; `check-declaration` and the runner still accept them. The version 1 templates are kept as `vertex-opus.v1.template.json` and `vertex-sonnet.v1.template.json`; `check-declaration` and the runner still accept version 1, with its unconstrained bodies and bare-text parsing, so runs made under it (the first Sonnet pass) can be resumed and verified unchanged. Version 1 has no thinking control and should not be used for new runs.
+Templates under `scripts/judge_calibration_declarations/` contain no private data. Copy a template to `.build/judge-calibration/declarations/` before filling it, because a filled declaration holds the user's authorization record. New Vertex runs in `llm-train-482420` use the version 3 templates `vertex-opus.v3.template.json` and `vertex-sonnet.v3.template.json`, format `boros-judge-calibration-vertex-declaration-v3`, while the organization policy blocks structured outputs. The version 2 templates stay at `vertex-opus.template.json` and `vertex-sonnet.template.json`, format `boros-judge-calibration-vertex-declaration-v2`, for a project or policy where structured outputs are allowed; `check-declaration` and the runner still accept them. The version 1 templates are kept as `vertex-opus.v1.template.json` and `vertex-sonnet.v1.template.json`; `check-declaration` and the runner still accept version 1, with its unconstrained bodies and bare-text parsing, so runs made under it (the first Sonnet pass) can be resumed and verified unchanged. Version 1 has no thinking control and should not be used for new runs. The version 4 template `vertex-sonnet.v4.template.json`, format `boros-judge-calibration-vertex-declaration-v4`, is the version 3 Sonnet template with [prompt set v4](#prompt-set-v4-self-correction-rubric-implemented-october-9-2026); it is for the candidate only, and the default judge keeps the version 3 template.
 
 Fixed in the version 2 Vertex templates:
 
@@ -514,7 +533,7 @@ The same day the user settled the verdict rubric and added the faithful field, a
 | Sufficiency changed after reveal | 0 |
 
 - **By answerer:** all 15 Sol answers accepted; Qwen 28 of 35. All seven rejects are Qwen answers: three temporal reasoning, two preference, two assistant recall.
-- **Adjudication rules observed beyond the protocol:** an answer that first gives a wrong value and then corrects itself was rejected (2 items), and an answer that gives no answer or restates the question was rejected. The upstream judge prompt accepts a response that "contains" the correct answer, so upstream-prompt judges are expected to disagree with these two self-correction items.
+- **Adjudication rules observed beyond the protocol:** an answer that first gives a wrong value and then corrects itself was rejected (2 items), and an answer that gives no answer or restates the question was rejected. The upstream judge prompt accepts a response that "contains" the correct answer, so upstream-prompt judges are expected to disagree with these two self-correction items. The self-correction rule became a user decision later the same day; see [Self-corrections](#self-corrections-user-decision-october-9-2026).
 - **Correct-plus-unsupported stratum:** both items were accepted without the unsupported flag, against their prior source-aware labels.
 
 ### Sufficiency against the annotation proxy (first export)
@@ -571,7 +590,7 @@ Seven accepted or rejected Qwen answers carry notes about visible metadata, enve
 
 ### Next steps (proposed)
 
-1. Extend the set with at least 25 likely-wrong answers (recent-only, insufficient-pack and earlier rejected attempts), adjudicated the same way, so false-accept intervals can separate judges.
+1. Extend the set with at least 25 likely-wrong answers (recent-only, insufficient-pack and earlier rejected attempts), adjudicated the same way, so false-accept intervals can separate judges. Assembled October 9, 2026 as the 29-item [extension set](#likely-wrong-extension-set-assembled-october-9-2026-not-adjudicated) `jx-6dbd69dec7456178`, with 7 self-correction candidates; human adjudication is pending.
 2. Run the four built judge runners over the 50 items under filled declarations, after authorization.
 3. Re-judge the Qwen-labelled records that inform current claims with the best-calibrated judge.
 
@@ -594,6 +613,117 @@ One authorized run of `claude-sonnet-5-5` over all 50 items with three replicate
 - **Comparability.** These labels come from prompt set v3; the upstream-only judges did not see the added format line.
 - **Cost by task.** Summed from the generation receipts: the 150 verdict requests used 64,245 input and 1,738 output tokens ($0.15 at the declared $2 and $10 per million). The 150 sufficiency requests, which carry the delivered evidence, used 1,701,258 and 21,370 ($3.62).
 
+## Vertex Sonnet, prompt set v4 candidate (measured, October 9, 2026)
+
+The user authorized the run in chat on October 9, 2026. It used `claude-sonnet-5-5` under a filled version 4 declaration (prompt set v4, thinking `between_tools`, instructed JSON, provider-default effort, 512 output tokens). It ran the verdict task only, on all 50 items, with three replicates, majority vote and ties `unknown`. Scored against the revised adjudication, which the [self-correction rule](#self-corrections-user-decision-october-9-2026) leaves unchanged.
+
+Private paths in the coordinator worktree:
+
+- run directory: `.build/judge-calibration/runs/vertex-sonnet-v4-r3/`
+- declaration: `.build/judge-calibration/declarations/vertex-sonnet-v4-r3.json`
+- labels: `.build/judge-calibration/labels-vertex-sonnet-v4-r3.json`, SHA-256 `6eac0ff1…1d82e`
+- score report: `.build/judge-calibration/score-sonnet-v4-r3.json`
+
+The run was executed in worktree `agent-a84af31c74213f506` and copied with modes preserved.
+
+| Measure | Prompt set v3 (default judge) | Prompt set v4 (candidate) |
+|---|---|---|
+| Verdict replies parsed | 150 of 150 | 150 of 150 (all bare JSON, `end_turn`, 0 thinking tokens) |
+| Error (majority of three) | 2/50, 4% (1-13%) | 2/50, 4% (1-13%) |
+| False reject | 1/30, 3% (1-17%) | 2/30, 7% (2-21%) |
+| False accept | 1/20, 5% (1-24%) | 0/20, 0% (0-16%) |
+| Replicate verdict agreement | 98.7%, two items split 2-1 | 100%, every item 3-0 |
+| `unknown` labels | 0 | 0 |
+
+Item by item, the two prompt sets give the same majority verdict on 48 of 50 items:
+
+- **item-011, the self-correction:** v3 accepted it 2-1, a false accept. v4 rejects it 3-0, which is correct. The other self-correction, item-010, is rejected by both.
+- **item-024, a preference answer the adjudication accepts:** v3 accepted it 2-1. v4 rejects it 3-0, a new false reject. That answer does not contradict itself. Replies are bare verdicts, so why the added sentence turned this one is not known.
+- **item-048, the borderline preference answer:** both reject it 3-0, the same false reject as before.
+
+Both v4 false rejects are preference items. Preference false rejects rise from 1 of 2 to 2 of 2 adjudicated accepts, a very small cell.
+
+**The gpt4_70e84552 replay answers under v4.** These are the four self-contradicting answers the default judge split 3 to 1 on, described in [Why gpt4_70e84552 was rejected](ANSWER-PRESENTATION-DEFECTS.md#why-gpt4_70e84552-was-rejected-read-locally-at-the-users-request-october-9-2026). The set was built with the new `subset` command as `js-d85a8619fb138bf1` (4 items, items SHA-256 `0dac6f2b…33dd`) from judge sets `jr-d978990efd3d8096` and `jr-ffadbd1ee098c5a5`, items copied unchanged under new opaque IDs. A second declaration within the same authorization judged it. All 12 replies parsed and all four answers were rejected 3-0:
+
+| Answer | Default judge (v3) | v4 |
+|---|---|---|
+| Hybrid retrieval, V3 framing | accept 3-0 | reject 3-0 |
+| Hybrid retrieval, V4 framing | accept 3-0 | reject 3-0 |
+| Lexical retrieval, V3 framing | accept 3-0 | reject 3-0 |
+| Lexical retrieval, V4 framing | reject 3-0 | reject 3-0 |
+
+Labels SHA-256 `475f80cf…3e05`. Private paths in the coordinator worktree: `.build/judge-calibration/set-gpt4_70e84552-replays/`, `runs/vertex-sonnet-v4-gpt4_70e84552/` and `labels-vertex-sonnet-v4-gpt4_70e84552.json`. v4 applies the user's rule to all four, as the rubric requires.
+
+**Cost.** The probe ran first: a standalone access probe and each runner session's probe all returned `reachable` (400 on an empty body). The calibration run cost $0.159774 observed (71,217 input and 1,734 output tokens). Its reservation was $0.910734 against a $0.95 cap. The gpt4_70e84552 run cost $0.018822 observed (8,751 input and 132 output tokens). Its reservation was $0.078966 against a $0.84 cap, which is $1.00 minus the first run's observed cost. Total observed: $0.178596, within the authorized $1.00. Request limits were 160 generations and 60 counts, then 15 and 6. Each leaves room for one resume, and neither run needed one.
+
+**Reading.** On this set v4 trades one false accept (the self-correction) for one false reject (a preference answer). The overall error is unchanged at 2/50, and the intervals overlap completely. The calibration set has only two self-correction items. A difference in self-correction handling cannot be separated on it: v4 is 2 of 2 correct there and v3 is 1 of 2. The four replay answers show the same direction outside calibration, 4 of 4 rejected against 1 of 4. Telling the two prompt sets apart needs the [likely-wrong extension](#likely-wrong-extension-set-assembled-october-9-2026-not-adjudicated), which holds 7 self-correction candidates, after human adjudication. Prompt set v4 is recorded as a candidate. The default judge stays prompt set v3 until the coordinator and the user decide.
+
+## Likely-wrong extension set (assembled October 9, 2026, not adjudicated)
+
+The extension adds plausible wrong answers and self-corrections, so that false-accept intervals can separate judges. It was assembled with the same tool, the same blinding and opaque item IDs, the same key and manifest formats and the same local form as the base set. **No judge has seen it.** It must be adjudicated by a human first.
+
+```sh
+python3 scripts/judge_calibration.py assemble-extension \
+  --seed boros-p4-judge-calibration-extension-v1-20261009 \
+  --evaluation-root /Users/johnshahbazian/development/boros/.build/evaluation \
+  --evaluation-root /Users/johnshahbazian/.codex/worktrees/native-investigation/boros/.build/evaluation \
+  --replay <agent-aca195077f142adad>/.build/answer-presentation-retrieval-on-20261009 \
+  --replay <agent-a87693523abe04f90>/.build/answer-presentation-lexical-on-20261009 \
+  --replay <agent-acaa09013cb88fa18>/.build/answer-presentation-recent-only-20261009 \
+  --dataset <pinned longmemeval_s_cleaned.json> \
+  --base-set <coordinator>/.build/judge-calibration/set-v1-20261008 \
+  --output .build/judge-calibration/set-x1-20261009
+```
+
+**Candidates.** The candidates are the earlier inventory (192 eligible attempts) plus the October 9 replays: hybrid retrieval-on, lexical retrieval-on (ordinary Send) and recent-only, 126 runs and 124 eligible answers. The replays have no inventory of their own. `replay_candidates` reads each declared attempt and checks its answer against the runner's digest. It resolves the delivered evidence from the pinned dataset, verifying each byte range by digest; all replay evidence verified. Gold delivery comes from the replay's own `measure.json`. Where the replay was judged, the default judge's majority verdict is attached as the prior label `vertex-sonnet-default-qa`. Answers already in the base set, matched by question and answer digest, are excluded (50).
+
+**Strata, by precedence.**
+
+1. **Self-correction:** the lexical heuristic `boros-judge-calibration-self-correction-heuristic-v1` fires. It has two signals:
+   - an explicit revision marker, such as a "Correction" heading, "Wait,", "Actually," or "let me re-read";
+   - "late reference": the first paragraph states a bold headline of the reference's kind (numeric or not) that does not contain the reference, and the last paragraph does contain it. This signal applies only to answerable questions whose reference is at most six normalized tokens.
+2. **Rejected:** every prior verdict rejects.
+3. **Recent-only:** an answerable question answered on a recent-only arm.
+4. **Insufficient pack:** any other answerable answer whose delivery missed an annotated evidence turn.
+
+Answers in none of these strata are not candidates. Membership in the self-correction stratum depends on the answer text and the reference, by construction. Membership in the other strata uses metadata and prior labels only, as in the base set. Order inside every stratum is a seeded hash.
+
+**Caps.** The quotas are 8, 8, 7 and 7, with a minimum of 25 items, and the assembly refuses to write a set with fewer than 6 self-correction items. Outside the base set, the heuristic found self-contradicting answers to only three distinct questions. With the base set's cap of 2 per question, the stratum could reach only 5 items. It therefore admits up to 3 items per question, but never more than 2 from one question and one run family. That limit is what keeps the gpt4_70e84552 replay answers to at most two. Every other stratum keeps the cap of 2 per question.
+
+| Property | Value |
+|---|---|
+| Set ID | `jx-6dbd69dec7456178` |
+| `items.json` SHA-256 | `8887fbc08ad008185368af25f9ee4d4088ca3109ddc9ff20de90318c7bd2bcd9` |
+| Form SHA-256 | `1aaaf4f8328db360cc2ccbc4ce39bed11d22944d1bbc0390a8b984952539e09b` |
+| Items / distinct questions | 29 / 18 |
+| By stratum | self-correction 7, rejected 8, recent-only 7, insufficient pack 7 (no fill items) |
+| Candidates after deduplication | self-correction 11, rejected 58, recent-only 43, insufficient pack 13 |
+| Shortfall | self-correction 1 against its quota of 8 |
+| By category | multi-session 6, temporal reasoning 6, preference 5, knowledge update 4, assistant recall 4, user recall 4; no abstention item |
+| By answerer | Qwen 27, Sol 2, Anthropic 0 |
+| By source | October 9 replays 11 (hybrid 3, lexical 3, recent-only 5), earlier inventory 18 |
+| Self-correction composition | 3 questions contribute 3, 3 and 1 items. The gpt4_70e84552 question contributes 2 replay answers and 1 earlier answer. Signals: explicit revision 3, late reference 6 (some items have both) |
+| Identifier substitutions / answers naming a model | 29 / 0 |
+
+- **Heuristic precision.** The heuristic only proposes candidates. Before it was finalized, the assembling agent read its hits locally. Requiring a bold headline of the reference's kind removed hits that were consistent answers (knowledge-update listings, a premise stated in bold, a component value stated first). On that reading, all 7 selected items state a wrong value first. Two of them end with a hedge ("if you count only ..., it is two") rather than a correction. That reading is not adjudication.
+- **Blinding.** As in the base set: the key holds stratum, run, arm, model, prior labels and the heuristic's signals. **The adjudicator should not open `key.json` before exporting decisions.** Item IDs do not reveal stratum, because the order is a separate seeded hash.
+
+### Opening the extension form
+
+Private files in the coordinator worktree, all mode `0600` in `0700` directories and ignored by Git:
+
+- `.build/judge-calibration/set-x1-20261009/items.json`
+- `key.json`
+- `manifest.json`
+- `adjudication-form.html`
+
+The set was assembled in worktree `agent-a84af31c74213f506` and copied with modes preserved.
+
+1. Open `.build/judge-calibration/set-x1-20261009/adjudication-form.html` in a desktop browser, from the coordinator worktree. It is the same self-contained, network-free form as the base set's. It records sufficiency, then reveals the answer, then records verdict, faithful and an optional note.
+2. Apply the [adjudication protocol](#adjudication-protocol), the [category tolerances](#category-tolerances-user-decision-october-8-2026) and the [self-correction rule](#self-corrections-user-decision-october-9-2026).
+3. Export the decisions to `.build/judge-calibration/adjudications-jx-6dbd69dec7456178.json`.
+4. Score the adjudication on its own with `python3 scripts/judge_calibration.py score --set .build/judge-calibration/set-x1-20261009 --adjudications .build/judge-calibration/adjudications-jx-6dbd69dec7456178.json`. Any judge run over the extension needs its own authorization after that.
+
 ## Default judge (user decision, October 9, 2026)
 
 The user selected Vertex Sonnet 5.5 as the default evaluation judge. Plan P4 step 3 asks for the judge with the lowest error. Sonnet is the only candidate run over all 50 items. The earlier judges were scored only on the historical labels they already had, on 13 to 27 items each (Qwen 2/27, JevK5 1/18, Sol 0/13). Sol's 0/13 has an interval of 0-23 percent, too wide to separate it from Sonnet, and Sonnet costs less. This is a selection by the user on that evidence, not a measured win over every candidate.
@@ -609,7 +739,8 @@ The user selected Vertex Sonnet 5.5 as the default evaluation judge. Plan P4 ste
   | False accept | 1/20, 5% (1-24%) |
 
   An accepted-answer count is reported with these rates and the run's capture hash. A count produced without this configuration is a model opinion, as before.
-- **Known disagreements.** item-011, a self-correction, is rejected by the adjudication, and Sonnet leans toward accepting it. item-048 is a borderline preference answer, accepted by the adjudication and rejected by Sonnet. Whether self-corrections should be accepted is still open.
+- **Known disagreements.** item-011, a self-correction, is rejected by the adjudication, and Sonnet leans toward accepting it. item-048 is a borderline preference answer, accepted by the adjudication and rejected by Sonnet.
+- **Self-correction rule: closed October 9, 2026.** The user decided that self-corrections are rejected ([Self-corrections](#self-corrections-user-decision-october-9-2026)). The default judge's prompt does not state that rule. It accepted 3 of the 4 self-contradicting gpt4_70e84552 replay answers, so its false-accept rate on this kind of answer is probably higher than the calibrated 1/20 suggests. Prompt set v4 adds the rule and is recorded below as a [candidate](#vertex-sonnet-prompt-set-v4-candidate-measured-october-9-2026). The default judge is unchanged until the coordinator and the user decide.
 - **Limits.** The false-accept interval reaches 24 percent. 10 of the 20 adjudicated rejects are declines, which are easy to reject. The set has no Claude-authored answers, so self-preference is untested; see [Self-preference](#self-preference). Each run still needs its own authorization, frozen declaration and spending cap.
 - **Revisit when** the likely-wrong extension (at least 25 items) narrows the false-accept interval, before Sonnet judges any answer written by Opus or Sonnet, or if the organization policy is changed to allow structured outputs and the judge configuration changes as a result.
 
@@ -628,6 +759,13 @@ One line per authorized run. Every run uses the configuration above, verdict tas
 
 - October 9, 2026, [hybrid retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions): 42 Qwen answers, set `jr-d978990efd3d8096`, 126 of 126 parsed, 31 of 42 accepted, $0.128274 observed under a $1.00 cap.
 - October 9, 2026, [lexical (ordinary Send) retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions): 42 Qwen answers, set `jr-ffadbd1ee098c5a5`. The first session halted on one transport failure at 48 of 126 ($0.048666, labels unused); a full second session parsed 126 of 126 (labels SHA-256 `baf8cc71…9c16`, $0.125522). 31 of 42 accepted. Total $0.174188 observed, kept within the $1.00 authorization by capping the second session at $0.94.
+
+Candidate runs that do not use the default configuration are logged separately and carry their own rates:
+
+- October 9, 2026, [prompt set v4 candidate](#vertex-sonnet-prompt-set-v4-candidate-measured-october-9-2026), not the default judge. One authorization with a $1.00 total cap covered two runs, both verdict task only with three replicates.
+  - Calibration set `jc-9adfaeeb572b8380`: 150 of 150 parsed, error 2/50, false reject 2/30, false accept 0/20, $0.159774 observed under a $0.95 cap.
+  - The four gpt4_70e84552 replay answers, subset `js-d85a8619fb138bf1`: 12 of 12 parsed, all four rejected, $0.018822 observed under a $0.84 cap.
+  - Total $0.178596 observed.
 
 ## What the user must do and authorize
 
@@ -663,7 +801,13 @@ After labels exist, `score` produces the rates. P4 step 3 then selects the judge
 
 ## Verification
 
-- `python3 scripts/test_judge_calibration.py`: 21 synthetic contracts, all passing. They cover:
+- `python3 scripts/test_judge_calibration.py`: 25 synthetic contracts, all passing. Four were added on October 9, 2026:
+  - the self-correction heuristic's two signals and its guards: no signal for abstention questions, for a consistent headline, for a headline of the wrong kind, for a single paragraph, or for "latest correction" and apology phrasing;
+  - extension strata and assembly: base-set answers excluded, quotas, at most 3 self-correction items per question and at most 2 per question and run family, the `jx-` set ID, the signals in the key, private modes, a clean blinding check, the `self_correction_shortfall` and `extension_below_minimum` refusals with nothing written, and default selection unchanged;
+  - replay candidates: answer digest, evidence verified from byte ranges, gold delivery from `measure.json`, an incomplete attempt ineligible, and the default judge's strict majority as a prior label (a tie with an unparseable reply gives none);
+  - `subset`: items copied unchanged under new opaque IDs, private modes, and refusal of duplicate, missing and tampered source items.
+
+  Re-assembling the base set with its seed after these changes reproduces its items byte for byte (items SHA-256 `44c998ea…f833`). Its key hash changes only because the key embeds the prior-judge table, which gained `vertex-sonnet-default-qa`. The earlier 21 contracts cover:
   - strata precedence;
   - seeded selection determinism and independence from input order;
   - selection unchanged when answer text or label details change;
@@ -680,7 +824,15 @@ After labels exist, `score` produces the rates. P4 step 3 then selects the judge
   - revision consistency against the original export: hash, unlisted changes (verdict, faithful, note text, reveal record), listed changes that did not happen, source and target mismatches, malformed, unknown and duplicate entries, and the CLI's fixed error code;
   - faithful counts, breakdowns and cross-tab, identical judge rates when only faithful changes, a revision's sufficiency change not counted as a change after reveal, and no note or rubric text in the score output;
   - the form's faithful field inside the post-reveal block, the decline rule text, v2 export, v1 and v2 import, and the `form` regeneration command (private modes, no overwrite, items hash check).
-- `python3 scripts/test_judge_calibration_run.py`: 27 synthetic contracts with fake transports for all four judges, all passing. One was added on October 9, 2026 for verdict-only declarations: only `["sufficiency", "verdict"]` and `["verdict"]` pass `check-declaration`, limits are checked against the verdict-only plan, the verdict request and count bodies equal those of the full plan, the dry run makes no call, and a fake run sends verdict requests only and leaves sufficiency unlabelled. Four were added on October 9, 2026 for version 3: prompt set v3 and reply-instruction hashes pinned in code and in the v3 templates, the exact line texts, the v2 component hashes unchanged, and a changed line refused (`prompt_hash` and `reply_format_hash`) for v3 but not v2; request and count bodies per model (no `output_config.format`, Sonnet `between_tools` without `output_config`, Opus `output_config` `{effort: "low"}` without `thinking`, the line as the verdict `system` and appended to the sufficiency system text, user messages identical to v2, no sampling keys) and a network-free dry run; strict instructed parsing (bare and fenced JSON accepted; prose, prose plus JSON, JSON plus prose, two objects, a non-`json` fence, an inline fence, extra keys, wrong or differently cased enum values, non-string values, duplicate keys and the other stage's object refused), the fixed codes through a full fake run, `reply_wrapper` receipts and wrapper counts, `reply_format` and prompt set v3 in the run record and labels, and re-authentication that refuses the v2 parser; and the v3 `check-declaration` rules (`structured_outputs_forbidden`, `reply_format_hash`, `prompt_hash`, the shared thinking, effort and output-cap rules, v1 and v2 still valid, the CLI exit code). Five were added on October 9, 2026 for version 2: the reply schema hash pinned in code and templates and separate from the prompt hashes; request and count bodies per model (`thinking` and `output_config` fields, no sampling keys, version 1 bodies unchanged) and the dry run's reported fields; strict structured parsing with the fixed codes `output_off_schema`, `response_incomplete` (including a thinking-only truncated reply), `refusal` and `model_identity_mismatch`, receipts carrying stop reason and thinking tokens, and re-authentication of those captures; version 1 declarations keeping bare-text parsing and resume; and `check-declaration` refusing disabled or budgeted thinking, `between_tools` above effort `high` or on Opus, an implicit Opus effort, out-of-range output caps and a schema hash mismatch, with the adapter refusing the same combinations. The earlier 17 cover:
+- `python3 scripts/test_judge_calibration_run.py`: 31 synthetic contracts with fake transports for all four judges, all passing. Four were added on October 9, 2026 for prompt set v4. They check:
+  - the v4 and rubric hashes, pinned in code and in the v4 template;
+  - that prompt set v4 is prompt set v3 plus the rubric component only, and that the v4 template differs from v3 only in format, status and prompts;
+  - the sentence inserted once at the rubric boundary, with every other byte unchanged, and refused without the boundary;
+  - v4 request bodies equal to v3's except for the sentence, sufficiency bodies identical, and v3, v2 and local requests unchanged and without it;
+  - a network-free dry run, and a fake verdict-only run that records prompt set v4 and the rubric hash in the labels;
+  - the v4 `check-declaration` refusals.
+
+  One was added on October 9, 2026 for verdict-only declarations: only `["sufficiency", "verdict"]` and `["verdict"]` pass `check-declaration`, limits are checked against the verdict-only plan, the verdict request and count bodies equal those of the full plan, the dry run makes no call, and a fake run sends verdict requests only and leaves sufficiency unlabelled. Four were added on October 9, 2026 for version 3: prompt set v3 and reply-instruction hashes pinned in code and in the v3 templates, the exact line texts, the v2 component hashes unchanged, and a changed line refused (`prompt_hash` and `reply_format_hash`) for v3 but not v2; request and count bodies per model (no `output_config.format`, Sonnet `between_tools` without `output_config`, Opus `output_config` `{effort: "low"}` without `thinking`, the line as the verdict `system` and appended to the sufficiency system text, user messages identical to v2, no sampling keys) and a network-free dry run; strict instructed parsing (bare and fenced JSON accepted; prose, prose plus JSON, JSON plus prose, two objects, a non-`json` fence, an inline fence, extra keys, wrong or differently cased enum values, non-string values, duplicate keys and the other stage's object refused), the fixed codes through a full fake run, `reply_wrapper` receipts and wrapper counts, `reply_format` and prompt set v3 in the run record and labels, and re-authentication that refuses the v2 parser; and the v3 `check-declaration` rules (`structured_outputs_forbidden`, `reply_format_hash`, `prompt_hash`, the shared thinking, effort and output-cap rules, v1 and v2 still valid, the CLI exit code). Five were added on October 9, 2026 for version 2: the reply schema hash pinned in code and templates and separate from the prompt hashes; request and count bodies per model (`thinking` and `output_config` fields, no sampling keys, version 1 bodies unchanged) and the dry run's reported fields; strict structured parsing with the fixed codes `output_off_schema`, `response_incomplete` (including a thinking-only truncated reply), `refusal` and `model_identity_mismatch`, receipts carrying stop reason and thinking tokens, and re-authentication of those captures; version 1 declarations keeping bare-text parsing and resume; and `check-declaration` refusing disabled or budgeted thinking, `between_tools` above effort `high` or on Opus, an implicit Opus effort, out-of-range output caps and a schema hash mismatch, with the adapter refusing the same combinations. The earlier 17 cover:
   - prompt hash pinning in code and in all four templates, and refusal of a changed prompt;
   - refusal of an upstream protocol file that does not match its pin;
   - blinding: with the key file deleted, no key-only string (run, arm, answerer model, question ID, prior judge names) and no item ID reaches any request, and sufficiency requests never contain the answer;
