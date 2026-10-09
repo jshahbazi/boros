@@ -34,6 +34,10 @@ SUFFICIENCY_SHA256 = "c604485853f65670fa54599aceb06f5d152a8798b03dc518cca6de73ec
 REPLY_SCHEMA_SHA256 = "089f6abbd4ee62321396ed07e5929cfe30394cfe04f6c44e9512f60bc3fca549"
 PROMPT_SET_V3_SHA256 = "b6bcccc27ac4d16fc9d5cb550d3201c3f56f44a251190087af740180fafd317c"
 REPLY_INSTRUCTIONS_SHA256 = "8ecc9d7d83ede598616631604f3ef92f89c609c507a59c5ea9f1c2097252cbcb"
+PROMPT_SET_V4_SHA256 = "2ba6fa7c060c9441db2cf8de37778b038fb1233eef3baabf82ab02ea6bbd7786"
+VERDICT_RUBRIC_SHA256 = "c48e871665f960068000822f9b017a0dcf36b0bf7785f750c97e4cad665954af"
+RUBRIC_SENTENCE = ("If the response contradicts itself, for example by first stating a wrong answer and then "
+                   "correcting it, answer no, even if the correct answer also appears in the response.")
 VERDICT_LINE = 'Reply with only a JSON object, either {"answer": "yes"} or {"answer": "no"}, and no other text.'
 SUFFICIENCY_LINE = ('Reply with only a JSON object, either {"sufficiency": "sufficient"} or '
                     '{"sufficiency": "insufficient"}, and no other text.')
@@ -45,6 +49,12 @@ EXECUTABLE_SHA = "e" * 64
 def fake_prompt(task, question, answer, response, abstention=False):
     """Same signature as the upstream get_anscheck_prompt; synthetic text only."""
     return f"UPSTREAM[{task}] Q={question} REF={answer} RESP={response} ABS={abstention}. Answer yes or no only."
+
+
+def anchored_prompt(task, question, answer, response, abstention=False):
+    """Synthetic prompt with the upstream shape: a rubric paragraph, then "\\n\\nQuestion: " and the item text."""
+    return (f"UPSTREAM[{task}] synthetic rubric ABS={abstention}.\n\nQuestion: {question}\n\nCorrect Answer: "
+            f"{answer}\n\nModel Response: {response}\n\nIs the model response correct? Answer yes or no only.")
 
 
 def synthetic_candidates():
@@ -741,7 +751,7 @@ class Contracts(unittest.TestCase):
             (opus, lambda d: d["execution"].update(effort="provider-default"), "effort"),
             (opus, lambda d: d["execution"].update(max_output_tokens_per_request=256), "output_limit"),
             (opus, lambda d: d["execution"].update(max_output_tokens_per_request=16384), "output_limit"),
-            (opus, lambda d: d.update(format="boros-judge-calibration-vertex-declaration-v4"), "format"))
+            (opus, lambda d: d.update(format="boros-judge-calibration-vertex-declaration-v9"), "format"))
         for base, mutate, code in cases:
             bad = copy.deepcopy(base)
             mutate(bad)
@@ -1065,6 +1075,150 @@ class Contracts(unittest.TestCase):
         with patch("sys.stdout", stdout):
             code = jc.main(["check-declaration", str(path), "--set", str(self.set_dir)])
         self.assertEqual((code, json.loads(stdout.getvalue())), (0, {"complete": True, "problems": []}))
+
+    # ------------------------------------------------------------------ prompt set v4 (self-correction rubric)
+
+    def v4(self, **kwargs):
+        return fill("vertex-sonnet", self.manifest, template="vertex-sonnet.v4.template.json", **kwargs)
+
+    def test_v4_prompt_set_adds_only_the_rubric_sentence(self):
+        self.assertEqual((jc.judge_prompt_v4_sha256(), jc.verdict_rubric_sha256()),
+                         (PROMPT_SET_V4_SHA256, VERDICT_RUBRIC_SHA256))
+        self.assertEqual(jc.VERDICT_RUBRIC["sentence"], RUBRIC_SENTENCE)
+        # Prompt set v4 is prompt set v3 plus the rubric component, nothing else; v3 and v2 hashes unchanged.
+        v3_fields = {key: value for key, value in jc.JUDGE_PROMPTS_V4.items()
+                     if key not in ("version", "base_version", "verdict_rubric")}
+        self.assertEqual(v3_fields, {key: value for key, value in jc.JUDGE_PROMPTS_V3.items()
+                                     if key not in ("version", "base_version")})
+        self.assertEqual((jc.JUDGE_PROMPTS_V4["version"], jc.JUDGE_PROMPTS_V4["base_version"]),
+                         ("boros-judge-calibration-prompts-v4", "boros-judge-calibration-prompts-v3"))
+        self.assertEqual((jc.judge_prompt_v3_sha256(), jc.judge_prompt_sha256(), jc.verdict_prompt_sha256(),
+                          jc.sufficiency_prompt_sha256(), jc.reply_instructions_sha256()),
+                         (PROMPT_SET_V3_SHA256, PROMPT_SET_SHA256, VERDICT_SHA256, SUFFICIENCY_SHA256,
+                          REPLY_INSTRUCTIONS_SHA256))
+        template = json.loads((TEMPLATES / "vertex-sonnet.v4.template.json").read_text())
+        v3_template = json.loads((TEMPLATES / "vertex-sonnet.v3.template.json").read_text())
+        self.assertEqual(template["format"], jc.DECLARATION_FORMAT_V4)
+        self.assertEqual({key: template["prompts"][key] for key in template["prompts"] if key != "source"},
+                         {"version": "boros-judge-calibration-prompts-v4", "sha256": PROMPT_SET_V4_SHA256,
+                          "verdict_sha256": VERDICT_SHA256, "sufficiency_sha256": SUFFICIENCY_SHA256,
+                          "upstream_protocol_sha256": jc.UPSTREAM_QA_PROTOCOL_SHA256,
+                          "reply_instructions_sha256": REPLY_INSTRUCTIONS_SHA256,
+                          "verdict_rubric_sha256": VERDICT_RUBRIC_SHA256})
+        # Apart from format, status and prompts, the v4 template is the v3 template.
+        for key in set(template) | set(v3_template):
+            if key not in ("format", "status", "prompts"):
+                self.assertEqual(template.get(key), v3_template.get(key), key)
+        self.assertEqual(jc.check_declaration(self.v4(), self.set_dir), [])
+        with patch.dict(jc.VERDICT_RUBRIC, sentence=RUBRIC_SENTENCE + " Changed."):
+            self.assertEqual(jc.check_declaration(self.v4(), self.set_dir), ["prompt_hash"])
+            self.assertEqual(jc.check_declaration(self.v3("vertex-sonnet"), self.set_dir), [])
+
+    def test_insert_verdict_rubric_keeps_every_other_byte(self):
+        for rubric_end in ("answer no. ", "the required answer."):
+            prompt = f"Grade it. {rubric_end}\n\nQuestion: q\n\nQuestion: again\n\nModel Response: r"
+            rendered = jc.insert_verdict_rubric(prompt)
+            self.assertEqual(rendered.count(RUBRIC_SENTENCE), 1)
+            separator = "" if rubric_end.endswith(" ") else " "
+            self.assertIn(rubric_end + separator + RUBRIC_SENTENCE + "\n\nQuestion: q", rendered)
+            self.assertEqual(rendered.replace(separator + RUBRIC_SENTENCE, "", 1), prompt)
+        for prompt in ("no anchor here", "\n\nQuestion: at the start"):
+            with self.assertRaisesRegex(jc.CalibrationError, "upstream_prompt_rubric_anchor_missing"):
+                jc.insert_verdict_rubric(prompt)
+
+    def test_v4_requests_differ_from_v3_only_by_the_sentence(self):
+        items = run.load_set(self.set_dir)[1]
+        v3_plan = {entry["request_id"]: entry for entry in run.build_plan(items, self.v3("vertex-sonnet"),
+                                                                           anchored_prompt)}
+        v4_plan = run.build_plan(items, self.v4(), anchored_prompt)
+        self.assertEqual(sorted(v3_plan), sorted(entry["request_id"] for entry in v4_plan))
+        for entry in v4_plan:
+            previous = v3_plan[entry["request_id"]]
+            body, old = entry["body"], previous["body"]
+            if entry["stage"] == "sufficiency":
+                self.assertEqual(entry["body_sha256"], previous["body_sha256"])
+                self.assertEqual(entry["count_body"], previous["count_body"])
+                continue
+            self.assertEqual({key: value for key, value in body.items() if key != "messages"},
+                             {key: value for key, value in old.items() if key != "messages"})
+            self.assertEqual(body["system"], VERDICT_LINE)
+            self.assertEqual(len(body["messages"]), 1)
+            self.assertEqual((len(body["messages"][0]["content"]), len(old["messages"][0]["content"])), (1, 1))
+            content, old_content = body["messages"][0]["content"][0]["text"], old["messages"][0]["content"][0]["text"]
+            self.assertNotIn(RUBRIC_SENTENCE, old_content)
+            self.assertEqual(content.count(RUBRIC_SENTENCE), 1)
+            self.assertEqual(content.replace(" " + RUBRIC_SENTENCE, "", 1), old_content)
+            self.assertEqual(entry["characters"], previous["characters"] + len(RUBRIC_SENTENCE) + 1)
+            self.assertEqual(entry["count_body"]["messages"], body["messages"])
+        # v3 requests are unchanged: the upstream prompt alone, under the reply-format line.
+        for entry in v3_plan.values():
+            if entry["stage"] == "verdict":
+                item = next(item for item in items if item["item_id"] == entry["item_id"])
+                self.assertEqual(entry["body"]["messages"][0]["content"][0]["text"], anchored_prompt(
+                    item["question_type"], item["question"], item["reference"], item["answer"],
+                    abstention=item["abstention"]))
+        # A prompt without the rubric boundary is refused, never sent without the sentence.
+        with self.assertRaisesRegex(jc.CalibrationError, "upstream_prompt_rubric_anchor_missing"):
+            run.build_plan(items, self.v4(), fake_prompt)
+        # Earlier declarations and local judges never carry the sentence.
+        for document in (self.v3("vertex-sonnet"), fill("vertex-sonnet", self.manifest), fill("qwen-local", self.manifest)):
+            for entry in run.build_plan(items, document, anchored_prompt):
+                self.assertNotIn(RUBRIC_SENTENCE, json.dumps(entry["body"]))
+            self.assertNotIn("verdict_rubric_sha256", run.prompt_hashes(document))
+        patches = no_network()
+        for patcher in patches:
+            patcher.start()
+        try:
+            dry = run.dry_run(self.set_dir, self.declaration("vertex-sonnet", template="vertex-sonnet.v4.template.json",
+                                                             **{"execution.stages_per_item": ["verdict"]}),
+                              self.root / ".build/judge-calibration/d4", anchored_prompt, root=self.root,
+                              git_ignore=False)
+        finally:
+            for patcher in patches:
+                patcher.stop()
+        self.assertEqual((dry["network_calls"], dry["files_written"]), (0, 0))
+        self.assertEqual((dry["prompts"]["version"], dry["prompts"]["prompt_set_sha256"],
+                          dry["prompts"]["verdict_rubric_sha256"]),
+                         ("boros-judge-calibration-prompts-v4", PROMPT_SET_V4_SHA256, VERDICT_RUBRIC_SHA256))
+        self.assertEqual(dry["reply_format"]["sha256"], REPLY_INSTRUCTIONS_SHA256)
+        # A verdict-only fake run records prompt set v4 in the labels and sends the sentence.
+        path = self.declaration("vertex-sonnet", template="vertex-sonnet.v4.template.json",
+                                **{"execution.stages_per_item": ["verdict"], "budget.max_generation_requests": 9,
+                                   "budget.max_count_requests": 3})
+        transport, fake = self.transport("vertex-sonnet")
+        report = run.execute(self.set_dir, path, self.root / ".build/judge-calibration/v4-run", anchored_prompt,
+                             root=self.root, transport=transport, git_ignore=False)
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["prompts"]["version"], "boros-judge-calibration-prompts-v4")
+        self.assertTrue(all(RUBRIC_SENTENCE in body["messages"][0]["content"][0]["text"] and body["system"] == VERDICT_LINE
+                            for body in fake.generation_bodies))
+        labels = json.loads((self.root / ".build/judge-calibration/labels-vertex-sonnet.json").read_text())
+        self.assertEqual((labels["prompts"]["version"], labels["prompts"]["verdict_rubric_sha256"]),
+                         ("boros-judge-calibration-prompts-v4", VERDICT_RUBRIC_SHA256))
+        self.assertEqual(labels["reply_format"]["sha256"], REPLY_INSTRUCTIONS_SHA256)
+
+    def test_v4_declaration_checks(self):
+        v4, v3 = self.v4(), self.v3("vertex-sonnet")
+        cases = (
+            (lambda d: d.update(prompts=copy.deepcopy(v3["prompts"])), "prompt_hash"),
+            (lambda d: d["prompts"].pop("verdict_rubric_sha256"), "prompt_hash"),
+            (lambda d: d["prompts"].update(verdict_rubric_sha256="0" * 64), "prompt_hash"),
+            (lambda d: d.update(reply_schemas=jc.reply_schemas_declaration()), "structured_outputs_forbidden"),
+            (lambda d: d.pop("reply_format"), "reply_format_hash"),
+            (lambda d: d["execution"].update(thinking={"type": "disabled"}), "thinking_forbidden"),
+            (lambda d: d["execution"].update(temperature=0), "forbidden_field:execution.temperature"))
+        for mutate, code in cases:
+            bad = copy.deepcopy(v4)
+            mutate(bad)
+            self.assertIn(code, jc.check_declaration(bad, self.set_dir), code)
+        wrong = copy.deepcopy(v3)
+        wrong["prompts"] = copy.deepcopy(v4["prompts"])
+        self.assertIn("prompt_hash", jc.check_declaration(wrong, self.set_dir))
+        local = fill("qwen-local", self.manifest)
+        local["format"] = jc.DECLARATION_FORMAT_V4
+        self.assertIn("format", jc.check_declaration(local, self.set_dir))
+        self.assertEqual(jc.vertex_request_controls(v4)["verdict_rubric"], True)
+        self.assertEqual(jc.vertex_request_controls(v3)["verdict_rubric"], False)
 
 
 if __name__ == "__main__":

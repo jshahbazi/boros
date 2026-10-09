@@ -620,6 +620,194 @@ class Contracts(unittest.TestCase):
             with self.assertRaises(jc.CalibrationError):
                 jc.native_longmemeval_candidates([root], dataset)
 
+    # ------------------------------------------------------------------ likely-wrong extension
+
+    def test_self_correction_signals(self):
+        signals = jc.self_correction_signals
+        flipped = ("You completed **trimming the hedges** first.\n\nThe hedges were trimmed in May.\n\n"
+                   "Therefore, painting the shed came before trimming the hedges.")
+        self.assertEqual(signals(flipped, "Painting the shed", False), ["late_reference"])
+        self.assertEqual(signals(flipped, "Painting the shed", True), [])  # never for abstention questions
+        consistent = ("You completed **painting the shed** first.\n\nDetails.\n\n"
+                      "Therefore, painting the shed came first.")
+        self.assertEqual(signals(consistent, "Painting the shed", False), [])
+        words = "You attended **three** appointments.\n\nOne was therapy.\n\nSo the number is **two**."
+        self.assertEqual(signals(words, "2", False), ["late_reference"])
+        # The headline must be of the reference's kind: a non-numeric premise is not a wrong number.
+        premise = "You submitted to **ACL**.\n\nTherefore, you submitted on February 1st."
+        self.assertEqual(signals(premise, "February 1st", False), [])
+        self.assertEqual(signals("You went to **3**. Then it was 2.", "2", False), [])  # one paragraph
+        self.assertEqual(signals("No bold headline.\n\nThe answer is 2.", "2", False), [])
+        long_reference = "A reference that is much longer than six tokens in total."
+        self.assertEqual(signals("You have **4 kits**.\n\nActually, the records show 3 kits.", long_reference,
+                                 False), ["explicit_revision"])
+        self.assertEqual(signals("**Correction:** wait, let me re-read.\n\nDone.", long_reference, False),
+                         ["explicit_revision"])
+        for text in ("Your latest correction was **120 stars**.", "I apologize for the confusion, but no record.",
+                     "Actually the meeting was fine."):
+            self.assertEqual(signals(text, long_reference, False), [], text)
+
+    def extension_pool(self):
+        out = []
+        for index, (question, family) in enumerate((("00000a01", "fam-a"), ("00000a01", "fam-a"),
+                                                    ("00000a01", "fam-a"), ("00000a01", "fam-b"),
+                                                    ("00000a02", "fam-a"), ("00000a02", "fam-b"),
+                                                    ("00000a03", "fam-a"))):
+            c = candidate(f"run-s{index}", question, "hybrid", None, labels={"q": {"verdict": "accept"}},
+                          answer=f"You did **alpha {chr(97 + index)}** first.\n\nDetails.\n\nTherefore, beta was first.")
+            c.update(reference="Beta", run_family=family)
+            out.append(c)
+        for index in range(12):
+            out.append(candidate(f"run-r{index}", f"00000b{index:02d}", "hybrid", None, answer=f"rejected {index}",
+                                 labels={"q": {"verdict": "reject"}}))
+            out.append(candidate(f"run-o{index}", f"00000c{index:02d}", "recent_only-v3-pinned", None,
+                                 answer=f"recent {index}", delivered=False))
+            out.append(candidate(f"run-p{index}", f"00000d{index:02d}", "hybrid", None, answer=f"partial {index}",
+                                 delivered=False, labels={"q": {"verdict": "accept"}}))
+            out.append(candidate(f"run-a{index}", f"00000e{index:02d}", "hybrid", None, answer=f"accepted {index}",
+                                 labels={"q": {"verdict": "accept"}}))
+        out.append(candidate("run-x", "00000f01_abs", "hybrid", None, abstention=True, answer="abstention decline"))
+        return out
+
+    def test_extension_strata_exclusion_caps_and_files(self):
+        candidates = self.extension_pool()
+        strata = {c["key"]: jc.extension_stratum({**c, "self_correction_signals": jc.self_correction_signals(
+            c["answer_text"], c["reference"], c["abstention"])}) for c in candidates}
+        self.assertEqual(sorted(name for name in strata.values() if name),
+                         sorted(["self_correction"] * 7 + ["rejected"] * 12 + ["recent_only"] * 12
+                                + ["insufficient_pack"] * 12))
+        self.assertIsNone(strata["run-x/00000f01_abs/hybrid"])
+        self.assertIsNone(strata["run-a0/00000e00/hybrid"])
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "base"
+            excluded = [c for c in candidates if c["run"] in ("run-r0", "run-s6")]
+            jc.assemble(excluded, "seed", base, per_stratum=5, minimum=1)
+            out = Path(directory) / "extension"
+            manifest = jc.assemble_extension(candidates, "seed-x", out, base, minimum=25, self_correction_minimum=5)
+            key = json.loads((out / "key.json").read_text())
+            self.assertTrue(manifest["set_id"].startswith("jx-"))
+            self.assertEqual(manifest["extension"]["base_set_id"], json.loads((base / "manifest.json").read_text())[
+                "set_id"])
+            runs = {entry["run"] for entry in key["items"]}
+            self.assertFalse(runs & {"run-r0", "run-s6"})
+            counts = {}
+            for entry in key["items"]:
+                counts[entry["stratum"]] = counts.get(entry["stratum"], 0) + 1
+            # Question 00000a01 has 4 answers: at most 3 in the stratum, at most 2 from one run family.
+            self.assertEqual(counts, {"self_correction": 5, "rejected": 8, "recent_only": 7, "insufficient_pack": 7})
+            chosen = [entry for entry in key["items"] if entry["stratum"] == "self_correction"]
+            by_question = {}
+            for entry in chosen:
+                by_question[entry["question_id"]] = by_question.get(entry["question_id"], 0) + 1
+                self.assertEqual(entry["self_correction_signals"], ["late_reference"])
+            self.assertEqual(by_question, {"00000a01": 3, "00000a02": 2})
+            families = [c["run_family"] for c in candidates
+                        if c["key"] in {entry["key"] for entry in chosen} and c["question_id"] == "00000a01"]
+            self.assertEqual(sorted(families), ["fam-a", "fam-a", "fam-b"])
+            for name in ("items.json", "key.json", "manifest.json", "adjudication-form.html"):
+                self.assertEqual(stat.S_IMODE(os.stat(out / name).st_mode), 0o600, name)
+            items = json.loads((out / "items.json").read_text())
+            self.assertEqual(jc.blinding_violations(items, key), [])
+            self.assertNotIn("fam-a", (out / "items.json").read_text())
+            with self.assertRaisesRegex(jc.CalibrationError, "self_correction_shortfall"):
+                jc.assemble_extension(candidates, "seed-x", Path(directory) / "short", base, minimum=25,
+                                      self_correction_minimum=6)
+            self.assertFalse((Path(directory) / "short").exists())
+            with self.assertRaisesRegex(jc.CalibrationError, "extension_below_minimum"):
+                jc.assemble_extension(candidates, "seed-x", Path(directory) / "small", base, minimum=60,
+                                      self_correction_minimum=1)
+        # Defaults leave the base selection unchanged.
+        self.assertEqual([e["candidate"]["key"] for e in jc.select(pool(), "s")[0]],
+                         [e["candidate"]["key"] for e in jc.select(pool(), "s", strata=jc.STRATA, quotas={},
+                                                                   stratum_max_per_question={})[0]])
+
+    def test_replay_candidates_read_answers_evidence_delivery_and_prior_verdicts(self):
+        message = "The fence was fixed three weeks ago."
+        dataset = {"q0000021": {"question_id": "q0000021", "question_type": "temporal-reasoning", "question": "Q?",
+                                "answer": "Fixing the fence", "question_date": "2023/05/30",
+                                "haystack_dates": ["2023/05/25"],
+                                "haystack_sessions": [[{"role": "user", "content": message}]]}}
+        answers = ["You fixed **the fence** first.", "You trimmed **the hooves** first.", "Not finished."]
+        with tempfile.TemporaryDirectory() as directory:
+            replay = Path(directory) / "replay"
+            replay.mkdir()
+            runs, ledger, rows = [], [], []
+            for index, (arm, answer) in enumerate(zip(("v3-pinned", "v4-default", "v4-other"), answers)):
+                runs.append({"question_id": "q0000021", "arm": arm, "attempt": 1, "strategy": "hybrid",
+                             "abstention": False})
+                native = replay / f"run-{index:02d}"
+                native.mkdir()
+                (native / "answer-0001.txt").write_text(answer)
+                raw = message.encode()
+                (native / "report.json").write_text(json.dumps({"attempts": [{
+                    "ordinal": 1, "failure": None if index < 2 else "incomplete_result",
+                    "invocation_status": "complete" if index < 2 else "partial", "answer_file": "answer-0001.txt",
+                    "answer_sha256": hashlib.sha256(answer.encode()).hexdigest(),
+                    "delivered_ranges": [{"event_id": "q0000021-s0000-m0000", "offset": 0, "byte_length": len(raw),
+                                          "sha256": hashlib.sha256(raw).hexdigest()}],
+                    "delivered_recent_source_ids": []}]}))
+                ledger.append({"run": index, "state": "finished", "directory": native.name,
+                               "invocation_started": True})
+                rows.append({"question_id": "q0000021", "arm": arm, "gold_delivery": ("whole", "partial", "none")[index]})
+            (replay / "declaration.json").write_text(json.dumps({"model": jc.QWEN_MODEL, "runs": runs}))
+            (replay / "ledger.jsonl").write_text("".join(json.dumps(row) + "\n" for row in ledger))
+            (replay / "measure.json").write_text(json.dumps({"rows": rows}))
+            (replay / "judge-set").mkdir()
+            (replay / "judge-set" / "manifest.json").write_text(json.dumps({"set_id": "jr-1", "items_sha256": "h"}))
+            (replay / "judge-set" / "key.json").write_text(json.dumps({"items": [
+                {"item_id": "item-001", "run_index": 0}, {"item_id": "item-002", "run_index": 1},
+                {"item_id": "item-003", "run_index": 2}]}))
+            (replay / "judge-labels-x.json").write_text(json.dumps({
+                "format": jc.LABELS_FORMAT, "set_id": "jr-1", "items_sha256": "h", "labels": {
+                    "item-001": [{"verdict": "accept"}] * 3,
+                    "item-002": [{"verdict": "reject"}, {"verdict": "reject"}, {"verdict": "accept"}],
+                    "item-003": [{"verdict": "reject"}, {"verdict": None}, {"verdict": "accept"}]}}))
+            found = jc.replay_candidates([replay], dataset)
+        self.assertEqual([c["arm"] for c in found], ["hybrid-v3-pinned", "hybrid-v4-default", "hybrid-v4-other"])
+        self.assertEqual([jc.eligibility(c) for c in found], [None, None, "not_operationally_complete"])
+        self.assertEqual([c["all_annotated_delivered"] for c in found], [True, False, False])
+        self.assertEqual([c["prior_labels"] for c in found],
+                         [{"vertex-sonnet-default-qa": {"verdict": "accept"}},
+                          {"vertex-sonnet-default-qa": {"verdict": "reject"}}, {}])
+        self.assertEqual(found[0]["evidence"][0]["text"], message)
+        self.assertTrue(found[0]["evidence_verified"])
+        self.assertEqual(found[0]["answerer_family"], "qwen")
+        self.assertEqual(found[1]["run_family"], "answer-presentation-replay")
+
+    def test_subset_copies_items_under_new_opaque_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = [candidate("run-a", f"0000001{index}", "hybrid", None, answer=f"a {index}",
+                               labels={"q": {"verdict": "accept"}}) for index in range(3)]
+            second = [candidate("run-b", f"0000002{index}", "hybrid", None, answer=f"b {index}",
+                                labels={"q": {"verdict": "reject"}}) for index in range(3)]
+            jc.assemble(first, "s1", root / "one", per_stratum=3, minimum=3)
+            jc.assemble(second, "s2", root / "two", per_stratum=3, minimum=3)
+            manifest = jc.subset_set([(root / "one", "item-002"), (root / "two", "item-001")], "seed", root / "sub")
+            items = json.loads((root / "sub" / "items.json").read_text())["items"]
+            key = json.loads((root / "sub" / "key.json").read_text())
+            self.assertEqual(manifest["item_count"], 2)
+            self.assertTrue(manifest["set_id"].startswith("js-"))
+            self.assertEqual([item["item_id"] for item in items], ["item-001", "item-002"])
+            sources = {(entry["source_item_id"], entry["source_set_id"]) for entry in key["items"]}
+            self.assertEqual(len(sources), 2)
+            for item, entry in zip(items, key["items"]):
+                source_dir = root / ("one" if entry["source_set_id"] == json.loads(
+                    (root / "one" / "manifest.json").read_text())["set_id"] else "two")
+                source = next(i for i in json.loads((source_dir / "items.json").read_text())["items"]
+                              if i["item_id"] == entry["source_item_id"])
+                self.assertEqual({**source, "item_id": item["item_id"]}, item)
+            for name in ("items.json", "key.json", "manifest.json"):
+                self.assertEqual(stat.S_IMODE(os.stat(root / "sub" / name).st_mode), 0o600)
+            with self.assertRaisesRegex(jc.CalibrationError, "subset_duplicate_item"):
+                jc.subset_set([(root / "one", "item-001"), (root / "one", "item-001")], "seed", root / "dup")
+            with self.assertRaisesRegex(jc.CalibrationError, "subset_item_missing"):
+                jc.subset_set([(root / "one", "item-009")], "seed", root / "missing")
+            (root / "two" / "items.json").chmod(0o600)
+            (root / "two" / "items.json").write_text((root / "two" / "items.json").read_text() + " ")
+            with self.assertRaisesRegex(jc.CalibrationError, "items_hash_mismatch"):
+                jc.subset_set([(root / "two", "item-001")], "seed", root / "tampered")
+
 
 if __name__ == "__main__":
     result = unittest.TextTestRunner(stream=io.StringIO()).run(

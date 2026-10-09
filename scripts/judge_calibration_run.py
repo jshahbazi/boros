@@ -16,7 +16,9 @@ from the prompts) and declare thinking per model: Sonnet 5.5 sends ``thinking: b
 declarations keep those thinking controls but send no ``output_config.format`` (structured outputs
 are blocked by an organization policy on the llm-train project); instead each request carries one
 fixed reply-format system line (``judge_calibration.REPLY_INSTRUCTIONS``, prompt set v3) and the
-reply is parsed strictly as the same JSON shape. Version 1 declarations keep the earlier
+reply is parsed strictly as the same JSON shape. Version 4 declarations are version 3 with prompt
+set v4: the verdict prompt also carries one rubric sentence rejecting self-corrections
+(``judge_calibration.VERDICT_RUBRIC``). Version 1 declarations keep the earlier
 unconstrained bodies and bare-text parsing so their runs can be resumed and verified unchanged.
 
 Two gates protect every dispatch:
@@ -105,14 +107,16 @@ def load_declaration(path: Path):
 
 def prompt_hashes(declaration=None):
     """Prompt hashes recorded in run records, labels and reports. Unchanged for v1, v2 and local
-    declarations; a v3 Vertex declaration records prompt set v3 and the reply-instruction hash."""
+    declarations; a v3 Vertex declaration records prompt set v3 and the reply-instruction hash; a v4
+    Vertex declaration records prompt set v4, the reply-instruction hash and the verdict rubric hash."""
     vertex_declaration = declaration is not None and declaration.get("judge") in VERTEX_JUDGES
     fields = jc.prompts_declaration(declaration if vertex_declaration else None)
     hashes = {"version": fields["version"], "prompt_set_sha256": fields["sha256"],
               "verdict_sha256": fields["verdict_sha256"], "sufficiency_sha256": fields["sufficiency_sha256"],
               "upstream_protocol_sha256": fields["upstream_protocol_sha256"]}
-    if "reply_instructions_sha256" in fields:
-        hashes["reply_instructions_sha256"] = fields["reply_instructions_sha256"]
+    for name in ("reply_instructions_sha256", "verdict_rubric_sha256"):
+        if name in fields:
+            hashes[name] = fields[name]
     return hashes
 
 
@@ -129,7 +133,8 @@ def render(judge, item, stage, prompt_function, declaration):
     """Exact transport body for one request, its model-visible character count and, for Vertex, the count body."""
     controls = jc.vertex_request_controls(declaration) if judge in VERTEX_JUDGES else None
     instructed = controls is not None and controls["instructed"]
-    messages = jc.judge_messages(item, stage, prompt_function, reply_instruction=instructed)
+    messages = jc.judge_messages(item, stage, prompt_function, reply_instruction=instructed,
+                                 verdict_rubric=controls is not None and controls["verdict_rubric"])
     characters = sum(len(message["content"]) for message in messages)
     count_body = None
     if judge in VERTEX_JUDGES:
@@ -138,7 +143,7 @@ def render(judge, item, stage, prompt_function, declaration):
             if controls is None:  # version 1 declaration: body unchanged, no reply constraint
                 body = vertex.payload(messages, output_tokens(declaration))
                 count_body = vertex.count_payload(messages, model=model)
-            elif instructed:  # version 3: reply-format system line, no output_config.format
+            elif instructed:  # version 3 or 4: reply-format system line, no output_config.format
                 body = vertex.payload(messages, output_tokens(declaration), model=model,
                                       thinking=controls["thinking"], effort=controls["effort"])
                 count_body = vertex.count_payload(messages, model=model)
@@ -196,7 +201,7 @@ def reply_constraint(declaration):
 
 
 def reply_format(declaration):
-    """The pinned reply-format block for a v3 Vertex declaration (instructed JSON), else None."""
+    """The pinned reply-format block for a v3 or v4 Vertex declaration (instructed JSON), else None."""
     controls = _controls(declaration)
     return jc.reply_format_declaration() if controls is not None and controls["instructed"] else None
 
@@ -870,7 +875,7 @@ def execute(set_dir: Path, declaration_path: Path, output: Path, prompt_function
                   "replicates": declaration["execution"]["replicates"]}
     if reply_constraint(declaration) is not None:  # absent for v1, so v1 run records still match on resume
         run_record["reply_schemas"] = reply_constraint(declaration)
-    if reply_format(declaration) is not None:  # v3 only, so v1 and v2 run records are unchanged
+    if reply_format(declaration) is not None:  # v3 and v4 only, so v1 and v2 run records are unchanged
         run_record["reply_format"] = reply_format(declaration)
     captures_dir = output / "captures"
     if resume:
