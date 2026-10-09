@@ -622,6 +622,13 @@ The default judge's first run outside the calibration set, authorized by the use
 - **Cost.** $0.128274 observed (56,742 input and 1,479 output tokens at the declared $2 and $10 per million), $0.758856 reserved under a $1.00 cap.
 - **Result.** 31 of 42 accepted (V3 15 of 21, V4 16 of 21), reported with the rates above: error 2/50, false reject 1/30, false accept 1/20. Private run directory: `.build/answer-presentation-retrieval-on-20261009/judge-run-vertex-sonnet-v3/` in the replay's worktree; labels SHA-256 `2c83aba7…de78`.
 
+### Run log
+
+One line per authorized run. Every run uses the configuration above, verdict task only, three replicates, and is reported with error 2/50, false reject 1/30 and false accept 1/20.
+
+- October 9, 2026, [hybrid retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions): 42 Qwen answers, set `jr-d978990efd3d8096`, 126 of 126 parsed, 31 of 42 accepted, $0.128274 observed under a $1.00 cap.
+- October 9, 2026, [lexical (ordinary Send) retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions): 42 Qwen answers, set `jr-ffadbd1ee098c5a5`. The first session halted on one transport failure at 48 of 126 ($0.048666, labels unused); a full second session parsed 126 of 126 (labels SHA-256 `baf8cc71…9c16`, $0.125522). 31 of 42 accepted. Total $0.174188 observed, kept within the $1.00 authorization by capping the second session at $0.94.
+
 ## What the user must do and authorize
 
 To start P4 adjudication now (no model calls):

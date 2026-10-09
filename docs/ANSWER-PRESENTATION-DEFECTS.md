@@ -10,6 +10,7 @@ Status, October 9, 2026:
 - **Measured (replay):** one local Qwen generation per question under V3 and under V4 for the 7 questions with copied headers, 14 generations in total. V3 copied the header in 3 of 7 answers; V4 did so in 0 of 7. See [Replay](#replay-v3-versus-v4-on-the-seven-echo-questions).
 - **Measured (fix G replay):** one local Qwen generation per question under V3 and under V4 on the recent-only arm of all 21 distinct questions, 42 generations in total. AI or memory disclaimers: V3 3 of 3 on the disclaimer questions (4 of 21 overall), V4 0 of 21. V4 declined on all 21; recent-only delivered no gold evidence for any question, so the declines match the evidence, but this cohort cannot detect a false decline. See [the recent-only replay](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions).
 - **Measured (fix G with retrieval on):** the 54026fce V4 decline in the seven-question replay is a false decline; its gold turn was delivered whole ([finding](#the-54026fce-decline-in-the-seven-question-replay)). A paired V3 against V4 replay of the same 21 questions on the recorded hybrid arm (not ordinary Send's lexical selection, which the runner cannot select): 42 local generations, judged by the default judge (126 Vertex verdict requests, $0.13). V4 declined 1 of 12 answerable questions whose gold turns were delivered whole (54026fce again). Judge accepts: V3 15 of 21, V4 16 of 21; 11 of 12 under each arm where gold was delivered whole. See [the retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions).
+- **Measured (fix G with ordinary Send's lexical retrieval):** the same paired replay with `--retrieval-arm ordinary_send`, verified from every attempt report: 42 local generations, judged by the default judge ($0.17 observed over two sessions; the first halted on one transport failure). Lexical delivered gold whole on 13 of 18 answerable questions (hybrid 12): it gained 51c32626 and moved 06878be2 from partial to none. V4 declined 1 of 13 gold-whole questions, 54026fce again, on the identical range set. Judge accepts: V3 16 of 21, V4 15 of 21. See [the lexical replay](#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions).
 - **Examined offline (54026fce cause):** no position change. The question is preference-type, and V4 applied G's "not shown" test to the unrelated recent conversation. A scoped G rewording is proposed, not implemented. See [the diagnosis](#diagnosis-of-the-54026fce-false-decline-offline-no-generation).
 
 The diagnosis sections below describe the V3 framing as it was. This document contains no answer, question, evidence or history text. It quotes only host-authored code strings and describes answers by structure.
@@ -196,7 +197,9 @@ The V4 System framing adds: "If the quoted sources contain the answer, answer di
 
 **Status of G (measured October 9, 2026, 42 local generations):** on the recent-only arm, V4 removed the AI or memory disclaimers (V3 4 of 21, including all 3 disclaimer questions; V4 0 of 21). It also turned every recent-only answer into a plain decline (21 of 21, including all 3 abstention questions). No recent-only delivery contained gold evidence, so those declines match the evidence. See [the recent-only replay](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions).
 
-**Status of G with retrieval on (measured October 9, 2026, 42 local generations plus default-judge verdicts):** on the hybrid arm, V4 declined 1 of 12 answerable questions whose gold turns were delivered whole (54026fce, also the false decline of the seven-question replay), and answered the other 11, all accepted by the judge. Judged accuracy on answerable questions was the same under V3 and V4 (13 of 18). All 3 abstention answers became accepted declines (V3: 2 of 3 accepted). G therefore does not decline wholesale when evidence is present, but it produced one reproducible false decline. Its cause is unexamined, and answers under ordinary Send's lexical selection are unmeasured. See [the retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions).
+**Status of G with retrieval on (measured October 9, 2026, 42 local generations plus default-judge verdicts):** on the hybrid arm, V4 declined 1 of 12 answerable questions whose gold turns were delivered whole (54026fce, also the false decline of the seven-question replay), and answered the other 11, all accepted by the judge. Judged accuracy on answerable questions was the same under V3 and V4 (13 of 18). All 3 abstention answers became accepted declines (V3: 2 of 3 accepted). G therefore does not decline wholesale when evidence is present, but it produced one reproducible false decline. See [the retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions).
+
+**Status of G under ordinary Send's lexical retrieval (measured October 9, 2026, 42 local generations plus default-judge verdicts):** with `--retrieval-arm ordinary_send`, V4 declined 1 of 13 answerable questions whose gold turns were delivered whole: 54026fce again, on the same historical ranges as hybrid. It answered the other 12, and the judge accepted 11 of them; the reject (gpt4_70e84552) is unexplained. It declined all 3 abstention questions (accepted) and 3 of 4 answerable questions without gold. Judged accuracy on answerable questions: V3 13 of 18, V4 12 of 18. Both retrieval arms deliver the same evidence for 54026fce, so switching to ordinary Send's selection does not remove that false decline. Its offline [diagnosis](#diagnosis-of-the-54026fce-false-decline-offline-no-generation) points to G's scope on preference requests; the proposed rewording is not implemented or tested. See [the lexical replay](#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions).
 
 ### Why one version
 
@@ -456,7 +459,7 @@ Test without overfitting to 54026fce, as a pre-declared paired replay that needs
 
 ### Arm used: hybrid, not lexical
 
-Ordinary Send has used the `lexical` selection since October 8, 2026 ([P2-SEMANTIC-DECISION.md](P2-SEMANTIC-DECISION.md#decision)). **The answer-evaluation runner cannot select it.** For a recorded `hybrid` attempt it always builds the history's semantic index and passes it to the coordinator with the default `.enabled` policy (`AnswerEvaluationCommand.swift`, `PreparationMode.constructsSemanticIndex`), and it has no flag that withholds the index. This replay therefore ran the recorded **`hybrid` attempt**: explicit fused lexical and semantic retrieval, the retrieval harness's `hybrid` arm. All 42 reports record retrieval mode `hybrid` with the index built and no construction failure. Selection differs from ordinary Send. On the harness regression cohort, which holds the 14 independent questions here, hybrid delivers every gold turn on 8 of 12 answerable cases and lexical on 9 of 12. The difference is 51c32626, which lexical delivers whole and hybrid only partly; it is one of this replay's partial-gold questions. Answers under lexical selection were not measured.
+Ordinary Send has used the `lexical` selection since October 8, 2026 ([P2-SEMANTIC-DECISION.md](P2-SEMANTIC-DECISION.md#decision)). **The answer-evaluation runner cannot select it.** For a recorded `hybrid` attempt it always builds the history's semantic index and passes it to the coordinator with the default `.enabled` policy (`AnswerEvaluationCommand.swift`, `PreparationMode.constructsSemanticIndex`), and it has no flag that withholds the index. This replay therefore ran the recorded **`hybrid` attempt**: explicit fused lexical and semantic retrieval, the retrieval harness's `hybrid` arm. All 42 reports record retrieval mode `hybrid` with the index built and no construction failure. Selection differs from ordinary Send. On the harness regression cohort, which holds the 14 independent questions here, hybrid delivers every gold turn on 8 of 12 answerable cases and lexical on 9 of 12. The difference is 51c32626, which lexical delivers whole and hybrid only partly; it is one of this replay's partial-gold questions. **Update:** the runner can now select it (`--retrieval-arm ordinary_send`), and [the lexical replay](#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions) measures answers under it.
 
 ### Declaration
 
@@ -546,7 +549,7 @@ Inferred, not measured:
 
 - One false decline in 12 gold-whole cases is not a rate. At temperature 0 with fixed inputs, the two 54026fce declines are the same case under two component policies, not independent samples. Why V4 declines there was not examined in this replay. **Update:** an offline diagnosis, with no generation, finds a preference-type request whose gold turn gives context rather than a stored answer, and V4 answers that apply G's "not shown" test to the unrelated recent conversation. See [the diagnosis](#diagnosis-of-the-54026fce-false-decline-offline-no-generation).
 - The judge is reference-only and calibrated on 50 items. With a false-accept interval reaching 24 percent, some of the 16 or 15 accepts may be wrong. The arm difference (16 against 15) rests on three questions and is within that uncertainty.
-- Ordinary Send's lexical selection would change delivery on at least 51c32626, which has partial gold here. Whether V4 answers it with gold delivered whole is unmeasured.
+- Ordinary Send's lexical selection would change delivery on at least 51c32626, which has partial gold here. Whether V4 answers it with gold delivered whole is unmeasured. **Update:** measured in [the lexical replay](#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions): lexical delivers it whole, and V4 answered and was accepted.
 
 ### Reproduction
 
@@ -562,15 +565,180 @@ python3 scripts/answer_presentation_replay.py judge-summary --output <same direc
 
 `measure.json` and `judge-summary.json` are saved privately in the run directory. Both carry IDs, classes and counts only.
 
-`scripts/test_answer_presentation_replay.py` holds 8 synthetic contracts, run by `scripts/check.py`. They cover:
+`scripts/test_answer_presentation_replay.py` holds 13 synthetic contracts, run by `scripts/check.py`. They cover:
 
 - the cohort definition;
+- the runner retrieval arm: declared only for hybrid cohorts and known arms, passed to the runner command, verified from the runner report, and recorded with its own authorization text;
 - gold delivery against the harness coverage, including overlapping excerpts, gaps, empty ranges and UTF-8 sizes;
 - the decline classes and the range digest;
 - the majority of three, where ties and unparseable votes are `unknown`;
 - blinded judge items: no evidence, no arm, run or question ID, the calibration scrub, and deterministic order;
 - a judge set written privately, loaded by the unchanged runner and planned as verdict-only requests;
 - the label join by run index, with refusal of a mismatched set or row order.
+
+## Replay: V3 versus V4 with ordinary Send's lexical retrieval, all 21 questions
+
+**Measured, October 9, 2026, with the user's authorization:** up to 42 local generations on the local model server only, the same paired V3 against V4 replay of the same 21 questions as [the hybrid retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions), with one change: every run passes `--retrieval-arm ordinary_send`, so past-conversation retrieval is ordinary Send's lexical selection. Then default-judge verdicts on all 42 answers, capped at $1.00. The replay used 42 answer generations, one per question and framing, with no retry and no run that failed before its answer invocation.
+
+### Declaration
+
+Written at 15:15:38 UTC, before any generation, to `.build/answer-presentation-lexical-on-20261009/declaration.json` in this worktree (private, 0600, SHA-256 `02fcb578…29b6`). Generations ran from 15:16:00 to 15:24:46 UTC. No `check.py` or compile ran during them; the binary was built before the declaration.
+
+- **Cohort and arms.** `answer_presentation_replay.py declare --cohort retrieval-on-21 --retrieval-arm ordinary_send`. The 42 declared runs equal the hybrid replay's runs field for field, apart from the added `retrieval_arm: ordinary_send`: the same 21 questions, runner inputs (all rebuilt from the pinned dataset and matching their recorded runner-input SHA-256), `--attempt 1`, component policy v1, output caps and run order. `v3-pinned` passes `--context-framing context-source-snapshot-v3`; `v4-default` passes no framing flag, and all 21 V4 reports record `context-source-snapshot-v4`.
+- **Binary.** SHA-256 `dbcfb09d…9dbc`, built from `85c5117`. Its framing and assembler sources have the same SHA-256 as the hybrid replay's binary (`e60b6bbf…2a95`). Between the two builds, `Sources/` differ only in `AnswerEvaluationCommand.swift` and the new `AnswerEvaluationRetrievalArm.swift`, the arm itself. The declaration's `build_commit` is `0f8f90c`, which changes only the driver: a declaration with a retrieval arm now records that arm's own authorization text instead of the cohort's hybrid-run text, with a new contract. A first declaration (15:14:55 UTC) carried the old text; it was set aside, with an empty ledger, before any generation.
+- **Model and settings.** Unchanged and recorded identically: model `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, listed by the live server's `/v1/models`; temperature 0; thinking off; seed 104202601; the frozen 32,768 context limit with 256 safety tokens; output caps 512 (runner document 5) and 1,024 (document 7); the same System text digest and detector.
+- **Limit and retry rule.** Generation limit 42, the same retry rule. No retry was needed.
+
+### The arm ran as declared
+
+Measured from each attempt's own runner report, for all 42 runs:
+
+- The report records `retrieval_arm_override: ordinary_send`, `semantic_retrieval_policy: disabled_by_policy` and `retrieval_arm_applies_to: declared_hybrid_attempts`.
+- Each attempt records `retrieval_arm: ordinary_send`, `semantic_retrieval_policy: disabled_by_policy`, `preparation_received_semantic_index: false`, `semantic_sidecar_present: false` and `retrieval_arm_receipt_validated: true`. Its background record shows `performed: false`, schedule `skipped_ordinary_send_semantic_disabled_by_policy` and `host_index_opened: false`. The retrieval audit records mode `lexical` and `semantic_retrieval: disabled_by_policy`.
+- The measurement's `retrieval_arm_as_declared` and `framing_as_declared` are true for all 42. The 42 hybrid reports, by contrast, carry no arm fields, record mode `hybrid` and built the index (`performed: true`).
+- Within the lexical replay, V3 and V4 delivered the same sources for every question. V4 prompts were 90 to 293 tokens shorter than V3.
+
+Differences from typed GUI Send that remain, by construction ([IMPLEMENTATION.md](IMPLEMENTATION.md#retrieval-and-context-boundary)):
+
+- **Request text.** These runner inputs are dated (documents 5 and 7). The lexical query uses the question text only, while the GUI queries the whole typed request.
+- **Settings.** The frozen runner configuration replaces saved GUI preferences and System instructions. Component policy v1 is the GUI default, and so is V4; the V3 arm is not.
+- **Store and lifecycle.** Each attempt runs on a checkpointed per-attempt store with ingestion-time capture timestamps. There is no draft or preference saving and no visible streaming. The coordinator receives an empty in-memory `Conversation`.
+
+The equivalence of the arm's selection with the harness `lexical` arm is checked on one synthetic fixture (`scripts/test_ordinary_send_arm.py`), not on these histories.
+
+### Delivery: lexical against hybrid
+
+Measured from the runner's own `delivered_ranges`, scored as in the hybrid replay.
+
+- **Recent sources:** identical to the hybrid replay for all 21 questions.
+- **Historical ranges:** the identical set (same triples, order and label map) for 3 of 21 questions: 1a1907b4, 1faac195 and 54026fce. For the other 18, the lexical set shares 2 to 24 of its ranges with hybrid (4baee567: 2 of 18; 1b9b7252: 6 of 18). Range counts are equal except for 0862e8bf_abs (18 against 22).
+- **Prompts:** 1,282 tokens shorter to 1,418 tokens longer than hybrid. Where the range set is identical, prompts still differ by 4 to 24 tokens, and only 1 of those 6 answers is byte-identical to its hybrid counterpart. The probable cause, as in the hybrid replay, is that historical excerpts carry conversation IDs that are new with each ingestion; it was not checked. Across all 42 runs, 4 answers are byte-identical to hybrid.
+
+Gold delivery changed class on 2 of 18 answerable questions:
+
+| Question | Hybrid | Lexical | Gold turns whole / any bytes / total (lexical) |
+|---|---|---|---|
+| 51c32626 | partial | **whole** | 2 / 2 / 2 |
+| 06878be2 | partial | **none** | 0 / 0 / 3 |
+
+The other 16 answerable questions kept their class. Lexical totals: whole on 13 (the hybrid 12 plus 51c32626), partial on 1 (08f4fc43) and none on 4 (06878be2, 1a1907b4, 1b9b7252, 4baee567). The 3 abstention questions have no annotated gold turns. 51c32626 matches the harness regression result, where lexical delivers it whole and hybrid only partly. 06878be2 is a pilot question outside the harness regression cohort. It is also a preference question, and its annotated turns are context rather than a stored answer.
+
+### Results
+
+Outcome and Has reference are lexical string checks. Verdict is the default judge's majority of three. 41 of 42 items were unanimous; 1a1907b4 V3 split 2 to 1 (accept). **Has reference is meaningless for the preference questions 54026fce, 06878be2 and 1a1907b4**, whose references are rubrics that no answer contains as a string (see [the diagnosis](#diagnosis-of-the-54026fce-false-decline-offline-no-generation)).
+
+| Question | Class | Gold (lexical) | V3 outcome | V3 verdict | V4 outcome | V4 verdict | Has reference V3 / V4 |
+|---|---|---|---|---|---|---|---|
+| 001be529 | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 00ca467f | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 01493427 | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 031748ae_abs | abstention | none annotated | answer | accept | decline | accept | no / no |
+| 06878be2 | answerable, preference | none | answer (512-token cap) | reject | decline (justified) | reject | n/a (preference) |
+| 08f4fc43 | answerable | partial | answer | reject | answer | reject | no / no |
+| 0e5e2d1a | answerable | whole | answer (copied header, AI disclaimer) | accept | answer | accept | yes / yes |
+| 0862e8bf_abs | abstention | none annotated | answer | accept | decline | accept | no / no |
+| 1192316e | answerable | whole | answer | accept | answer | accept | no / no |
+| 1a1907b4 | answerable, preference | none | answer (copied header) | accept (2 to 1) | answer | accept | n/a (preference) |
+| 1b9b7252 | answerable | none | answer | reject | decline (justified) | reject | no / no |
+| 1faac195 | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 3f1e9474 | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 4baee567 | answerable | none | answer | reject | decline (justified) | reject | no / no |
+| **51c32626** | answerable | **whole** | **decline (false)** | reject | answer | **accept** | yes / yes |
+| **54026fce** | answerable, preference | **whole** | answer (copied header) | accept | **decline (false)** | **reject** | n/a (preference) |
+| 7a87bd0c | answerable | whole | answer | accept | answer | accept | yes / yes |
+| a1eacc2a | answerable | whole | answer | accept | answer | accept | no / no |
+| f685340e_abs | abstention | none annotated | answer | accept | decline | accept | no / no |
+| gpt4_2655b836 | answerable | whole | answer | accept | answer | accept | no / no |
+| gpt4_70e84552 | answerable | whole | answer | accept | answer | **reject** | yes / yes |
+
+Lexical measures:
+
+| Arm | Answers | Decline (plus partial) | False decline | Justified decline | Decline with partial gold | Abstention decline | AI disclaimer | Copied header (fabricated IDs) | Answers with raw IDs (IDs) | Repeated question | Has reference (non-preference) | Cited labels (unresolved) | Markdown bold | Median words |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|---:|---:|
+| V3 (pinned) | 21 | 1 (+0) | 1 | 0 | 0 | 0 | 1 | 3 (3) | 21 (34) | 0 | 9 | 0 (0) | 85 | 64 |
+| V4 (default) | 21 | 7 (+0) | 1 | 3 | 0 | 3 | 0 | 0 (0) | 0 (0) | 0 | 9 | 32 (0) | 56 | 56 |
+
+One V3 answer (06878be2) stopped at the 512-token cap (`incomplete_result`), as in the hybrid replay. No V4 answer did. Neither arm contained LaTeX. V3 had 1 answer ending with a question, V4 none. The V3 false decline on 51c32626 opened with a decline phrase but still contains the reference string; the judge rejected it.
+
+### Judged results (default judge)
+
+The same judge configuration as the hybrid replay ([JUDGE-CALIBRATION.md](JUDGE-CALIBRATION.md#default-judge-user-decision-october-9-2026)): Vertex `claude-sonnet-5-5`, `llm-train-482420`, location `global`, declaration version 3, prompt set `boros-judge-calibration-prompts-v3`, thinking `between_tools`, instructed JSON replies, the verdict task only and three replicates. A majority of three decides; a tie or unparseable majority is `unknown`. The answers are Qwen-authored.
+
+- **Items.** `judge-set` built 42 blinded items (set `jr-ffadbd1ee098c5a5`, items SHA-256 `5187a2ed…7305`) with the calibration item builder, no evidence and the same scrub (37 substitutions, 0 identity mentions).
+- **Declarations.** Each was frozen before its session and passed `check-declaration`. The first is the hybrid run's filled declaration with only the authorization text, set identity and labels path changed: $2 and $10 per million tokens, 126 generations, 42 counts, $1.00 cap. The later two differ from it only in the cap, the labels path and their status and scope text.
+- **Access.** A standalone empty-body probe returned `reachable` (HTTP 400) before the first session and again before the second; each of the three sessions' own probes was also `reachable`.
+- **Sessions.** The first session (declaration file SHA-256 `311bc132…3d81`) halted with `transport_failed` on generation 48 of 126. That request failed after 2.6 seconds of monotonic time, while its wall-clock interval spanned about 12 minutes, which suggests the host slept; this was not established. Its 126-request limit could not cover a resume (48 + 79 > 126). Its 47 parsed replies are not used. They agree with the complete session's replies to the same requests in 47 of 47.
+- **Second declaration.** A second declaration with an unchanged judge and plan, and a cap of $0.71 so that the sessions' reservations stayed within $1.00, was refused by the runner before any generation (`projected_cost_exceeds_cap`: the worst-case reservation is about $0.76). It made 42 free count requests.
+- **Complete session.** A third declaration (file SHA-256 `ea2d9c90…eecb`) set the cap to $0.94: $1.00 minus the first session's maximum possible charge (observed $0.048666 plus $0.005974 reserved for the failed request). Its run completed: 126 of 126 replies parsed, all `end_turn`, all bare JSON, 0 thinking tokens. Labels SHA-256 `baf8cc71…9c16`.
+- **Cost.** Observed $0.125522 for the complete session (55,371 input and 1,478 output tokens; reserved $0.756114 against $0.94). With the halted session's $0.048666, the total observed is **$0.174188**. Whether the one failed request was billed is unknown; at most $0.005974. Requests in total: 174 generation requests (48 + 126, one failed in transport), 126 free count requests, and 5 probes.
+
+Accepted answers, with the judge's calibrated rates against the revised 50-item adjudication: error 2/50, 4% (1-13%); false reject 1/30, 3% (1-17%); false accept 1/20, 5% (1-24%).
+
+| Subset | Answers per arm | V3 accept | V4 accept | Unknown |
+|---|---:|---:|---:|---:|
+| Answerable, gold delivered whole | 13 | 12 | 11 | 0 |
+| Answerable, gold not whole (1 partial, 4 none) | 5 | 1 | 1 | 0 |
+| Abstention | 3 | 3 | 3 | 0 |
+| All | 21 | 16 | 15 | 0 |
+
+The questions that changed verdict between the lexical arms are 51c32626 (V3 reject on a false decline, V4 accept), 54026fce (V3 accept, V4 reject on a false decline) and gpt4_70e84552 (V3 accept, V4 reject, with gold whole and the reference string present in both answers; the reason was not examined). The one accept without whole gold is 1a1907b4 under both arms, as in the hybrid replay.
+
+### Comparison with the hybrid replay
+
+Per question, against the [hybrid retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions):
+
+| Question | Gold hybrid → lexical | V3 verdict hybrid → lexical | V4 verdict hybrid → lexical |
+|---|---|---|---|
+| 51c32626 | partial → **whole** | reject → reject | reject → **accept** |
+| 06878be2 | partial → **none** | accept → **reject** | accept → **reject** |
+| 0e5e2d1a | whole → whole | reject → **accept** | accept → accept |
+| 031748ae_abs | none annotated | reject → **accept** | accept → accept |
+| gpt4_70e84552 | whole → whole | accept → accept | accept → **reject** |
+| The other 16 | unchanged | unchanged | unchanged |
+
+| Measure | Hybrid V3 | Lexical V3 | Hybrid V4 | Lexical V4 |
+|---|---:|---:|---:|---:|
+| Answerable with gold whole | 12 | 13 | 12 | 13 |
+| Accepts, all 21 | 15 | 16 | 16 | 15 |
+| Accepts, gold whole | 11 of 12 | 12 of 13 | 11 of 12 | 11 of 13 |
+| Accepts, answerable | 13 of 18 | 13 of 18 | 13 of 18 | 12 of 18 |
+| Accepts, abstention | 2 of 3 | 3 of 3 | 3 of 3 | 3 of 3 |
+| False declines (gold whole) | 0 | 1 (51c32626) | 1 (54026fce) | 1 (54026fce) |
+| Justified declines | 1 | 0 | 2 | 3 |
+| Declines with partial gold | 2 | 0 | 2 | 0 |
+| AI disclaimers | 1 | 1 | 0 | 0 |
+| Copied headers | 3 | 3 | 0 | 0 |
+| Answers with raw IDs (IDs) | 20 (43) | 21 (34) | 0 (0) | 0 (0) |
+
+Measured:
+
+- **Lexical delivered gold where hybrid did not on 1 question (51c32626), and the reverse on 1 (06878be2, partial to none).** Both are single-question shifts. Recent sources were identical, and 3 of 21 historical range sets were identical.
+- **V4's false decline on 54026fce recurred under lexical retrieval,** with the identical historical range set, order and labels as hybrid; only the prompt's token count differed (by 6 tokens). This is the third V4 decline on this question, on essentially the same evidence. It is not an independent sample.
+- **V4 answered and was accepted on the newly whole question (51c32626),** which it had declined with partial gold under hybrid. V3 declined it under lexical even with gold whole.
+- **G's behavior was the same in kind.** V4 declined all 3 abstention questions (all accepted). Of the 4 answerable questions without gold, it declined 3 (1b9b7252 and 4baee567, as under hybrid, and 06878be2, all rejected) and answered 1a1907b4 (accepted, as under hybrid). Where gold was whole, it declined 1 of 13 and answered the other 12.
+- **Judged accepts moved by one in opposite directions.** V3 rose from 15 to 16 and V4 fell from 16 to 15. Each change rests on two to three questions. Under V4: one gain (51c32626, delivery) against two losses (06878be2, delivery; gpt4_70e84552, unexplained).
+- **Presentation fixes held.** V4 had 0 copied headers, 0 fabricated IDs, 0 raw IDs and 0 disclaimers, and all 32 cited labels resolve. V3 had 3 copied headers (0e5e2d1a, 1a1907b4 and 54026fce, each with a fabricated ID) and 1 disclaimer (0e5e2d1a, an answerable question with gold whole).
+
+Inferred, not measured:
+
+- The two retrieval arms are not distinguishable on judged accuracy here. With one sample per question at temperature 0, a calibrated false-accept interval reaching 24 percent and net changes of one answer per framing, neither selection is shown better for these 21 questions.
+- The gpt4_70e84552 V4 reject has whole gold and the reference string, so it is either an answer that adds a wrong claim or a judge false reject. Telling the two apart needs the answer text, which this replay did not read.
+- The 54026fce result strengthens the [diagnosis](#diagnosis-of-the-54026fce-false-decline-offline-no-generation) that the decline does not depend on which retrieval arm selects the evidence. It does not test the proposed G rewording.
+
+### Reproduction
+
+```sh
+python3 scripts/build.py --output <new .build directory for the binary>
+python3 scripts/answer_presentation_replay.py declare --cohort retrieval-on-21 --retrieval-arm ordinary_send --output <new .build directory> --dataset <pinned longmemeval_s_cleaned.json> --binary <Boros binary>
+python3 scripts/answer_presentation_replay.py run --output <same directory> --binary <same binary>
+python3 scripts/answer_presentation_replay.py measure --output <same directory> --dataset <pinned dataset>
+python3 scripts/answer_presentation_replay.py judge-set --output <same directory> --dataset <pinned dataset>
+# fill a copy of vertex-sonnet.v3.template.json with stages_per_item ["verdict"], then:
+python3 scripts/judge_calibration_run.py --set <dir>/judge-set --declaration <filled> --output <dir>/<run> --protocol <evaluate_qa.py> [--execute]
+python3 scripts/answer_presentation_replay.py judge-summary --output <same directory> --dataset <pinned dataset> --labels <labels path>
+```
+
+`measure.json` and `judge-summary.json` are saved privately in the run directory. Both carry IDs, classes and counts only. The per-question lexical against hybrid comparison was computed from the two runs' `measure.json`, `judge-summary.json` and runner reports, reading IDs, ranges and answer digests only.
 
 ## Reproducing the measurements
 
