@@ -163,6 +163,12 @@ final class AnswerAttemptCoordinator {
         guard Self.isOnMainQueue, state == .idle, currentInterruption() == nil else { throw EpisodeBudgetError.invalid }
         guard !runner.isRunning else { throw EpisodeBudgetError.inactive }
         guard settings.profile == .customLocal else { throw ProviderAdmissionError.unverifiedAdapter }
+        // An evaluation-only framing (the V4 no-G ablation) is refused unless
+        // the answer-evaluation command pinned it; Send never sets the permission.
+        guard ContextSourceFraming.permits(settings.contextFraming,
+                                           evaluationOnlyPermitted: settings.evaluationOnlyFramingPermitted) else {
+            throw ContextError.sourceMismatch
+        }
         guard episodeIdentifierEqual(try store.conversationProjectID(conversationID: conversationID), projectID) else {
             throw EpisodeBudgetError.scopeMismatch
         }

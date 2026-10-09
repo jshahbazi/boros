@@ -92,6 +92,7 @@ def main():
                              ("judge-calibration-run", "test_judge_calibration_run.py"),
                              ("answer-presentation-defects", "test_answer_presentation_defects.py"),
                              ("answer-presentation-replay", "test_answer_presentation_replay.py"),
+                             ("framing-v5-replay", "test_framing_v5_replay.py"),
                              ("vertex-anthropic", "test_vertex_anthropic.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)

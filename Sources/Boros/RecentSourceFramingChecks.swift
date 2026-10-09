@@ -385,6 +385,94 @@ enum RecentSourceFramingChecks {
             && unbound.messages.allSatisfy { $0.role != "assistant" }
             && unbound.messages[1].content.hasPrefix(ContextSourceFraming.quotedRecentHeading + "[E1]")
             && unbound.messages[0].content == framing && unboundLabels?.count == unbound.includedRecentCount
+        checks.merge(try scopedDeclineChecks(store: store, chat: chat, project: project, request: request, system: system,
+            v4: snapshot, hit: hit)) { _, new in new }
+        return checks
+    }
+
+    /// SHA-256 of the V4 System framing at commit 85c5117, the bytes that fix
+    /// G was measured with. V5 and the ablation are derived from these bytes.
+    static let v4SystemFramingSHA256 = "d3a316dd4279629819a8a61331bd4b2c9f298ca73ca4631796b3f0110cc0d1b4"
+
+    /// V5 (scoped fix G) and the evaluation-only V4 no-G ablation differ from
+    /// V4 only in the intended System sentences. Content-free: booleans only.
+    private static func scopedDeclineChecks(store: MemoryStore, chat: StoredConversation, project: String,
+        request: MemoryEvent, system: String, v4: ContextSnapshot, hit: MemoryHit) throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        let quoted = ContextSourceFraming.quotedSelectionVersion
+        let v5 = ContextSourceFraming.scopedDeclineSelectionVersion
+        let ablation = ContextSourceFraming.insufficientEvidenceAblationSelectionVersion
+        let g = ContextAssembler.insufficientEvidenceSentences
+        checks["scoped_framing_versions_supported_quoted_and_not_default"] = v5 == "context-source-snapshot-v5"
+            && ablation == "context-source-snapshot-v4-no-g"
+            && ContextSourceFraming.isSupportedSelectionVersion(v5) && ContextSourceFraming.isSupportedSelectionVersion(ablation)
+            && ContextSourceFraming.quotesSources(v5) && ContextSourceFraming.quotesSources(ablation)
+            && ContextSourceFraming.carriesSourceTime(v5) && ContextSourceFraming.carriesSourceTime(ablation)
+            && ContextSourceFraming.defaultSelectionVersion == quoted && GenerationSettings().contextFraming == quoted
+            && !GenerationSettings().evaluationOnlyFramingPermitted
+            && ContextSourceFraming.evaluationOnlySelectionVersions == [ablation]
+            && Set([quoted, v5, ablation]).count == 3
+        // System text: byte-level derivation from V4, which is itself pinned.
+        let v4Framing = ContextAssembler.historyFraming(selectionVersion: quoted)
+        let v5Framing = ContextAssembler.historyFraming(selectionVersion: v5)
+        let ablationFraming = ContextAssembler.historyFraming(selectionVersion: ablation)
+        checks["scoped_framing_v4_system_framing_unchanged"] = ContextSnapshot.digest(Data(v4Framing.utf8)) == v4SystemFramingSHA256
+        checks["scoped_framing_v5_differs_from_v4_only_in_second_g_sentence"] = v4Framing.components(separatedBy: g.second).count == 2
+            && v4Framing.components(separatedBy: g.first + " " + g.second).count == 2
+            && v5Framing == v4Framing.replacingOccurrences(of: g.second, with: g.scoped)
+            && v5Framing != v4Framing && v5Framing.contains(g.first)
+            && v5Framing.contains("check every quoted source, including the historical excerpts")
+            && v5Framing.contains("tailor the reply to relevant details about the user found in any quoted source and cite their labels")
+            && v5Framing.contains("only when the request needs a specific fact from the user's past that no quoted source states")
+            && v5Framing.contains("do not say that you are an AI or that you lack memory or access")
+            && !v5Framing.contains("the conversation history provided here")
+        checks["scoped_framing_ablation_is_v4_without_both_g_sentences"] = ablationFraming
+            == v4Framing.replacingOccurrences(of: " " + g.first + " " + g.second, with: "")
+            && !ablationFraming.contains(g.first) && !ablationFraming.contains("do not guess")
+            && !ablationFraming.contains("you are an AI")
+            && ablationFraming.hasSuffix("do not cite event IDs or other identifiers. A missing excerpt is not proof that the archive lacks a fact.")
+        // Live selection: every non-System byte, the sources and the label map equal V4's.
+        func selection(_ version: String) throws -> ContextSnapshot {
+            try ContextAssembler.prepareRecent(store: store, conversationID: chat.id, projectID: project,
+                prompt: request.text, system: system, excludingEventID: request.id, selectionVersion: version)
+        }
+        func evidence(_ snapshot: ContextSnapshot) throws -> ContextSnapshot {
+            try ContextAssembler.addEvidence(to: snapshot, store: store, conversationID: chat.id, projectID: project,
+                excludingEventID: request.id, historicalHits: [hit])
+        }
+        func labels(_ snapshot: ContextSnapshot) throws -> Data {
+            let value = try JSONSerialization.jsonObject(with: snapshot.selectionEvidence()) as! [String: Any]
+            return try JSONSerialization.data(withJSONObject: ["map": value["citation_labels"] ?? NSNull(),
+                "label_version": value["citation_label_version"] ?? NSNull(), "recent": value["recent_sources"] ?? NSNull(),
+                "historical": value["historical_sources"] ?? NSNull(), "assignments": value["assignments"] ?? NSNull()],
+                options: [.sortedKeys])
+        }
+        let v4Evidence = try evidence(v4)
+        for (name, version, framing) in [("v5", v5, v5Framing), ("ablation", ablation, ablationFraming)] {
+            let snapshot = try selection(version), withEvidence = try evidence(snapshot)
+            checks["scoped_framing_\(name)_only_system_message_differs"] = snapshot.selectionBinding?.version == version
+                && !snapshot.isRejected && !withEvidence.isRejected
+                && snapshot.messages[0].content == system + "\n\n" + framing && snapshot.messages[0] != v4.messages[0]
+                && Array(snapshot.messages.dropFirst()) == Array(v4.messages.dropFirst())
+                && Array(withEvidence.messages.dropFirst()) == Array(v4Evidence.messages.dropFirst())
+                && snapshot.recentSourceIDs == v4.recentSourceIDs
+                && withEvidence.evidence.map(\.eventID) == v4Evidence.evidence.map(\.eventID)
+            checks["scoped_framing_\(name)_labels_and_citation_map_unchanged"] = try labels(snapshot) == labels(v4)
+                && labels(withEvidence) == labels(v4Evidence)
+            let ownBinding = ContextSnapshot.digest(try ContextAssembler.serializedMessages(ContextAssembler.mandatoryMessages(
+                prompt: request.text, system: system, selectionVersion: version)))
+            checks["scoped_framing_\(name)_mandatory_binding_is_its_own"] = try snapshot.selectionBinding?.mandatoryMessagesSHA256 == ownBinding
+                && snapshot.selectionBinding?.mandatoryMessagesSHA256 != v4.selectionBinding?.mandatoryMessagesSHA256
+                && snapshot.selectionDigest() != v4.selectionDigest()
+            var crossed = v4.selectionBinding!; crossed.version = version
+            checks["scoped_framing_\(name)_binding_with_v4_body_refused"] = try rebuilt(v4, binding: crossed).isRejected
+                && rebuilt(snapshot, binding: v4.selectionBinding!).isRejected
+        }
+        checks["scoped_framing_permission_gate"] = ContextSourceFraming.permits(quoted, evaluationOnlyPermitted: false)
+            && ContextSourceFraming.permits(v5, evaluationOnlyPermitted: false)
+            && !ContextSourceFraming.permits(ablation, evaluationOnlyPermitted: false)
+            && ContextSourceFraming.permits(ablation, evaluationOnlyPermitted: true)
+            && !ContextSourceFraming.permits("context-source-snapshot-v999", evaluationOnlyPermitted: true)
         return checks
     }
 

@@ -125,3 +125,12 @@ This is a separate diagnostic hook. Native version 6 pins six complete LongMemEv
 - The System framing for v4 is a separate fixed literal (`ContextAssembler.historyFraming(selectionVersion:)`). The mandatory-message binding hashes the framing actually delivered, and original-input proofs strip the framing of the journaled selection version.
 
 Recent reduction removes the oldest half and re-frames the retained suffix from `E1`. Evidence reduction keeps the recent labels and re-renders the evidence block. V3 selections keep their exact bytes and validation path.
+
+## V5 and the V4 no-G ablation (System framing only)
+
+Implemented October 9, 2026, for measurement; not the default. Two further selection versions share the v4 rendering. `ContextSourceFraming.quotesSources` covers all three: the same quoted recent messages, labels, label map, historical blocks, journal shape, reductions and validation path. Only the fixed System framing differs. A contract derives both from the v4 literal, whose SHA-256 is pinned.
+
+- **`context-source-snapshot-v5`**: v4 with the second fix G sentence replaced by the scoped rewording from [the 54026fce diagnosis](ANSWER-PRESENTATION-DEFECTS.md#proposed-mitigation-not-implemented). Before saying something is not shown, the model must check every quoted source, including the historical excerpts. Advice requests are tailored to user details from any quoted source, with labels cited. A decline is allowed only when a specific fact from the user's past is missing, and it names "the quoted sources". The no-disclaimer clause stays. The excerpt-block scope header that the diagnosis offered as an alternative is not added, so the System text is the only difference.
+- **`context-source-snapshot-v4-no-g`**: v4 without both fix G sentences. It is evaluation-only. `ContextSourceFraming.permits` refuses it unless `GenerationSettings.evaluationOnlyFramingPermitted` is set. Only `--answer-evaluation --context-framing context-source-snapshot-v4-no-g` sets that flag. The coordinator checks it at acceptance, before any request is stored, so Send can never use the ablation.
+
+Each version has its own mandatory-message binding. A v4 binding paired with a v5 or ablation body is refused, and so is the reverse. Selection digests differ, and the label map is byte-identical to v4's for the same delivery. See [FRAMING-V5.md](FRAMING-V5.md).
