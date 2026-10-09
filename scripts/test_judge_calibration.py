@@ -531,8 +531,9 @@ class Contracts(unittest.TestCase):
 
     def test_declaration_templates(self):
         directory = jc.ROOT / "scripts" / "judge_calibration_declarations"
-        for judge, model in jc.DECLARATION_MODELS.items():
-            template = json.loads((directory / f"{judge}.template.json").read_text())
+        for (judge, model), suffix in ((pair, suffix) for pair in jc.DECLARATION_MODELS.items()
+                                       for suffix in ("", ".v3")):
+            template = json.loads((directory / f"{judge}{suffix}.template.json").read_text())
             self.assertEqual(template["provider"]["model"], model)
             self.assertEqual(template["provider"]["project_id"], "llm-train-482420")
             self.assertEqual(template["provider"]["location"], "global")

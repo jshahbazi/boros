@@ -1123,11 +1123,15 @@ def render_evidence(item) -> str:
         for entry in item["evidence"])
 
 
-def judge_messages(item, stage: str, prompt_function=None):
+def judge_messages(item, stage: str, prompt_function=None, reply_instruction: bool = False):
     """Offline rendering of one judge request from blinded item fields only.
 
     The sufficiency request omits the answer. The verdict request is the unchanged upstream QA prompt
     and needs the hash-pinned `prompt_function` (see load_upstream_prompt_function).
+
+    With `reply_instruction` (prompt set v3, Vertex declaration v3 only), the stage's fixed line from
+    REPLY_INSTRUCTIONS is added as one more system message after the stage's own system text, if any,
+    and before the user message. The prompt texts themselves are unchanged.
     """
     require(stage in ("sufficiency", "verdict"), "stage_invalid")
     if stage == "sufficiency":
@@ -1135,15 +1139,19 @@ def judge_messages(item, stage: str, prompt_function=None):
             question_date=item["question_date"] or "unknown", question=item["question"],
             abstention="yes" if item["abstention"] else "no", reference=item["reference"],
             evidence=render_evidence(item))
-        return [{"role": "system", "content": SUFFICIENCY_PROMPT["system"]}, {"role": "user", "content": body}]
-    require(prompt_function is not None, "upstream_prompt_function_required")
-    try:
-        prompt = prompt_function(item["question_type"], item["question"], item["reference"], item["answer"],
-                                 abstention=bool(item["abstention"]))
-    except NotImplementedError:
-        raise CalibrationError("upstream_prompt_category_unsupported") from None
-    require(isinstance(prompt, str) and prompt.strip(), "upstream_prompt_invalid")
-    return [{"role": "user", "content": prompt}]
+        messages = [{"role": "system", "content": SUFFICIENCY_PROMPT["system"]}, {"role": "user", "content": body}]
+    else:
+        require(prompt_function is not None, "upstream_prompt_function_required")
+        try:
+            prompt = prompt_function(item["question_type"], item["question"], item["reference"], item["answer"],
+                                     abstention=bool(item["abstention"]))
+        except NotImplementedError:
+            raise CalibrationError("upstream_prompt_category_unsupported") from None
+        require(isinstance(prompt, str) and prompt.strip(), "upstream_prompt_invalid")
+        messages = [{"role": "user", "content": prompt}]
+    if reply_instruction:
+        messages.insert(len(messages) - 1, {"role": "system", "content": REPLY_INSTRUCTIONS[stage]})
+    return messages
 
 
 def parse_verdict_text(text):
@@ -1224,6 +1232,75 @@ def parse_structured_reply(text, stage: str):
     if not isinstance(value, dict) or set(value) != {spec["field"]} or not isinstance(value[spec["field"]], str):
         return None
     return spec["mapping"].get(value[spec["field"]])
+
+
+# Version 3 reply mode for Vertex judges: instructed JSON. Structured outputs (`output_config.format`)
+# are refused on generation in llm-train-482420 by the organization policy
+# `constraints/vertexai.allowedPartnerModelFeatures` (measured October 9, 2026), so version 3 asks for
+# the same JSON shape in one fixed system line per stage instead. The verdict and sufficiency prompt
+# texts are unchanged; the line is a separate system message. The shapes are the REPLY_SCHEMAS
+# objects, used here only to define what the strict parser accepts; nothing is sent as a schema.
+REPLY_INSTRUCTIONS = {
+    "version": "boros-judge-calibration-reply-instructions-v1",
+    "placement": "one additional system message per request, after the stage's own system text if any and "
+                 "before the user message; the Vertex adapter joins system messages with a blank line",
+    "verdict": 'Reply with only a JSON object, either {"answer": "yes"} or {"answer": "no"}, and no other text.',
+    "sufficiency": ('Reply with only a JSON object, either {"sufficiency": "sufficient"} or '
+                    '{"sufficiency": "insufficient"}, and no other text.'),
+    "shapes": {stage: {"schema": REPLY_SCHEMAS[stage]["schema"], "field": REPLY_SCHEMAS[stage]["field"],
+                       "mapping": REPLY_SCHEMAS[stage]["mapping"]} for stage in ("sufficiency", "verdict")},
+    "reply": "exactly one JSON object with exactly the shape's single field and one of its enum values; duplicate "
+             "keys refused; tolerated around it: surrounding whitespace, and one surrounding Markdown code fence "
+             "(an opening line of three backticks, optionally followed by json, and a closing line of three "
+             "backticks); anything else, including any other text before or after the object, is output_off_schema; "
+             "a reply stopped by max_tokens is response_incomplete; a refusal is refusal; never coerced",
+    "parse_tolerance": ["surrounding_whitespace", "single_markdown_code_fence"],
+}
+JUDGE_PROMPTS_V3 = {"version": "boros-judge-calibration-prompts-v3", "base_version": JUDGE_PROMPTS["version"],
+                    "verdict": VERDICT_PROMPT, "sufficiency": SUFFICIENCY_PROMPT,
+                    "reply_instructions": REPLY_INSTRUCTIONS}
+REPLY_FENCE = re.compile(r"```(?:json)?[ \t]*\n(?P<body>.*)\n[ \t]*```", re.DOTALL)
+
+
+def reply_instructions_sha256() -> str:
+    return sha256_bytes(canonical(REPLY_INSTRUCTIONS))
+
+
+def judge_prompt_v3_sha256() -> str:
+    """Hash of prompt set v3: the unchanged v2 prompts plus the reply-format instruction lines."""
+    return sha256_bytes(canonical(JUDGE_PROMPTS_V3))
+
+
+def parse_instructed_reply_detail(text, stage: str):
+    """Instructed JSON reply -> (label, "bare" or "fenced"), or (None, None) when off shape. Never coerced."""
+    require(stage in STAGES, "stage_invalid")
+    if not isinstance(text, str):
+        return None, None
+    body, wrapper = text.strip(), "bare"
+    fenced = REPLY_FENCE.fullmatch(body)
+    if fenced is not None:
+        body, wrapper = fenced.group("body").strip(), "fenced"
+
+    def pairs(items):
+        keys = [key for key, _ in items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate")
+        return dict(items)
+    try:
+        value = json.loads(body, object_pairs_hook=pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (ValueError, RecursionError):
+        return None, None
+    shape = REPLY_INSTRUCTIONS["shapes"][stage]
+    if not isinstance(value, dict) or set(value) != {shape["field"]} or not isinstance(value[shape["field"]], str):
+        return None, None
+    label = shape["mapping"].get(value[shape["field"]])
+    return (label, wrapper) if label is not None else (None, None)
+
+
+def parse_instructed_reply(text, stage: str):
+    """Instructed JSON reply -> label, or None when it is off shape (never coerced)."""
+    return parse_instructed_reply_detail(text, stage)[0]
 
 
 # --------------------------------------------------------------------------- scoring
@@ -1622,12 +1699,15 @@ DECLARATION_MODELS = {"vertex-opus": "claude-opus-5-5", "vertex-sonnet": "claude
 # Vertex declaration v2: structured replies plus explicit per-model thinking controls. Version 1
 # (DECLARATION_FORMAT) stays valid so runs made under it can be resumed and verified unchanged.
 DECLARATION_FORMAT_V2 = "boros-judge-calibration-vertex-declaration-v2"
-VERTEX_DECLARATION_FORMATS = (DECLARATION_FORMAT, DECLARATION_FORMAT_V2)
+# Vertex declaration v3: instructed JSON replies (no `output_config.format`, which the llm-train
+# organization policy blocks), the v2 per-model thinking controls, and prompt set v3.
+DECLARATION_FORMAT_V3 = "boros-judge-calibration-vertex-declaration-v3"
+VERTEX_DECLARATION_FORMATS = (DECLARATION_FORMAT, DECLARATION_FORMAT_V2, DECLARATION_FORMAT_V3)
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PROVIDER_DEFAULT = "provider-default"
 THINKING_OMITTED = "omitted-adaptive"  # no `thinking` field is sent; the model thinks adaptively
 # Per model: the only accepted `execution.thinking`, the accepted `execution.effort` values and the
-# accepted `execution.max_output_tokens_per_request` range for a v2 declaration.
+# accepted `execution.max_output_tokens_per_request` range for a v2 or v3 declaration.
 VERTEX_V2_CONTROLS = {
     # Thinking off. between_tools takes no other field and is accepted only at effort high or below.
     "claude-sonnet-5-5": {"thinking": {"type": "between_tools"}, "efforts": (PROVIDER_DEFAULT, "low", "medium", "high"),
@@ -1663,19 +1743,66 @@ def reply_schemas_declaration():
             "transport": REPLY_SCHEMAS["transport"]}
 
 
+def reply_format_declaration():
+    """The `reply_format` block a v3 Vertex declaration must carry."""
+    return {"mode": "instructed-json", "structured_outputs": False, "version": REPLY_INSTRUCTIONS["version"],
+            "sha256": reply_instructions_sha256(), "parse_tolerance": list(REPLY_INSTRUCTIONS["parse_tolerance"])}
+
+
+def prompts_declaration(document=None):
+    """The `prompts` fields a declaration pins: prompt set v3 for a v3 Vertex declaration (with the
+    unchanged component hashes and the reply-instruction hash), else prompt set v2."""
+    fields = {"version": JUDGE_PROMPTS["version"], "sha256": judge_prompt_sha256(),
+              "verdict_sha256": verdict_prompt_sha256(), "sufficiency_sha256": sufficiency_prompt_sha256(),
+              "upstream_protocol_sha256": UPSTREAM_QA_PROTOCOL_SHA256}
+    if isinstance(document, dict) and document.get("format") == DECLARATION_FORMAT_V3:
+        fields.update(version=JUDGE_PROMPTS_V3["version"], sha256=judge_prompt_v3_sha256(),
+                      reply_instructions_sha256=reply_instructions_sha256())
+    return fields
+
+
 def vertex_request_controls(document):
     """Request controls of a Vertex declaration: None for v1 (unconstrained, no thinking field),
-    else {"structured": True, "thinking": dict or None, "effort": str or None}. check_declaration
-    validates the values; the adapter validates them again when it renders a body."""
-    if document.get("format") != DECLARATION_FORMAT_V2:
+    else {"structured": bool, "instructed": bool, "thinking": dict or None, "effort": str or None}:
+    v2 is structured (`output_config.format`), v3 is instructed (the reply-format system line).
+    check_declaration validates the values; the adapter validates them again when it renders a body."""
+    if document.get("format") not in (DECLARATION_FORMAT_V2, DECLARATION_FORMAT_V3):
         return None
     execution = document.get("execution") or {}
     thinking, effort = execution.get("thinking"), execution.get("effort")
-    return {"structured": True, "thinking": thinking if isinstance(thinking, dict) else None,
+    v2 = document.get("format") == DECLARATION_FORMAT_V2
+    return {"structured": v2, "instructed": not v2, "thinking": thinking if isinstance(thinking, dict) else None,
             "effort": None if effort == PROVIDER_DEFAULT else effort}
 
 
 def _check_vertex_v2(document, model, problems):
+    _check_vertex_controls(document, model, problems)
+    if document.get("reply_schemas") != reply_schemas_declaration():
+        problems.append("reply_schema_hash")
+
+
+def _carries_structured_outputs(value):
+    """True when any nested object has an `output_format` key or an `output_config` with `format`."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "output_format" or (key == "output_config" and isinstance(child, dict) and "format" in child):
+                return True
+            if _carries_structured_outputs(child):
+                return True
+    elif isinstance(value, list):
+        return any(_carries_structured_outputs(child) for child in value)
+    return False
+
+
+def _check_vertex_v3(document, model, problems):
+    _check_vertex_controls(document, model, problems)
+    if "reply_schemas" in document or _carries_structured_outputs(document):
+        problems.append("structured_outputs_forbidden")
+    if document.get("reply_format") != reply_format_declaration():
+        problems.append("reply_format_hash")
+
+
+def _check_vertex_controls(document, model, problems):
     execution = document.get("execution") or {}
     controls = VERTEX_V2_CONTROLS[model]
     thinking, effort = execution.get("thinking"), execution.get("effort")
@@ -1692,8 +1819,6 @@ def _check_vertex_v2(document, model, problems):
         problems.append("output_limit")
     if "extended_thinking" in execution:
         problems.append("stale_field:execution.extended_thinking")
-    if document.get("reply_schemas") != reply_schemas_declaration():
-        problems.append("reply_schema_hash")
 
 
 def planned_requests(item_count: int, replicates: int) -> int:
@@ -1738,10 +1863,8 @@ def check_declaration(document, set_dir: Path | None = None):
     if type(retries) is not int or retries < 0 or type(execution.get("stop_on_first_infrastructure_failure")) is not bool:
         problems.append("execution_contract")
     prompts = document.get("prompts") or {}
-    if (prompts.get("version"), prompts.get("sha256"), prompts.get("verdict_sha256"),
-            prompts.get("sufficiency_sha256"), prompts.get("upstream_protocol_sha256")) != (
-            JUDGE_PROMPTS["version"], judge_prompt_sha256(), verdict_prompt_sha256(), sufficiency_prompt_sha256(),
-            UPSTREAM_QA_PROTOCOL_SHA256):
+    expected_prompts = prompts_declaration(document if vertex else None)
+    if {key: prompts.get(key) for key in expected_prompts} != expected_prompts:
         problems.append("prompt_hash")
     outputs = document.get("outputs") or {}
     labels_path = outputs.get("labels_path")
@@ -1768,6 +1891,8 @@ def check_declaration(document, set_dir: Path | None = None):
             problems.append("cost_gate")
         if document.get("format") == DECLARATION_FORMAT_V2:
             _check_vertex_v2(document, DECLARATION_MODELS[judge], problems)
+        elif document.get("format") == DECLARATION_FORMAT_V3:
+            _check_vertex_v3(document, DECLARATION_MODELS[judge], problems)
         else:  # version 1, kept for runs made under it: no thinking field, no reply constraint
             if execution.get("extended_thinking") is not False:
                 problems.append("execution_contract")

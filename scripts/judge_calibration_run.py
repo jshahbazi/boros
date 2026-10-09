@@ -12,9 +12,12 @@ QA prompt). The key file of the set is never opened.
 Vertex declarations of version 2 constrain both replies with structured outputs
 (``output_config.format``, schemas in ``judge_calibration.REPLY_SCHEMAS``, hash pinned separately
 from the prompts) and declare thinking per model: Sonnet 5.5 sends ``thinking: between_tools``
-(thinking off), Opus 5.5 sends ``output_config.effort`` and a larger output cap. Version 1
-declarations keep the earlier unconstrained bodies and bare-text parsing so their runs can be
-resumed and verified unchanged.
+(thinking off), Opus 5.5 sends ``output_config.effort`` and a larger output cap. Version 3
+declarations keep those thinking controls but send no ``output_config.format`` (structured outputs
+are blocked by an organization policy on the llm-train project); instead each request carries one
+fixed reply-format system line (``judge_calibration.REPLY_INSTRUCTIONS``, prompt set v3) and the
+reply is parsed strictly as the same JSON shape. Version 1 declarations keep the earlier
+unconstrained bodies and bare-text parsing so their runs can be resumed and verified unchanged.
 
 Two gates protect every dispatch:
 
@@ -100,10 +103,17 @@ def load_declaration(path: Path):
     return document, sha256_bytes(canonical(document))
 
 
-def prompt_hashes():
-    return {"version": jc.JUDGE_PROMPTS["version"], "prompt_set_sha256": jc.judge_prompt_sha256(),
-            "verdict_sha256": jc.verdict_prompt_sha256(), "sufficiency_sha256": jc.sufficiency_prompt_sha256(),
-            "upstream_protocol_sha256": jc.UPSTREAM_QA_PROTOCOL_SHA256}
+def prompt_hashes(declaration=None):
+    """Prompt hashes recorded in run records, labels and reports. Unchanged for v1, v2 and local
+    declarations; a v3 Vertex declaration records prompt set v3 and the reply-instruction hash."""
+    vertex_declaration = declaration is not None and declaration.get("judge") in VERTEX_JUDGES
+    fields = jc.prompts_declaration(declaration if vertex_declaration else None)
+    hashes = {"version": fields["version"], "prompt_set_sha256": fields["sha256"],
+              "verdict_sha256": fields["verdict_sha256"], "sufficiency_sha256": fields["sufficiency_sha256"],
+              "upstream_protocol_sha256": fields["upstream_protocol_sha256"]}
+    if "reply_instructions_sha256" in fields:
+        hashes["reply_instructions_sha256"] = fields["reply_instructions_sha256"]
+    return hashes
 
 
 # --------------------------------------------------------------------------- rendering (offline)
@@ -117,15 +127,20 @@ def output_tokens(declaration):
 
 def render(judge, item, stage, prompt_function, declaration):
     """Exact transport body for one request, its model-visible character count and, for Vertex, the count body."""
-    messages = jc.judge_messages(item, stage, prompt_function)
+    controls = jc.vertex_request_controls(declaration) if judge in VERTEX_JUDGES else None
+    instructed = controls is not None and controls["instructed"]
+    messages = jc.judge_messages(item, stage, prompt_function, reply_instruction=instructed)
     characters = sum(len(message["content"]) for message in messages)
     count_body = None
     if judge in VERTEX_JUDGES:
         model = VERTEX_JUDGES[judge]
-        controls = jc.vertex_request_controls(declaration)
         try:
             if controls is None:  # version 1 declaration: body unchanged, no reply constraint
                 body = vertex.payload(messages, output_tokens(declaration))
+                count_body = vertex.count_payload(messages, model=model)
+            elif instructed:  # version 3: reply-format system line, no output_config.format
+                body = vertex.payload(messages, output_tokens(declaration), model=model,
+                                      thinking=controls["thinking"], effort=controls["effort"])
                 count_body = vertex.count_payload(messages, model=model)
             else:
                 schema = jc.REPLY_SCHEMAS[stage]["schema"]
@@ -168,11 +183,26 @@ def build_plan(items, declaration, prompt_function):
     return plan
 
 
+def _controls(declaration):
+    return jc.vertex_request_controls(declaration) if declaration["judge"] in VERTEX_JUDGES else None
+
+
 def reply_constraint(declaration):
-    """The pinned reply-schema block for a v2 Vertex declaration, else None (unconstrained replies)."""
-    if declaration["judge"] in VERTEX_JUDGES and jc.vertex_request_controls(declaration) is not None:
-        return jc.reply_schemas_declaration()
-    return None
+    """The pinned reply-schema block for a v2 Vertex declaration, else None (no structured outputs)."""
+    controls = _controls(declaration)
+    return jc.reply_schemas_declaration() if controls is not None and controls["structured"] else None
+
+
+def reply_format(declaration):
+    """The pinned reply-format block for a v3 Vertex declaration (instructed JSON), else None."""
+    controls = _controls(declaration)
+    return jc.reply_format_declaration() if controls is not None and controls["instructed"] else None
+
+
+def reply_mode(declaration):
+    """(structured, instructed) parsing flags for a Vertex transport, from the declaration."""
+    controls = _controls(declaration)
+    return (bool(controls and controls["structured"]), bool(controls and controls["instructed"]))
 
 
 def request_fields(plan):
@@ -206,13 +236,16 @@ def median_low(values):
 class VertexTransport:
     kind = "vertex"
 
-    def __init__(self, model, http_fn=None, token_fn=None, structured=False):
+    def __init__(self, model, http_fn=None, token_fn=None, structured=False, instructed=False):
         vertex.require_model(model)
+        require(not (structured and instructed), "reply_mode_invalid")
         self.model = model
         self.http = http_fn or vertex.post
         self.tokens = token_fn or vertex.AccessTokens()
-        # True for a v2 declaration (structured replies); execute() sets it from the declaration.
+        # structured: v2 declaration (output_config.format); instructed: v3 declaration (reply-format
+        # system line). execute() sets both from the declaration.
         self.structured = structured
+        self.instructed = instructed
 
     def open(self, capture_dir):
         return None
@@ -272,9 +305,7 @@ class VertexTransport:
     def metadata(raw):
         return vertex.response_metadata(raw)
 
-    def structured_label(self, raw, stage):
-        """(status, label, failure) for a structured reply. Strict: a refusal, a truncated reply or
-        anything off schema is a recorded failure with a fixed code, never a label."""
+    def _json_label(self, raw, stage, parser):
         try:
             text, _usage = vertex.parse_response(raw, model=self.model)
         except vertex.VertexError as error:
@@ -282,10 +313,28 @@ class VertexTransport:
             if code == "refusal_or_output_invalid" and vertex.response_metadata(raw)["stop_reason"] == "refusal":
                 code = "refusal"
             return "response_invalid", None, code
-        label = jc.parse_structured_reply(text, stage)
+        label = parser(text, stage)
         if label is None:
             return "parse_failed", None, "output_off_schema"
         return "completed", label, None
+
+    def structured_label(self, raw, stage):
+        """(status, label, failure) for a structured reply. Strict: a refusal, a truncated reply or
+        anything off schema is a recorded failure with a fixed code, never a label."""
+        return self._json_label(raw, stage, jc.parse_structured_reply)
+
+    def instructed_label(self, raw, stage):
+        """(status, label, failure) for an instructed JSON reply (v3). The same fixed codes as
+        structured_label; the parser also tolerates one surrounding Markdown code fence."""
+        return self._json_label(raw, stage, jc.parse_instructed_reply)
+
+    def reply_wrapper(self, raw, stage):
+        """Wrapper of a completed instructed reply, bare or fenced, else None. Metadata only, no text."""
+        try:
+            text, _usage = vertex.parse_response(raw, model=self.model)
+        except vertex.VertexError:
+            return None
+        return jc.parse_instructed_reply_detail(text, stage)[1]
 
 
 class QwenTransport:
@@ -418,6 +467,8 @@ def label_from(transport, raw, stage):
             return "response_invalid", None, str(error)
         mapping = jc.JUDGE_PROMPTS[stage]["jevk5"]["mapping"]
         return "completed", mapping[decision["choice"]], None
+    if isinstance(transport, VertexTransport) and transport.instructed:
+        return transport.instructed_label(raw, stage)
     if isinstance(transport, VertexTransport) and transport.structured:
         return transport.structured_label(raw, stage)
     try:
@@ -434,8 +485,9 @@ def make_transport(declaration, *, vertex_http=None, vertex_tokens=None, qwen_ht
                    jev_executable_digest=None):
     judge = declaration["judge"]
     if judge in VERTEX_JUDGES:
-        return VertexTransport(VERTEX_JUDGES[judge], vertex_http, vertex_tokens,
-                               structured=jc.vertex_request_controls(declaration) is not None)
+        structured, instructed = reply_mode(declaration)
+        return VertexTransport(VERTEX_JUDGES[judge], vertex_http, vertex_tokens, structured=structured,
+                               instructed=instructed)
     if judge == "qwen-local":
         return QwenTransport(qwen_http)
     return JevTransport(declaration["provider"]["executable_sha256"], jev_factory, jev_executable_digest)
@@ -535,6 +587,7 @@ class Session:
         self.reserved = prior["reserved_microusd"]
         self.observed = {"input_tokens": 0, "output_tokens": 0, "microusd": 0, "thinking_tokens": 0}
         self.stop_reasons = Counter()
+        self.reply_wrappers = Counter()
         self.calls = Counter()
         self.probe_result = None
 
@@ -628,6 +681,11 @@ class Session:
         if self.vertex:
             metadata = self.transport.metadata(raw)  # stop reason and thinking tokens; no text
             result.update(metadata)
+            if self.transport.instructed:
+                wrapper = self.transport.reply_wrapper(raw, entry["stage"]) if status == "completed" else None
+                result["reply_wrapper"] = wrapper
+                if wrapper is not None:
+                    self.reply_wrappers[wrapper] += 1
             self.stop_reasons[metadata["stop_reason"] or "unknown"] += 1
             self.observed["thinking_tokens"] += metadata["thinking_tokens"] or 0
         self._record(stem, rid, result)
@@ -705,10 +763,12 @@ def labels_document(manifest, declaration, declaration_sha, plan, latest, comple
               if any(value is not None for row in rows for value in row.values())}
     document = {"format": jc.LABELS_FORMAT, "set_id": manifest["set_id"], "items_sha256": manifest["items_sha256"],
                 "judge": jc.JUDGE_SCORE_NAMES[declaration["judge"]], "runner_judge": declaration["judge"],
-                "declaration_sha256": declaration_sha, "prompts": prompt_hashes(), "replicates": replicates,
-                "complete": complete, "labels": labels}
+                "declaration_sha256": declaration_sha, "prompts": prompt_hashes(declaration),
+                "replicates": replicates, "complete": complete, "labels": labels}
     if reply_constraint(declaration) is not None:
         document["reply_schemas"] = reply_constraint(declaration)
+    if reply_format(declaration) is not None:
+        document["reply_format"] = reply_format(declaration)
     return document
 
 
@@ -782,7 +842,8 @@ def dry_run(set_dir: Path, declaration_path: Path, output: Path, prompt_function
             "by_stage": by_stage, "characters_p50": median_low(characters), "characters_max": max(characters),
             "request_body_bytes_max": max(entry["body_bytes"] for entry in plan),
             "over_declared_character_bound": over, "plan_sha256": plan_sha256(plan),
-            "prompts": prompt_hashes(), "reply_schemas": reply_constraint(declaration),
+            "prompts": prompt_hashes(declaration), "reply_schemas": reply_constraint(declaration),
+            "reply_format": reply_format(declaration),
             "max_output_tokens_per_request": output_tokens(declaration),
             "request_fields": request_fields(plan) if declaration["judge"] in VERTEX_JUDGES else None,
             "declaration_sha256": declaration_sha,
@@ -802,11 +863,13 @@ def execute(set_dir: Path, declaration_path: Path, output: Path, prompt_function
     require(not labels_path.exists(), "labels_path_exists")
     run_record = {"format": RUN_FORMAT, "version": VERSION, "judge": declaration["judge"],
                   "declaration_sha256": declaration_sha, "set_id": manifest["set_id"],
-                  "items_sha256": manifest["items_sha256"], "prompts": prompt_hashes(),
+                  "items_sha256": manifest["items_sha256"], "prompts": prompt_hashes(declaration),
                   "plan_sha256": plan_sha256(plan), "planned_requests": len(plan),
                   "replicates": declaration["execution"]["replicates"]}
     if reply_constraint(declaration) is not None:  # absent for v1, so v1 run records still match on resume
         run_record["reply_schemas"] = reply_constraint(declaration)
+    if reply_format(declaration) is not None:  # v3 only, so v1 and v2 run records are unchanged
+        run_record["reply_format"] = reply_format(declaration)
     captures_dir = output / "captures"
     if resume:
         require(destination_state(output, declaration_sha) == "resumable", "resume_declaration_mismatch")
@@ -824,7 +887,7 @@ def execute(set_dir: Path, declaration_path: Path, output: Path, prompt_function
     session_number = len(list(output.glob("report-session-*.json"))) + 1
     transport = transport or make_transport(declaration)
     if isinstance(transport, VertexTransport):  # the declaration decides how replies are parsed
-        transport.structured = reply_constraint(declaration) is not None
+        transport.structured, transport.instructed = reply_mode(declaration)
     captures = Captures(captures_dir)
     prior = prior_state(captures, transport, plan)
     session = Session(declaration, plan, transport, captures, prior)
@@ -853,7 +916,8 @@ def execute(set_dir: Path, declaration_path: Path, output: Path, prompt_function
     report = {"format": REPORT_FORMAT, "version": VERSION, "judge": declaration["judge"],
               "score_name": jc.JUDGE_SCORE_NAMES[declaration["judge"]], "session": session_number,
               "set_id": manifest["set_id"], "items_sha256": manifest["items_sha256"],
-              "declaration_sha256": declaration_sha, "prompts": prompt_hashes(), "plan_sha256": plan_sha256(plan),
+              "declaration_sha256": declaration_sha, "prompts": prompt_hashes(declaration),
+              "plan_sha256": plan_sha256(plan),
               "planned_requests": len(plan), "complete": complete, "halt_reason": halt,
               "prior_attempts_reused": prior["prior_attempts"], "prior_interrupted_attempts": prior["interrupted"],
               "session_calls": dict(session.calls), "generation_requests_total": session.generation_intents,
@@ -864,9 +928,12 @@ def execute(set_dir: Path, declaration_path: Path, output: Path, prompt_function
     if session.vertex:
         report["access_probe"] = session.probe_result
         report["reply_schemas"] = reply_constraint(declaration)
+        report["reply_format"] = reply_format(declaration)
         report["request_fields"] = request_fields(plan)
         report["replies_session"] = {"stop_reasons": dict(session.stop_reasons),
                                      "thinking_tokens": session.observed["thinking_tokens"]}
+        if transport.instructed:
+            report["replies_session"]["wrappers"] = dict(session.reply_wrappers)
         report["cost"] = {"cap_usd": str(Decimal(session.cap) / 1000000),
                           "reserved_usd_total": str(Decimal(session.reserved) / 1000000),
                           "observed_usd_session": str(Decimal(session.observed["microusd"]) / 1000000),
