@@ -716,13 +716,31 @@ Measured:
 - **V4's false decline on 54026fce recurred under lexical retrieval,** with the identical historical range set, order and labels as hybrid; only the prompt's token count differed (by 6 tokens). This is the third V4 decline on this question, on essentially the same evidence. It is not an independent sample.
 - **V4 answered and was accepted on the newly whole question (51c32626),** which it had declined with partial gold under hybrid. V3 declined it under lexical even with gold whole.
 - **G's behavior was the same in kind.** V4 declined all 3 abstention questions (all accepted). Of the 4 answerable questions without gold, it declined 3 (1b9b7252 and 4baee567, as under hybrid, and 06878be2, all rejected) and answered 1a1907b4 (accepted, as under hybrid). Where gold was whole, it declined 1 of 13 and answered the other 12.
-- **Judged accepts moved by one in opposite directions.** V3 rose from 15 to 16 and V4 fell from 16 to 15. Each change rests on two to three questions. Under V4: one gain (51c32626, delivery) against two losses (06878be2, delivery; gpt4_70e84552, unexplained).
+- **Judged accepts moved by one in opposite directions.** V3 rose from 15 to 16 and V4 fell from 16 to 15. Each change rests on two to three questions. Under V4: one gain (51c32626, delivery) against two losses (06878be2, delivery; gpt4_70e84552, a judge inconsistency on a self-contradicting answer; see [below](#why-gpt4_70e84552-was-rejected-read-locally-at-the-users-request-october-9-2026)).
 - **Presentation fixes held.** V4 had 0 copied headers, 0 fabricated IDs, 0 raw IDs and 0 disclaimers, and all 32 cited labels resolve. V3 had 3 copied headers (0e5e2d1a, 1a1907b4 and 54026fce, each with a fabricated ID) and 1 disclaimer (0e5e2d1a, an answerable question with gold whole).
 
 Inferred, not measured:
 
 - The two retrieval arms are not distinguishable on judged accuracy here. With one sample per question at temperature 0, a calibrated false-accept interval reaching 24 percent and net changes of one answer per framing, neither selection is shown better for these 21 questions.
 - The gpt4_70e84552 V4 reject has whole gold and the reference string, so it is either an answer that adds a wrong claim or a judge false reject. Telling the two apart needs the answer text, which this replay did not read.
+
+#### Why gpt4_70e84552 was rejected (read locally at the user's request, October 9, 2026)
+
+The user authorized reading the four answers to this question (V3 and V4 under hybrid and lexical retrieval) and the judge replies, on condition that only conclusions are reported. No model was called.
+
+- **Observed: all four answers contradict themselves.** Each opens by naming the wrong task as completed first. Each then dates both tasks correctly from the delivered messages, and the arithmetic leads to the reference task. V3 ends with an explicit sentence naming the reference task as first. V4 ends with a relative statement that implies it. Both V4 answers cite the right labels.
+- **Observed: the judge was inconsistent on the same defect.** Its replies are bare verdicts with no reasoning. It accepted three of the four answers unanimously: hybrid V3, hybrid V4 and lexical V3. It rejected lexical V4 unanimously.
+- **Under the user's rubric, all four should be rejected.** The October 9 adjudication rejects an answer that first gives a wrong value and then corrects itself (item-010 and item-011). By that rule, the one reject is correct and the three accepts are false accepts of the known self-correction kind. This is the same disagreement as item-011 in calibration, where Sonnet split toward accepting.
+- **Inferred: the judge keys on whether the reference appears as a stated conclusion.** V3's last sentence states the reference task as the answer; the lexical V4 answer states it only relatively. The hybrid V4 accept does not fit this cleanly, so the mechanism is not established.
+- **Inferred: the answer defect is ordering, not framing.** With thinking off, the model commits to a conclusion before doing the date arithmetic and does not revise the headline. It appears under both framings and both retrieval arms, so it is not caused by fix G or V4.
+- **Consequences.**
+  - The lexical V4 "loss" on this question is judge noise, not a framing or retrieval effect.
+  - Corrected by the rubric, each of the four arms has one fewer accept on gold-whole questions.
+  - The default judge's false-accept rate on self-corrections is probably higher than its calibrated 1/20 suggests; the calibration set has only two self-correction items.
+- **Options, not decided:**
+  - settle the self-correction rule, which is still open in [the default-judge decision](JUDGE-CALIBRATION.md#default-judge-user-decision-october-9-2026);
+  - add self-correction items to the likely-wrong calibration extension;
+  - for the answer defect, a System instruction to state the conclusion after the evidence, or thinking on, tested on temporal-reasoning questions.
 - The 54026fce result strengthens the [diagnosis](#diagnosis-of-the-54026fce-false-decline-offline-no-generation) that the decline does not depend on which retrieval arm selects the evidence. It does not test the proposed G rewording.
 
 ### Reproduction
