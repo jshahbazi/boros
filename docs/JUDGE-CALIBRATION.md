@@ -575,6 +575,24 @@ Seven accepted or rejected Qwen answers carry notes about visible metadata, enve
 2. Run the four built judge runners over the 50 items under filled declarations, after authorization.
 3. Re-judge the Qwen-labelled records that inform current claims with the best-calibrated judge.
 
+## Vertex Sonnet, declaration version 3 (measured, October 9, 2026)
+
+One authorized run of `claude-sonnet-5-5` over all 50 items with three replicates (300 requests), declaration version 3 (thinking `between_tools`, instructed JSON reply, prompt set `boros-judge-calibration-prompts-v3`), scored against the revised adjudication. Private run: `.build/judge-calibration/runs/vertex-sonnet-v3-r3/`; score report `.build/judge-calibration/score-sonnet-v3-r3.json`. Observed cost $3.76 (1,765,503 input and 23,108 output tokens) under an $8 cap.
+
+| Measure | Result |
+|---|---|
+| Verdict replies parsed | 150 of 150; all 50 items labelled |
+| Error against the revised adjudication (majority of three) | 2/50, 4% (1-13%) |
+| False reject | 1/30, 3% (1-17%) |
+| False accept | 1/20, 5% (1-24%) |
+| Replicate verdict agreement | 98.7%; two items split 2-1 |
+| Sufficiency replies parsed | 44 of 150 (105 `output_off_schema`, 1 `response_incomplete`) |
+| Sufficiency agreement where labelled | 16/19, kappa 0.69 |
+
+- **The two disagreements were both predicted.** item-011 is a self-correction (wrong value, then right), which the adjudication rejects and the upstream prompt's "contains the correct answer" accepts; Sonnet split 2-1 toward accept. item-048 is the borderline preference answer; Sonnet rejected it in all three replicates.
+- **Sufficiency failures have one shape.** 104 of the 105 off-schema replies give a short explanation and end with the requested JSON object. The strict parser refuses them by design. Re-parsing the saved replies with a declared "final JSON object" rule would need no new calls, but the rule would be chosen after seeing the replies.
+- **Comparability.** These labels come from prompt set v3; the upstream-only judges did not see the added format line.
+
 ## What the user must do and authorize
 
 To start P4 adjudication now (no model calls):
