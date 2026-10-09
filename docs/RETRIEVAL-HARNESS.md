@@ -102,6 +102,26 @@ Preparation times include loopback tokenizer calls and these histories are about
 3. **Multi-session and temporal questions are the weak categories** for both arms: 8 to 9 of 23, and 13 to 14 of 25. These need several turns delivered together, and a single missing turn fails the case.
 4. **The plan's R2 interim target is 90 percent.** The ordinary path was at 55.6 percent and lexical alone at 66.7 percent. Since the October 8, 2026 decision, ordinary Send is the lexical selection: 66.7 percent on development, 9/12 on regression.
 
+## Rerun under the V4 source framing
+
+Measured October 9, 2026 on `main` at `f28584b` with a clean tree, after fixes A, D and G made `context-source-snapshot-v4` the default framing. It ran 100 histories through 9 arms with 4 workers in 1,527 s. It was offline, with no answering requests and no refused generations. Private report: `.build/evaluation/development-v4-f28584b.json`. The comparison is with the integrated run at `dd389da` (V3 framing), `.build/evaluation/integrated-development-dd389da.json`.
+
+| Arm | R1 | R2 | Positive turns delivered whole |
+|---|---:|---:|---:|
+| recent_only | 0/90 | 0/90 | 2/165 |
+| lexical (ordinary Send) | 60/90 | 60/90 | 119/165 |
+| hybrid | 50/90 | 50/90 | 114/165 |
+| exchange_lexical | 61/90 | 61/90 | 125/165 |
+| exchange_adjacent | 62/90 | 62/90 | 127/165 |
+| exchange_packed | 78/90 | 69/90 | 137/165 |
+| global_hybrid | 50/90 | 50/90 | 114/165 |
+| global_fill | 60/90 | 60/90 | 119/165 |
+
+1. **Recall is unchanged.** Every arm reproduces its V3 aggregate. On the seven arms the V3 report recorded per case, the per-case candidate, partial and whole results are identical for all 100 histories. The only turn-level difference is `72e3ee87` under `global_fill`, where the diagnostic `candidate_rank` is now null; both positives are still candidates and delivered whole. The V3 integrated report has no per-case rows for `exchange_packed` and `ordinary_send`, so those two arms are compared on aggregates only. `ordinary_send` matched `lexical` in all 100 histories.
+2. **Prompts are shorter.** Lexical whole-prompt tokens: p50 13,970, p95 16,511, max 17,107 under V4, against 15,222, 17,585 and 18,542 under V3. That is a median of 1,278 fewer tokens per prompt. Evidence tokens fell in every attempt that delivered evidence, by 520 to 1,265 per attempt.
+3. **One recent window got larger.** Under V3, `gpt4_7ddcf75f` needed one reduction round that excluded 14 recent messages. Under V4 they all fit: 7,773 recent tokens against 4,403. Across all arms, the V3 run had 7 attempts with recent-token exclusions and 3 with evidence exclusions. The V4 run has none of either.
+4. **What this does not measure.** The harness scores delivery, not answers. Whether V4 changes answer quality is measured separately, by local replay, in `docs/ANSWER-PRESENTATION-DEFECTS.md`.
+
 ## Running it
 
 The pinned source file is read from `.build/datasets/` in this checkout or the repository's primary checkout. The tokenizer defaults to the mlx-serve model directory. A model server is needed only for the optional parity check, which makes no generation calls.
