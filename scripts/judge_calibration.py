@@ -8,9 +8,12 @@ Commands:
 - ``assemble``: select a stratified, seeded calibration set and write a private,
   blinded adjudication set, a separate private key and a self-contained local
   HTML adjudication form.
-- ``score``: compare adjudications with judge labels (prior labels from the key
-  and new label files) and report false-accept and false-reject rates with 95
-  percent Wilson intervals, plus sufficiency agreement.
+- ``form``: regenerate the local adjudication form for an existing set into a
+  fresh private file (the set directory is not modified).
+- ``score``: compare adjudications (format v1, or v2 with the faithful field and
+  an optional revision block) with judge labels (prior labels from the key and
+  new label files) and report false-accept and false-reject rates with 95
+  percent Wilson intervals, sufficiency agreement and faithful counts.
 - ``check-declaration``: validate a filled judge run declaration (Vertex or local judge).
   The judge runner is ``judge_calibration_run.py``.
 
@@ -36,7 +39,9 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 TOOL_VERSION = "judge-calibration-v1"
 ITEMS_FORMAT = "boros-judge-calibration-items-v1"
-ADJUDICATION_FORMAT = "boros-judge-calibration-adjudications-v1"
+ADJUDICATION_FORMAT_V1 = "boros-judge-calibration-adjudications-v1"
+ADJUDICATION_FORMAT = "boros-judge-calibration-adjudications-v2"  # adds `faithful`; the form exports this
+ADJUDICATION_FORMATS = (ADJUDICATION_FORMAT_V1, ADJUDICATION_FORMAT)
 LABELS_FORMAT = "boros-judge-calibration-labels-v1"
 DECLARATION_FORMAT = "boros-judge-calibration-vertex-declaration-v1"
 DATASET_SHA256 = "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
@@ -45,6 +50,9 @@ Z95 = 1.959963984540054
 STRATA = ("correct_plus_unsupported", "abstention", "incomplete_evidence", "rejected", "accepted")
 SUFFICIENCY = ("sufficient", "insufficient", "unsure")
 VERDICTS = ("accept", "reject", "unsure")
+# Faithful to the delivered evidence: honest about and consistent with what the evidence shows,
+# independent of the reference. Null means not adjudicated. Never enters judge error rates.
+FAITHFUL = ("yes", "no", "unsure")
 
 # Candidate judges for P4. Each gets its own column in `score` whether or not labels exist yet.
 CANDIDATE_JUDGES = {
@@ -812,6 +820,7 @@ textarea{width:100%;box-sizing:border-box;min-height:70px;font:inherit;backgroun
 #jump{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
 #jump button{padding:2px 6px;font-size:12px}
 #jump button.done{border-color:var(--accent)}
+#jump button.partial{border-color:var(--accent);border-style:dashed}
 #jump button.current{outline:2px solid var(--accent)}
 .warn{color:var(--warn)}
 .hidden{display:none}
@@ -823,7 +832,7 @@ textarea{width:100%;box-sizing:border-box;min-height:70px;font:inherit;backgroun
 <button id="export" class="primary">Export decisions</button>
 <label class="meta">Import <input id="import" type="file" accept="application/json"></label>
 <button id="clear">Clear saved progress</button></div></header>
-<p class="meta">Private local file. Do not upload, publish, commit or share it. Decisions autosave to this browser when storage is available; export regularly. Record pack sufficiency before revealing the answer.</p>
+<p class="meta">Private local file. Do not upload, publish, commit or share it. Decisions autosave to this browser when storage is available; export regularly. Record pack sufficiency before revealing the answer. An item is complete when sufficiency, verdict and faithful are all recorded.</p>
 <div class="row"><label class="meta">Adjudicator <input id="adjudicator" type="text" size="24"></label></div>
 <div id="jump"></div>
 <div class="row" style="margin-top:8px"><button id="prev">Previous</button><button id="next">Next</button><span id="itemid" class="meta"></span></div>
@@ -843,7 +852,13 @@ textarea{width:100%;box-sizing:border-box;min-height:70px;font:inherit;backgroun
 <label><input type="radio" name="verdict" value="reject"> Reject</label>
 <label><input type="radio" name="verdict" value="unsure"> Unsure</label>
 <div><label><input type="checkbox" id="unsupported"> Rejected only because a material claim is unsupported by the evidence, although the answer agrees with the reference</label></div>
+<div class="meta">Accept means agreement with the reference under the category tolerances. A decline ("no record of that") on an answerable question is a reject, even when the evidence lacks the answer.</div>
 </fieldset>
+<fieldset><legend>3. Faithful to the evidence</legend>
+<div class="meta">Is the answer honest about and consistent with the delivered evidence, regardless of the reference? An honest decline on insufficient evidence, or an honest undercount, is faithful even when the verdict is reject.</div>
+<label><input type="radio" name="faithful" value="yes"> Yes</label>
+<label><input type="radio" name="faithful" value="no"> No</label>
+<label><input type="radio" name="faithful" value="unsure"> Unsure</label></fieldset>
 <div id="changed" class="meta warn hidden">Sufficiency changed after the answer was revealed; both values are recorded.</div>
 </div>
 <fieldset><legend>Note (optional)</legend><textarea id="note"></textarea></fieldset>
@@ -859,8 +874,11 @@ var state = {decisions:{}, adjudicator:"", index:0};
 try { var saved = window.localStorage.getItem(storageKey); if (saved) { var parsed = JSON.parse(saved); if (parsed && parsed.decisions) state = parsed; } } catch (e) {}
 function save(){ try { window.localStorage.setItem(storageKey, JSON.stringify(state)); } catch (e) {} }
 function el(id){ return document.getElementById(id); }
-function decision(id){ if (!state.decisions[id]) state.decisions[id] = {sufficiency:null, verdict:null, unsupported_claims:false, note:"", sufficiency_at_reveal:null, revealed:false}; return state.decisions[id]; }
-function complete(d){ return d && d.sufficiency && d.verdict; }
+function decision(id){ if (!state.decisions[id]) state.decisions[id] = {sufficiency:null, verdict:null, faithful:null, unsupported_claims:false, note:"", sufficiency_at_reveal:null, revealed:false}; return state.decisions[id]; }
+function complete(d){ return d && d.sufficiency && d.verdict && d.faithful; }
+function partial(d){ return d && d.sufficiency && d.verdict && !d.faithful; }
+var FAITHFUL = ["yes", "no", "unsure"];
+function normalized(decisions){ var out = {}; Object.keys(decisions || {}).forEach(function(id){ var d = decisions[id] || {}; out[id] = {sufficiency:d.sufficiency || null, verdict:d.verdict || null, faithful:FAITHFUL.indexOf(d.faithful) >= 0 ? d.faithful : null, unsupported_claims:!!d.unsupported_claims, note:d.note || "", sufficiency_at_reveal:d.sufficiency_at_reveal || null, revealed:!!d.revealed}; }); return out; }
 function setRadios(name, value){ var nodes = document.querySelectorAll("input[name=" + name + "]"); for (var i=0;i<nodes.length;i++) nodes[i].checked = nodes[i].value === value; }
 function render(){
   var item = items[state.index], d = decision(item.item_id);
@@ -877,7 +895,7 @@ function render(){
     div.appendChild(meta); div.appendChild(text); box.appendChild(div);
   });
   el("answer").textContent = item.answer;
-  setRadios("sufficiency", d.sufficiency); setRadios("verdict", d.verdict);
+  setRadios("sufficiency", d.sufficiency); setRadios("verdict", d.verdict); setRadios("faithful", d.faithful);
   el("unsupported").checked = !!d.unsupported_claims;
   el("note").value = d.note || "";
   el("reveal").disabled = !d.sufficiency || d.revealed;
@@ -886,11 +904,12 @@ function render(){
   el("prev").disabled = state.index === 0; el("next").disabled = state.index === items.length - 1;
   el("adjudicator").value = state.adjudicator || "";
   var done = items.filter(function(it){ return complete(state.decisions[it.item_id]); }).length;
-  el("progress").textContent = done + " of " + items.length + " complete";
+  var waiting = items.filter(function(it){ return partial(state.decisions[it.item_id]); }).length;
+  el("progress").textContent = done + " of " + items.length + " complete" + (waiting ? "; " + waiting + " need faithful" : "");
   var jump = el("jump"); while (jump.firstChild) jump.removeChild(jump.firstChild);
   items.forEach(function(it, i){
     var b = document.createElement("button"); b.textContent = String(i+1);
-    b.className = (complete(state.decisions[it.item_id]) ? "done" : "") + (i === state.index ? " current" : "");
+    b.className = (complete(state.decisions[it.item_id]) ? "done" : (partial(state.decisions[it.item_id]) ? "partial" : "")) + (i === state.index ? " current" : "");
     b.addEventListener("click", function(){ state.index = i; save(); render(); window.scrollTo(0,0); });
     jump.appendChild(b);
   });
@@ -898,6 +917,7 @@ function render(){
 function current(){ return decision(items[state.index].item_id); }
 document.querySelectorAll("input[name=sufficiency]").forEach(function(n){ n.addEventListener("change", function(){ current().sufficiency = n.value; save(); render(); }); });
 document.querySelectorAll("input[name=verdict]").forEach(function(n){ n.addEventListener("change", function(){ current().verdict = n.value; save(); render(); }); });
+document.querySelectorAll("input[name=faithful]").forEach(function(n){ n.addEventListener("change", function(){ current().faithful = n.value; save(); render(); }); });
 el("unsupported").addEventListener("change", function(){ current().unsupported_claims = el("unsupported").checked; save(); });
 el("note").addEventListener("input", function(){ current().note = el("note").value; save(); });
 el("adjudicator").addEventListener("input", function(){ state.adjudicator = el("adjudicator").value; save(); });
@@ -907,7 +927,7 @@ el("next").addEventListener("click", function(){ if (state.index < items.length-
 el("clear").addEventListener("click", function(){ if (window.confirm("Clear saved progress in this browser? Export first if you need it.")) { try { window.localStorage.removeItem(storageKey); } catch (e) {} state = {decisions:{}, adjudicator:"", index:0}; render(); } });
 el("export").addEventListener("click", function(){
   var decisions = {};
-  items.forEach(function(it){ var d = state.decisions[it.item_id]; if (d) decisions[it.item_id] = {sufficiency:d.sufficiency, verdict:d.verdict, unsupported_claims:!!d.unsupported_claims, note:d.note || "", sufficiency_at_reveal:d.sufficiency_at_reveal, revealed:!!d.revealed}; });
+  items.forEach(function(it){ var d = state.decisions[it.item_id]; if (d) decisions[it.item_id] = {sufficiency:d.sufficiency, verdict:d.verdict, faithful:FAITHFUL.indexOf(d.faithful) >= 0 ? d.faithful : null, unsupported_claims:!!d.unsupported_claims, note:d.note || "", sufficiency_at_reveal:d.sufficiency_at_reveal, revealed:!!d.revealed}; });
   var out = {format:"__ADJ_FORMAT__", set_id:setId, items_sha256:itemsHash, adjudicator:state.adjudicator || "", exported_at:new Date().toISOString(), decisions:decisions};
   var blob = new Blob([JSON.stringify(out, null, 1)], {type:"application/json"});
   var a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "adjudications-" + setId + ".json";
@@ -916,7 +936,7 @@ el("export").addEventListener("click", function(){
 el("import").addEventListener("change", function(event){
   var file = event.target.files[0]; if (!file) return;
   var reader = new FileReader();
-  reader.onload = function(){ try { var parsed = JSON.parse(reader.result); if (parsed.set_id !== setId || parsed.items_sha256 !== itemsHash) { window.alert("This export belongs to a different set."); return; } state.decisions = parsed.decisions || {}; state.adjudicator = parsed.adjudicator || ""; save(); render(); } catch (e) { window.alert("Could not read that file."); } };
+  reader.onload = function(){ try { var parsed = JSON.parse(reader.result); if (__ADJ_FORMATS__.indexOf(parsed.format) < 0) { window.alert("Unrecognized export format."); return; } if (parsed.set_id !== setId || parsed.items_sha256 !== itemsHash) { window.alert("This export belongs to a different set."); return; } state.decisions = normalized(parsed.decisions); state.adjudicator = parsed.adjudicator || ""; save(); render(); } catch (e) { window.alert("Could not read that file."); } };
   reader.readAsText(file);
 });
 render();
@@ -929,8 +949,25 @@ def render_form(items_document, items_sha256: str) -> bytes:
     payload = {"set_id": items_document["set_id"], "items_sha256": items_sha256, "items": items_document["items"]}
     data = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace(
         "&", "\\u0026")
-    html = FORM_TEMPLATE.replace("__ADJ_FORMAT__", ADJUDICATION_FORMAT).replace("__DATA__", data)
+    html = (FORM_TEMPLATE.replace("__ADJ_FORMATS__", json.dumps(list(ADJUDICATION_FORMATS)))
+            .replace("__ADJ_FORMAT__", ADJUDICATION_FORMAT).replace("__DATA__", data))
     return html.encode()
+
+
+def regenerate_form(set_dir: Path, output: Path):
+    """Write the current form for an existing set to a fresh private file; the set is not modified."""
+    manifest = load_json(set_dir / "manifest.json")
+    raw = (set_dir / "items.json").read_bytes()
+    require(sha256_bytes(raw) == manifest["items_sha256"], "items_hash_mismatch")
+    items_document = json.loads(raw)
+    require(items_document.get("format") == ITEMS_FORMAT, "items_format")
+    require(items_document.get("set_id") == manifest["set_id"], "items_set_mismatch")
+    require(output.suffix == ".html", "form_output_not_html")
+    make_private_directory(output.parent, fresh=False)
+    form = render_form(items_document, manifest["items_sha256"])
+    write_private(output, form)
+    return {"set_id": manifest["set_id"], "items": len(items_document["items"]), "form_sha256": sha256_bytes(form),
+            "adjudication_format": ADJUDICATION_FORMAT}
 
 
 # --------------------------------------------------------------------------- assembly
@@ -1273,18 +1310,164 @@ def score_judge(name, family, model, labels, key_items, decisions):
     return result
 
 
-def load_adjudications(path: Path, manifest):
-    document = load_json(path)
-    require(document.get("format") == ADJUDICATION_FORMAT, "adjudication_format")
+SHA256_TEXT = re.compile(r"[0-9a-f]{64}\Z")
+ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+# Decision fields a revision may change and list; any other decision field must stay identical.
+REVISABLE_FIELDS = ("sufficiency", "verdict", "faithful", "unsupported_claims", "note")
+REVISION_VALUES = {"sufficiency": SUFFICIENCY + (None,), "verdict": VERDICTS + (None,),
+                   "faithful": FAITHFUL + (None,), "unsupported_claims": (True, False)}
+NOTE_CHANGED = "changed"  # a revision lists a note change without its text
+
+
+def validate_adjudication_document(document, manifest):
+    """-> (format, decisions). Accepts v1 (no faithful) and v2 (faithful in yes/no/unsure/null)."""
+    require(isinstance(document, dict), "adjudication_format")
+    form = document.get("format")
+    require(form in ADJUDICATION_FORMATS, "adjudication_format")
     require(document.get("set_id") == manifest["set_id"], "adjudication_set_mismatch")
     require(document.get("items_sha256") == manifest["items_sha256"], "adjudication_items_mismatch")
     decisions = document.get("decisions")
     require(isinstance(decisions, dict), "adjudication_decisions_missing")
     for decision in decisions.values():
+        require(isinstance(decision, dict), "adjudication_decision_invalid")
         require(decision.get("sufficiency") in SUFFICIENCY + (None,), "adjudication_sufficiency_invalid")
         require(decision.get("verdict") in VERDICTS + (None,), "adjudication_verdict_invalid")
         require(isinstance(decision.get("unsupported_claims", False), bool), "adjudication_flag_invalid")
-    return decisions
+        if form == ADJUDICATION_FORMAT_V1:
+            require("faithful" not in decision, "adjudication_faithful_requires_v2")
+        else:
+            require(decision.get("faithful") in FAITHFUL + (None,), "adjudication_faithful_invalid")
+    if form == ADJUDICATION_FORMAT_V1:
+        require("revision" not in document, "adjudication_revision_requires_v2")
+    return form, decisions
+
+
+def decision_value(decision, field):
+    if field == "unsupported_claims":
+        return bool(decision.get("unsupported_claims", False))
+    if field == "note":
+        return decision.get("note") or ""
+    return decision.get(field)
+
+
+def parse_revision_change(field, value):
+    """'from->to', or a bare 'to' meaning from null (a field the original did not carry). -> (from, to)."""
+    require(isinstance(value, str) and value, "adjudication_revision_change_invalid")
+    if field == "note":
+        require(value == NOTE_CHANGED, "adjudication_revision_change_invalid")
+        return NOTE_CHANGED, NOTE_CHANGED
+    parts = value.split("->")
+    require(len(parts) in (1, 2), "adjudication_revision_change_invalid")
+    if len(parts) == 1:
+        parts = ["null"] + parts
+    tokens = {"null": None, "true": True, "false": False}
+    before, after = (tokens.get(part, part) for part in parts)
+    allowed = REVISION_VALUES[field]
+    require(before in allowed and after in allowed and before != after, "adjudication_revision_change_invalid")
+    return before, after
+
+
+def validate_revision(document, decisions, manifest, original_raw: bytes | None = None):
+    """Check a v2 revision block; with the original export, require that the listed changes are exactly
+    the difference between the two files. Returns a content-free summary, or None without a block."""
+    revision = document.get("revision")
+    if revision is None:
+        require(original_raw is None, "adjudication_revision_missing")
+        return None
+    require(isinstance(revision, dict), "adjudication_revision_invalid")
+    require(isinstance(revision.get("of_export_sha256"), str)
+            and SHA256_TEXT.match(revision["of_export_sha256"]), "adjudication_revision_invalid")
+    require(isinstance(revision.get("revised_on"), str) and ISO_DATE.match(revision["revised_on"]),
+            "adjudication_revision_invalid")
+    for field in ("authorized_by", "applied_by", "rubric"):
+        require(isinstance(revision.get(field), str) and revision[field].strip(), "adjudication_revision_invalid")
+    require(isinstance(revision.get("faithful_coverage", ""), str), "adjudication_revision_invalid")
+    changes = revision.get("changes")
+    require(isinstance(changes, list) and changes, "adjudication_revision_invalid")
+    listed = {}
+    for change in changes:
+        require(isinstance(change, dict), "adjudication_revision_change_invalid")
+        item = change.get("item")
+        require(isinstance(item, str) and item in decisions, "adjudication_revision_unknown_item")
+        require(item not in listed, "adjudication_revision_duplicate_item")
+        require(isinstance(change.get("reason", ""), str), "adjudication_revision_change_invalid")
+        fields = {key: value for key, value in change.items() if key not in ("item", "reason")}
+        require(fields and set(fields) <= set(REVISABLE_FIELDS), "adjudication_revision_change_invalid")
+        parsed = {field: parse_revision_change(field, value) for field, value in fields.items()}
+        for field, (_, after) in parsed.items():
+            if field != "note":
+                require(decision_value(decisions[item], field) == after, "adjudication_revision_target_mismatch")
+        listed[item] = parsed
+    original_verified = False
+    if original_raw is not None:
+        require(sha256_bytes(original_raw) == revision["of_export_sha256"], "adjudication_revision_original_hash")
+        try:
+            original_document = json.loads(original_raw)
+        except ValueError as error:
+            raise CalibrationError("adjudication_revision_original_invalid") from error
+        _, original = validate_adjudication_document(original_document, manifest)
+        require(set(original) == set(decisions), "adjudication_revision_unlisted_change")
+        for item, after_decision in decisions.items():
+            before_decision = original[item]
+            fixed = (set(before_decision) | set(after_decision)) - set(REVISABLE_FIELDS)
+            require(all(before_decision.get(key) == after_decision.get(key) for key in fixed),
+                    "adjudication_revision_unlisted_change")
+            for field in REVISABLE_FIELDS:
+                before, after = decision_value(before_decision, field), decision_value(after_decision, field)
+                change = listed.get(item, {}).get(field)
+                if before == after:
+                    require(change is None, "adjudication_revision_listed_change_absent")
+                else:
+                    require(change is not None, "adjudication_revision_unlisted_change")
+                    if field != "note":
+                        require(change[0] == before, "adjudication_revision_source_mismatch")
+        original_verified = True
+    return {"of_export_sha256": revision["of_export_sha256"], "revised_on": revision["revised_on"],
+            "changed_items": len(listed), "changes_by_field": dict(Counter(f for c in listed.values() for f in c)),
+            "original_verified": original_verified, "listed": listed}
+
+
+def read_adjudications(path: Path, manifest, original: Path | None = None):
+    """-> {"format", "decisions", "revision"} with the revision checked against the original when given."""
+    document = load_json(path)
+    form, decisions = validate_adjudication_document(document, manifest)
+    original_raw = original.read_bytes() if original is not None else None
+    revision = validate_revision(document, decisions, manifest, original_raw)
+    return {"format": form, "decisions": decisions, "revision": revision}
+
+
+def load_adjudications(path: Path, manifest, original: Path | None = None):
+    return read_adjudications(path, manifest, original)["decisions"]
+
+
+def faithful_name(decision):
+    value = (decision or {}).get("faithful")
+    return value if value in FAITHFUL else "not_adjudicated"
+
+
+def faithful_summary(key_items, decisions, revision):
+    """Faithful counts, breakdowns and the verdict x faithful x sufficiency cross-tab (metadata only)."""
+    def counts(entries):
+        return dict(Counter(faithful_name(decisions.get(entry["item_id"])) for entry in entries))
+
+    def grouped(dimension):
+        groups = defaultdict(list)
+        for entry in key_items:
+            groups[entry[dimension]].append(entry)
+        return {name: counts(members) for name, members in sorted(groups.items())}
+
+    crosstab = Counter()
+    for entry in key_items:
+        decision = decisions.get(entry["item_id"]) or {}
+        crosstab["/".join((decision.get("verdict") or "none", faithful_name(decision),
+                           decision.get("sufficiency") or "none"))] += 1
+    listed = (revision or {}).get("listed", {})
+    return {"faithful_adjudicated": sum(1 for entry in key_items
+                                        if faithful_name(decisions.get(entry["item_id"])) != "not_adjudicated"),
+            "faithful": counts(key_items), "faithful_by_category": grouped("category"),
+            "faithful_by_stratum": grouped("stratum"), "faithful_by_answerer": grouped("answerer_family"),
+            "faithful_set_by_revision": sum(1 for change in listed.values() if "faithful" in change),
+            "verdict_faithful_sufficiency": dict(sorted(crosstab.items()))}
 
 
 def load_label_file(path: Path, manifest):
@@ -1317,24 +1500,38 @@ def separable(results):
     return pairs
 
 
-def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True):
+def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True,
+          original_adjudications: Path | None = None):
     manifest = load_json(set_dir / "manifest.json")
     key = load_json(set_dir / "key.json")
     require(key["set_id"] == manifest["set_id"], "key_set_mismatch")
     require(sha256_bytes((set_dir / "items.json").read_bytes()) == manifest["items_sha256"], "items_hash_mismatch")
-    decisions = load_adjudications(adjudications, manifest)
+    loaded = read_adjudications(adjudications, manifest, original_adjudications)
+    decisions, revision = loaded["decisions"], loaded["revision"]
     key_items = key["items"]
+    listed = (revision or {}).get("listed", {})
+
+    def form_sufficiency(item_id, decision):
+        # The sufficiency the form recorded, before any listed revision; a revision is not a form change.
+        change = listed.get(item_id, {}).get("sufficiency")
+        return change[0] if change else decision.get("sufficiency")
+
     adjudication_summary = {
+        "format": loaded["format"],
         "items": len(key_items), "decided": sum(1 for d in decisions.values() if d.get("verdict")),
-        "verdict": dict(Counter(d.get("verdict") for d in decisions.values())),
-        "sufficiency": dict(Counter(d.get("sufficiency") for d in decisions.values())),
+        "verdict": dict(Counter(d.get("verdict") or "none" for d in decisions.values())),
+        "sufficiency": dict(Counter(d.get("sufficiency") or "none" for d in decisions.values())),
         "unsupported_flagged": sum(1 for d in decisions.values() if d.get("unsupported_claims")),
         "sufficiency_changed_after_reveal": sum(
-            1 for d in decisions.values()
-            if d.get("revealed") and d.get("sufficiency_at_reveal") not in (None, d.get("sufficiency"))),
-        "by_stratum": {name: dict(Counter((decisions.get(entry["item_id"]) or {}).get("verdict")
+            1 for item_id, d in decisions.items()
+            if d.get("revealed") and d.get("sufficiency_at_reveal") not in (None, form_sufficiency(item_id, d))),
+        "by_stratum": {name: dict(Counter((decisions.get(entry["item_id"]) or {}).get("verdict") or "none"
                                           for entry in key_items if entry["stratum"] == name))
                        for name in sorted({entry["stratum"] for entry in key_items})},
+        **faithful_summary(key_items, decisions, revision),
+        "revision": None if revision is None else {
+            **{name: value for name, value in revision.items() if name != "listed"},
+            "changed_item_ids": sorted(listed)},
     }
     supplied = {}
     for name, path in label_files:
@@ -1364,7 +1561,9 @@ def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True
                 "grounded": "adjudicated verdict as recorded",
                 "reference_only": "adjudicated reject with the unsupported-claims flag counts as accept",
                 "interval": "Wilson score interval, 95 percent, z=1.96",
-                "excluded": "adjudicated unsure and judge unknown labels are excluded from rate denominators"}}
+                "excluded": "adjudicated unsure and judge unknown labels are excluded from rate denominators",
+                "faithful": "answer honest about and consistent with the delivered evidence, independent of the "
+                            "reference; reported only, never part of judge error rates"}}
 
 
 # --------------------------------------------------------------------------- declarations
@@ -1538,8 +1737,14 @@ def main(argv=None):
     scoring.add_argument("--set", type=Path, required=True)
     scoring.add_argument("--adjudications", type=Path, required=True)
     scoring.add_argument("--labels", action="append", default=[], help="JUDGE=path to a labels file")
+    scoring.add_argument("--original-adjudications", type=Path,
+                         help="the export a v2 revision block names; verifies its hash and the listed changes")
     scoring.add_argument("--no-prior", action="store_true")
     scoring.add_argument("--output", type=Path, help="private JSON destination under .build")
+    regenerate = commands.add_parser("form")
+    regenerate.add_argument("--set", type=Path, required=True)
+    regenerate.add_argument("--output", type=Path, required=True,
+                            help="new private .html file under this checkout's .build")
     declaration = commands.add_parser("check-declaration")
     declaration.add_argument("declaration", type=Path)
     declaration.add_argument("--set", type=Path)
@@ -1567,11 +1772,15 @@ def main(argv=None):
                 require("=" in value, "labels_argument_invalid")
                 name, path = value.split("=", 1)
                 labels.append((name, path))
-            result = score(args.set, args.adjudications, labels, include_prior=not args.no_prior)
+            result = score(args.set, args.adjudications, labels, include_prior=not args.no_prior,
+                           original_adjudications=args.original_adjudications)
             if args.output:
                 destination = check_private_destination(args.output)
                 write_private_json(destination, result)
             print(json.dumps(result, sort_keys=True, indent=1))
+        elif args.command == "form":
+            destination = check_private_destination(args.output)
+            print(json.dumps(regenerate_form(args.set, destination), sort_keys=True, indent=1))
         else:
             problems = check_declaration(load_json(args.declaration), args.set)
             print(json.dumps({"complete": not problems, "problems": problems}, indent=1))
