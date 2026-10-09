@@ -2,8 +2,8 @@
 
 Prepared October 8, 2026 for work package P4 of the [design repair plan](DESIGN-REPAIR-PLAN.md#p4-judge-calibration). This record separates three kinds of statement:
 
-- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form with the faithful field, form regeneration, v1 and v2 adjudication loading with revision checks, scoring, declaration check, frozen judge prompts, Vertex reply schemas; since October 9, 2026 also prompt set v4, the likely-wrong extension assembly with replay candidates and the self-correction heuristic, and the `subset` command; since the [decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day) also the derived reference target (`derive-reference`), the [combined rule](#two-scoring-targets-and-the-combined-rule-implemented-october-9-2026) with a lexical decline classifier (`score --combined-rule`) and `pool-scores`), `scripts/test_judge_calibration.py` (28 synthetic contracts), the [judge runner](#judge-runner-implemented-not-run) `scripts/judge_calibration_run.py` with `scripts/test_judge_calibration_run.py` (31 synthetic contracts), `scripts/vertex_anthropic.py` parameterized by model with opt-in structured outputs and thinking controls (15 synthetic contracts), and nine declaration templates under `scripts/judge_calibration_declarations/` (version 4 for Sonnet, version 3 and version 2 for the two Vertex judges, version 1 kept for runs made under it, and the two local judges).
-- **Measured:** the inventory counts below, the composition of the assembled set, and the runner's dry-run counts over that set. They are metadata counts. Since October 9, 2026 also: the user's [human adjudication](#human-adjudication-measured-october-9-2026) of all 50 items, its [revision](#revision-of-october-9-2026), the earlier judges' error rates against the revised file, one live version 1 Vertex Sonnet pass, the [version 3 Sonnet run](#vertex-sonnet-declaration-version-3-measured-october-9-2026) that became the default judge, the [prompt set v4 candidate run](#vertex-sonnet-prompt-set-v4-candidate-measured-october-9-2026), the composition of the [likely-wrong extension set](#likely-wrong-extension-set-assembled-and-adjudicated-october-9-2026), its human adjudication, the v3 adjudication of the 50 items under the [decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day), and the [default judge and prompt set v4 on all 79 items](#prompt-sets-v3-and-v4-on-79-items-measured-october-9-2026) against both targets.
+- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form with the faithful field, form regeneration, v1 and v2 adjudication loading with revision checks, scoring, declaration check, frozen judge prompts, Vertex reply schemas; since October 9, 2026 also prompt set v4, the likely-wrong extension assembly with replay candidates and the self-correction heuristic, and the `subset` command; also the derived reference file (`derive-reference`), `pool-scores`, the `merge-regrade` helper for a re-graded subset (built, not used), and, kept for history only, the [combined rule](#reference-target-files-and-the-withdrawn-evidence-relative-target-implemented-october-9-2026) with a lexical decline classifier (`score --combined-rule`)), `scripts/test_judge_calibration.py` (29 synthetic contracts), the [judge runner](#judge-runner-implemented-not-run) `scripts/judge_calibration_run.py` with `scripts/test_judge_calibration_run.py` (31 synthetic contracts), `scripts/vertex_anthropic.py` parameterized by model with opt-in structured outputs and thinking controls (15 synthetic contracts), and nine declaration templates under `scripts/judge_calibration_declarations/` (version 4 for Sonnet, version 3 and version 2 for the two Vertex judges, version 1 kept for runs made under it, and the two local judges).
+- **Measured:** the inventory counts below, the composition of the assembled set, and the runner's dry-run counts over that set. They are metadata counts. Since October 9, 2026 also: the user's [human adjudication](#human-adjudication-measured-october-9-2026) of all 50 items, its [revision](#revision-of-october-9-2026), the earlier judges' error rates against the revised file, one live version 1 Vertex Sonnet pass, the [version 3 Sonnet run](#vertex-sonnet-declaration-version-3-measured-october-9-2026) that became the default judge, the [prompt set v4 candidate run](#vertex-sonnet-prompt-set-v4-candidate-measured-october-9-2026), the composition of the [likely-wrong extension set](#likely-wrong-extension-set-assembled-and-adjudicated-october-9-2026), its human adjudication, the [final reference adjudication of the extension](#decline-rule-reversal-user-decision-october-9-2026-latest), and the [default judge and prompt set v4 on all 79 items](#prompt-sets-v3-and-v4-on-79-items-measured-october-9-2026), rescored offline against the final reference target. Kept as history: the v3 adjudication of the 50 items under the withdrawn [decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day), and the scores against the withdrawn evidence-relative target.
 - **Proposed:** the adjudication protocol, the self-preference handling and the filled run declarations. The runner and its prompts have been exercised only against fake transports, never against a model.
 
 No generation, judge, token-count, access-probe, MCP or local model server call was made, including during the dry runs. No question, reference, evidence, answer or note text appears in this document, in test fixtures or in command output. The tools print counts, identifiers and hashes only.
@@ -147,11 +147,11 @@ Used by the user for the October 9, 2026 adjudication; the verdict rubric and th
 5. Record the **answer verdict**. The verdict means agreement with the reference under the LongMemEval [category tolerances](#category-tolerances-user-decision-october-8-2026):
    - *Accept:* the answer addresses every part of the question, agrees with the reference on the essential facts, and makes no material claim the evidence does not support. For an unanswerable question, accept means the answer declines or states that the information is unavailable.
    - *Reject:* any of those conditions fails. A self-correction or self-contradiction is a reject even when the correct value appears; see [Self-corrections](#self-corrections-user-decision-october-9-2026).
-   - *Declines (current rule, user decision of October 9, 2026, later the same day):* the verdict means right given the delivered evidence. An honest decline ("no record of that") on an answerable question is an accept when the delivered evidence does not contain the answer, and a reject when it does. See [Decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day). The earlier rule of the same day, under which every decline on an answerable question was a reject, is superseded; the v2 revision file still records it and serves as the 50-item reference target.
+   - *Declines (user decision of October 9, 2026, latest):* a decline ("no record of that") on an answerable question is a reject, whether or not the delivered evidence contained the answer. An honest decline is reported through faithful and pack sufficiency, not through the verdict. See [Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest). An intermediate rule of the same day was withdrawn. Under it, an honest decline on evidence that lacked the answer was an accept ([history](#decline-rule-change-user-decision-october-9-2026-later-the-same-day)).
    - *Unsure:* the item is excluded from rate denominators and counted separately.
 6. If the only reason for a reject is an unsupported claim in an answer that agrees with the reference, also tick **unsupported claims**. This lets scoring compute a reference-only variant.
 7. Record **faithful to the evidence**: whether the answer is honest about and consistent with the delivered evidence, independent of the reference.
-   - *Yes:* for example an honest decline on insufficient evidence, or an honest undercount that reports what the evidence shows. Under the earlier decline rule these were faithful rejects; under the current rule an honest decline on insufficient evidence is also an accept.
+   - *Yes:* for example an honest decline on insufficient evidence, or an honest undercount that reports what the evidence shows. On an answerable question both are faithful rejects.
    - *No:* the answer contradicts the evidence, or claims something the evidence does not show.
    - *Unsure:* use sparingly.
 
@@ -166,7 +166,7 @@ Exports and revisions are JSON files with `format`, `set_id`, `items_sha256`, `a
 
 - **`boros-judge-calibration-adjudications-v1`:** the first form's export. It has no `faithful` key; a v1 file that carries one, or a `revision` block, is refused (`adjudication_faithful_requires_v2`, `adjudication_revision_requires_v2`).
 - **`boros-judge-calibration-adjudications-v2`:** adds `faithful` per decision, one of `yes`, `no`, `unsure` or `null` (`adjudication_faithful_invalid` otherwise). The current form exports this format.
-- **Revision block (v2 only, optional):** a revised file applying later rubric decisions carries `revision` with `of_export_sha256` (the SHA-256 of the export it revises), `revised_on` (`YYYY-MM-DD`), `authorized_by`, `applied_by`, `rubric`, optional `faithful_coverage`, and a non-empty `changes` list. Each change names an `item`, an optional `reason`, and one or more changed fields among `sufficiency`, `verdict`, `faithful`, `unsupported_claims` and `note`, written `"from->to"` (`null`, `true` and `false` as words), a bare `"to"` for a field the original did not carry (faithful in a v1 original), or `"changed"` for a note.
+- **Revision block (v2 only, optional):** a revised file applying later rubric decisions carries `revision` with `of_export_sha256` (the SHA-256 of the export it revises), `revised_on` (`YYYY-MM-DD`), `authorized_by`, `applied_by`, `rubric`, optional `faithful_coverage`, and a non-empty `changes` list. Each change names an `item`, an optional `reason`, and one or more changed fields among `sufficiency`, `verdict`, `faithful`, `unsupported_claims` and `note`, written `"from->to"` (`null`, `true` and `false` as words), a bare `"to"` for a field the original did not carry (faithful in a v1 original), or `"changed"` for a note. A revision block may also carry descriptive keys that `score` does not check. The extension's final reference file carries `classification` and `supersedes_reference_file_sha256`, and `merge-regrade` writes `regrade`.
 
 `score` checks a revision block on every load: every listed item exists once, every value is valid, and every listed target equals the revised file. With `--original-adjudications FILE` it also requires the original's hash to equal `of_export_sha256`, the original to be a valid export of the same set, and the listed changes to be exactly the difference between the two files: no unlisted change to any decision field (including note text and the form's reveal record), no listed change that did not happen, and every listed source equal to the original. Failures carry fixed codes (`adjudication_revision_original_hash`, `adjudication_revision_unlisted_change`, `adjudication_revision_listed_change_absent`, `adjudication_revision_source_mismatch`, `adjudication_revision_target_mismatch`, `adjudication_revision_change_invalid`, `adjudication_revision_unknown_item`, `adjudication_revision_duplicate_item`, `adjudication_revision_invalid`, and `adjudication_revision_missing` when an original is given for a file without a revision block). Note text is compared but never printed.
 
@@ -195,20 +195,89 @@ The user decided in chat on October 9, 2026 that **self-corrections are rejected
 
 - **Scope.** The rule is about the answer contradicting itself. It does not change the knowledge-update tolerance: an answer that reports earlier, superseded information as earlier and gives the updated value as its answer does not contradict itself. Nor does it change the temporal off-by-one tolerance, which decides whether a value counts as wrong at all.
 - **Where it differs from upstream.** The upstream LongMemEval prompt accepts a response that "contains" the correct answer. Judges that use that prompt unchanged therefore tend to accept self-corrections. That covers the default judge (prompt set v3), the Qwen and JevK5 graders and the Sol upstream labels. Prompt set v4 adds one sentence for this rule; see [Prompt set v4](#prompt-set-v4-self-correction-rubric-implemented-october-9-2026).
-- **Consistency of the revised adjudication.** Checked October 9, 2026 by reading the 50 items locally. The revised file already applies the rule, so no item changes and no v3 adjudication file was produced. The two self-corrections, item-010 and item-011, are rejects. None of the 30 accepted items is a self-correction. The nearest case is item-003, an abstention item: it reports team sizes for a different role than the one asked about, then says the asked-about role is not in the records. It never states a count for the asked-about role, so it does not contradict itself.
+- **Consistency of the revised adjudication.** Checked October 9, 2026 by reading the 50 items locally. The revised (v2) file already applies the rule, so no item changes and no new adjudication file was produced for it. The two self-corrections, item-010 and item-011, are rejects. None of the 30 accepted items is a self-correction. The nearest case is item-003, an abstention item: it reports team sizes for a different role than the one asked about, then says the asked-about role is not in the records. It never states a count for the asked-about role, so it does not contradict itself.
+
+### Decline-rule reversal (user decision, October 9, 2026, latest)
+
+The user decided in chat, in the latest decision of October 9, 2026, to **reverse the [decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day)** made earlier the same day. The verdict means agreement with the reference under the LongMemEval [category tolerances](#category-tolerances-user-decision-october-8-2026), as in the [revision of October 9, 2026](#revision-of-october-9-2026). A decline on an answerable question is a reject. Honest declines are reported through the faithful field together with pack sufficiency, not through the verdict. The [self-correction rule](#self-corrections-user-decision-october-9-2026) (reject) stands.
+
+Reasons recorded with the decision:
+
+1. **A2 is an end-to-end measure.** It must not rise when retrieval fails politely. Each failure has its own measure:
+   - retrieval failure: R2 and the sufficiency field;
+   - honesty: the faithful field;
+   - the reader: A1 on sufficient packs.
+2. **The reference-only verdict prompt cannot grade evidence-relative correctness.** Against the evidence-relative target, the judge alone had 43 to 44 percent error, and the combined rule 24 to 25 percent ([history](#prompt-sets-v3-and-v4-on-79-items-measured-october-9-2026)).
+
+**Reference adjudications now in force.**
+
+| Set | Reference adjudication (private, `.build/judge-calibration/`) | SHA-256 | Accepted / rejected |
+|---|---|---|---:|
+| 50 items `jc-9adfaeeb572b8380` | `adjudications-jc-9adfaeeb572b8380-v2.json`, the [revision of October 9, 2026](#revision-of-october-9-2026), again | `7fb07112…40fb` | 30 / 20 |
+| 29-item extension `jx-6dbd69dec7456178` | `adjudications-jx-6dbd69dec7456178-reference-v2.json`, below | `9505afbe4db18ed1a9ddecbb4d5407335e974369420d8437ff046a58e3bc57a7` | 5 / 24 |
+
+Superseded files, kept and not deleted:
+
+- `adjudications-jc-9adfaeeb572b8380-v3.json` (`94c751a5…8510`), the 50 items under the withdrawn rule;
+- `adjudications-jx-6dbd69dec7456178-reference-derived.json` (`8667fc4b…3f50`), the extension's first reference file, with only the 14 declines flipped.
+
+The user's extension export (`1b2d7abe…75e9`) is kept unchanged as the record of the user's own decisions.
+
+**Final reference adjudication of the extension.** The user decided in chat not to re-grade the 8 non-decline accepts on insufficient packs in the form ("just flip the answers i chose if we already know what happened"). The coordinator read those 8 answers locally against their references, at the user's instruction, and classified them under reference agreement:
+
+- **Six flipped from accept to reject.** The coordinator's reasons, by category only:
+  - item-003: a decline with guessed values that disagree with the reference;
+  - item-005: a preference answer not tailored as the reference expects (the item-037 precedent);
+  - item-013: a generic preference answer (the item-037 precedent);
+  - item-014: a wrong count;
+  - item-019: a partial fact followed by a decline on an answerable question (the lexical classifier missed this decline);
+  - item-025: a decline with suggested sources that disagree with the reference.
+- **Two kept as accepts:**
+  - item-023 agrees with the reference;
+  - item-007's top suggestion agrees with the reference. Its metadata leak is a [presentation defect](ANSWER-PRESENTATION-DEFECTS.md), not a verdict issue.
+
+The file is a v2 revision of the user's export. It differs from the user's export in 20 verdicts, all accept to reject:
+
+- the 14 accepted declines of the derived file: items 001, 002, 006, 011, 015, 016, 018, 020, 021, 024, 026, 027, 028 and 029;
+- the 6 items above.
+
+Sufficiency, faithful, notes and the reveal record are unchanged. The revision block names:
+
+- the export's SHA-256;
+- the rule;
+- each change with its reason;
+- that the 6 flips and the 2 kept accepts were classified by the coordinator at the user's instruction;
+- the superseded derived file's hash.
+
+`score --original-adjudications` with the user's export verified that the 20 listed verdict changes are exactly the difference between the two files.
+
+| Measure (extension, final reference) | Count |
+|---|---:|
+| Accepted / rejected | 5 / 24 |
+| Pack sufficient / insufficient | 6 / 23 (unchanged) |
+| Faithful yes / no | 28 / 1 (unchanged) |
+| Verdict / faithful / sufficiency | accept, yes, insufficient 2 (items 007 and 023); accept, yes, sufficient 3; reject, yes, insufficient 20; reject, yes, sufficient 3; reject, no, insufficient 1 (item-013) |
+
+Faithful rejects on insufficient packs: 20 of the 23 insufficient packs. These are the declines and undercounts that the faithful field reports and that the verdict no longer counts as correct.
+
+**Re-grade subset (built, not used).** Before the user's decision, subset `js-d6e4fafd1df7aa90` was built at `.build/judge-calibration/set-x1r-20261009/` in the coordinator worktree, with a form. It holds the 8 items under new opaque IDs, and its key maps them back to the extension's items through `source_item_id`. Nothing was exported from it, and it did not contribute to the final file. The `merge-regrade` helper ([below](#merging-a-re-graded-subset-merge-regrade-implemented-not-used)) would apply such an export if a re-grade is ever wanted.
+
+**Still open.** Extension items 024 and 029 are declines that both prompt sets accept. The final file rejects them as declines. Whether either answer also contains the reference value, which would make it an accept under reference agreement, has not been checked.
 
 ### Decline-rule change (user decision, October 9, 2026, later the same day)
 
-The user decided in chat, later on October 9, 2026, that **an honest decline on an answerable question is an accept when the delivered evidence does not contain the answer**. The verdict now means "right given the delivered evidence". This supersedes the decline part of the [revision of October 9, 2026](#revision-of-october-9-2026), which made every such decline a reject. Unchanged:
+**Withdrawn.** The user reversed this rule in the latest decision of October 9, 2026; see [Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest). This section is kept as history.
+
+The user decided in chat, later on October 9, 2026, that **an honest decline on an answerable question is an accept when the delivered evidence does not contain the answer**. Under that rule the verdict meant "right given the delivered evidence". It superseded the decline part of the [revision of October 9, 2026](#revision-of-october-9-2026), which made every such decline a reject. Unchanged under it:
 
 - the [self-correction rule](#self-corrections-user-decision-october-9-2026): a wrong answer followed by a correction is a reject;
 - a preference answer that is not personalized when personalization was possible is a reject (item-037);
 - a wrong count with a hedge is a reject (items 006 and 047).
 
-**Adjudication v3 of the 50 items (applied October 9, 2026).** Private file `.build/judge-calibration/adjudications-jc-9adfaeeb572b8380-v3.json`, SHA-256 `94c751a5ad021b3bc7aa5baed0a790f86e4140c042dc1464f54e7c579e148510`. Its revision block names the v2 file's SHA-256 (`7fb07112…40fb`), the rule, and each change. `score --original-adjudications` with the v2 file verified that the 10 listed items are exactly the difference between the two files: 10 verdict changes and no change to any other field.
+**Adjudication v3 of the 50 items (applied October 9, 2026; superseded, kept).** Private file `.build/judge-calibration/adjudications-jc-9adfaeeb572b8380-v3.json`, SHA-256 `94c751a5ad021b3bc7aa5baed0a790f86e4140c042dc1464f54e7c579e148510`. Its revision block names the v2 file's SHA-256 (`7fb07112…40fb`), the rule, and each change. `score --original-adjudications` with the v2 file verified that the 10 listed items are exactly the difference between the two files: 10 verdict changes and no change to any other field.
 
 - **Nine declines, reject to accept:** items 002, 012, 014, 015, 023, 025, 031, 038 and 040. Faithful `yes` and sufficiency `insufficient` are kept.
-- **item-035, reject to accept, listed separately for the user's review** (`for_user_review` in the revision block). The user accepted it in the first export. It is not a decline. It reports what the delivered evidence shows, which is less than the reference. Under "right given the delivered evidence" its verdict reverts to accept; sufficiency stays `insufficient` and faithful stays `yes`. If the user objects, a later revision can restore the reject.
+- **item-035, reject to accept, listed separately for the user's review** (`for_user_review` in the revision block). The user accepted it in the first export. It is not a decline. It reports what the delivered evidence shows, which is less than the reference. Under "right given the delivered evidence" its verdict reverted to accept; sufficiency stayed `insufficient` and faithful stayed `yes`. With the reversal, the v2 file's reject is again the reference verdict, so the question is moot.
 - **Not changed:** the rejects 006, 047 and 037, the self-corrections 010 and 011, and every other decision.
 
 | Measure (v3) | Count |
@@ -218,7 +287,7 @@ The user decided in chat, later on October 9, 2026, that **an honest decline on 
 | Faithful adjudicated | 10 (all `yes`, all accepted on insufficient packs); 40 not adjudicated |
 | Verdict / faithful / sufficiency | accept, not adjudicated, sufficient 19; accept, not adjudicated, insufficient 11; accept, yes, insufficient 10; reject, not adjudicated, sufficient 8; reject, not adjudicated, insufficient 2 |
 
-The ten rejects are items 001, 006, 007, 009, 010, 011, 019, 037, 039 and 047. The v2 file stays the record of the earlier rule and is now the 50-item [reference target](#two-scoring-targets-and-the-combined-rule-implemented-october-9-2026).
+The ten rejects are items 001, 006, 007, 009, 010, 011, 019, 037, 039 and 047. The v2 file is again the 50-item reference adjudication, and v3 is superseded.
 
 ## Scoring (implemented)
 
@@ -231,9 +300,9 @@ python3 scripts/judge_calibration.py score --set .build/judge-calibration/set-v1
 
 Score inputs:
 
-- **Adjudications:** a v1 or v2 export, or a v2 revision (see [Adjudication format](#adjudication-format)). The set ID and the items hash must match.
-- **Original adjudications (optional):** the export a revision names, or the source of a [derived reference target](#two-scoring-targets-and-the-combined-rule-implemented-october-9-2026); `score` then verifies the revision or the derivation against it.
-- **Combined rule (optional):** `--combined-rule lexical` or `--combined-rule lexical-with-partial`; see [the combined rule](#two-scoring-targets-and-the-combined-rule-implemented-october-9-2026).
+- **Adjudications:** a v1 or v2 export, or a v2 revision (see [Adjudication format](#adjudication-format)). The set ID and the items hash must match. Judge rates are against this file as recorded. The verdict target is agreement with the reference ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)), so pass a reference adjudication: the 50-item v2 file or the extension's `-reference-v2` file.
+- **Original adjudications (optional):** the export a revision names, or the source of a [derived reference file](#reference-target-files-and-the-withdrawn-evidence-relative-target-implemented-october-9-2026); `score` then verifies the revision or the derivation against it.
+- **Combined rule (optional, history only):** `--combined-rule lexical` or `--combined-rule lexical-with-partial`. It was built for the withdrawn evidence-relative target and is not a current grader; see [the combined rule](#reference-target-files-and-the-withdrawn-evidence-relative-target-implemented-october-9-2026).
 - **Label files:** one per judge, format `boros-judge-calibration-labels-v1`. Each item has `verdict` (`accept`, `reject` or `unknown`) and optional `sufficiency` (`sufficient`, `insufficient` or `unknown`). Replicates may be given as a list; a majority vote decides, ties become `unknown`, and replicate agreement is reported.
 
 Score output:
@@ -258,18 +327,21 @@ Definitions:
 
 At 50 items, a rate near 50 percent has a Wilson half-width of about 13 to 14 points. Per-category cells hold 4 to 13 items, so per-category intervals will be wide. Report them, but do not treat them as decisive.
 
-## Two scoring targets and the combined rule (implemented October 9, 2026)
+## Reference target files and the withdrawn evidence-relative target (implemented October 9, 2026)
 
-The verdict prompts of prompt sets v2, v3 and v4 are reference-only: the judge sees the question, the reference and the answer, never the evidence. Such a judge cannot grade "right given the delivered evidence", which the [decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day) made the meaning of the human verdict. Scoring therefore uses two targets.
+The verdict target is agreement with the reference ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)). The verdict prompts of prompt sets v2, v3 and v4 are reference-only: the judge sees the question, the reference and the answer, never the evidence. That matches the target.
+
+**History.** For a few hours on October 9, 2026, the [decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day) made the human verdict mean "right given the delivered evidence". Scoring then used two targets. The evidence-relative target is withdrawn. The table and its scores are kept as history only.
 
 | Target | Meaning | 50-item set `jc-9adfaeeb572b8380` | 29-item extension `jx-6dbd69dec7456178` |
 |---|---|---|---|
-| Evidence-relative | The user's labels: right given the delivered evidence | Adjudication v3 (`94c751a5…8510`) | The user's export (`1b2d7abe…75e9`), unchanged |
-| Reference | What a reference-only judge should say: the evidence-relative target, except that an accepted decline on an answerable question is a reject | Adjudication v2 (`7fb07112…40fb`) | Derived file `adjudications-jx-6dbd69dec7456178-reference-derived.json` (`8667fc4b…3f50`): 14 accepted declines flipped to reject |
+| Evidence-relative (withdrawn) | The user's labels under the withdrawn rule: right given the delivered evidence | Adjudication v3 (`94c751a5…8510`), superseded | The user's export (`1b2d7abe…75e9`), unchanged |
+| Reference, first version (superseded for the extension) | The evidence-relative target, except that an accepted decline on an answerable question is a reject | Adjudication v2 (`7fb07112…40fb`), still the 50-item reference | Derived file `adjudications-jx-6dbd69dec7456178-reference-derived.json` (`8667fc4b…3f50`): 14 accepted declines flipped to reject |
+| Reference, final (current) | Agreement with the reference | Adjudication v2 (`7fb07112…40fb`) | `adjudications-jx-6dbd69dec7456178-reference-v2.json` (`9505afbe…57a7`): the 14 declines plus 6 classified non-decline answers flipped to reject ([details](#decline-rule-reversal-user-decision-october-9-2026-latest)) |
 
-- **The 50-item reference target differs from v3 in one non-decline item.** v2 and v3 differ in the nine declines and in item-035. item-035 reports what an insufficient pack shows, which is less than the reference, so it is wrong against the reference. A purely mechanical flip of declines would have left it accepted.
-- **The extension's derived reference target flips declines only.** The flipped items are the 14 accepted declines on answerable questions that the coordinator verified by reading: 001, 002, 006, 011, 015, 016, 018, 020, 021, 024, 026, 027, 028 and 029. item-013, a non-decline preference answer, stays accepted, as instructed. Caveat: the user also accepted 8 non-decline answers on packs marked insufficient (003, 005, 007, 013, 014, 019, 023 and 025). Like item-035, some of them may be wrong against the reference. Nobody has adjudicated them against the reference, and the derived target keeps them as accepts. Extension false rejects against the reference target are therefore an upper bound. Both prompt sets reject 7 of these 8 (all but 023).
-- **Two flipped declines are accepted by both judges.** Both prompt sets accept items 024 and 029 under the reference target, which makes them false accepts. Item-024 is a partial decline (its decline phrase starts after 200 characters), and item-029 is a preference answer. Whether either answer also contains the reference, which would make the flip wrong, has not been checked.
+- **v2 and v3 of the 50 items differ in one non-decline item, item-035.** v2 and v3 differ in the nine declines and in item-035. item-035 reports what an insufficient pack shows, which is less than the reference, so it is wrong against the reference. A purely mechanical flip of declines would have left it accepted.
+- **The first extension reference file flipped declines only.** It flipped the 14 accepted declines on answerable questions that the coordinator verified by reading: 001, 002, 006, 011, 015, 016, 018, 020, 021, 024, 026, 027, 028 and 029. It left as accepts the 8 non-decline answers the user had accepted on insufficient packs (003, 005, 007, 013, 014, 019, 023 and 025). The final file resolves those 8: 6 are rejects and 2 stay accepts.
+- **Two flipped declines are accepted by both judges.** Both prompt sets accept items 024 and 029, which makes them false accepts against the reference target. Item-024 is a partial decline (its decline phrase starts after 200 characters), and item-029 is a preference answer. Whether either answer also contains the reference, which would make the flip wrong, has not been checked.
 
 **Derived files (`derive-reference`).** The command reads a v2 adjudication and a list of accepted declines, and writes a fresh private file. In that file each listed item has verdict `reject`, and a `derived` block records:
 
@@ -292,7 +364,38 @@ python3 scripts/judge_calibration.py score --set .build/judge-calibration/set-x1
   --labels vertex-sonnet=.build/judge-calibration/labels-vertex-sonnet-v3-x1-r3.json --no-prior
 ```
 
-**Combined rule (`score --combined-rule`).** This grades the evidence-relative target by machine, from a reference-only judge plus metadata (`boros-judge-calibration-combined-rule-v1`):
+### Merging a re-graded subset (`merge-regrade`, implemented, not used)
+
+The command applies a re-graded subset's form export to the source set's reference adjudication, and writes a new versioned file. The subset is one made with `subset` from items of the source set.
+
+- **Mapping.** Subset item IDs map to source item IDs through the subset key's `source_item_id`.
+- **Checks before anything is written:**
+  - the subset key names the source set's ID and items hash;
+  - every subset item equals its source item apart from its ID;
+  - the export is a v2 form export (no revision or derived block) whose set ID and items hash match the subset manifest;
+  - the export decides every subset item with sufficiency, verdict and faithful.
+- **What is applied.** Only verdict, sufficiency, faithful and a non-empty note come from the re-grade. An empty re-grade note keeps the earlier note. The reveal record and the unsupported-claims flag stay as they were.
+- **The new file.** The base file's own `revision` or `derived` block is not copied; the base keeps it. A new `revision` block names:
+  - the base file's hash;
+  - the date, the authorizer, the applier and the rubric (by default the reference-agreement rubric);
+  - one change per changed item, each with the subset item it came from;
+  - a `regrade` record with the subset's set ID, items hash, key hash, the export's hash and the item map.
+
+  `score --original-adjudications BASE` verifies the result.
+- **Refusals.** A re-grade that changes nothing is refused (`regrade_no_change`). Other fixed codes: `regrade_subset_key_invalid`, `regrade_source_set_mismatch`, `regrade_unknown_item`, `regrade_duplicate_source_item`, `regrade_item_mismatch`, `regrade_export_invalid`, `regrade_items_mismatch`, `regrade_incomplete` and `regrade_base_requires_v2`. The command prints IDs, labels and hashes only, and refuses an existing destination.
+
+It was built for the 8-item re-grade, which the user then decided against, so it has not been run on private data. If a re-grade is ever exported from subset `js-d6e4fafd1df7aa90`:
+
+```sh
+python3 scripts/judge_calibration.py merge-regrade --set .build/judge-calibration/set-x1-20261009 \
+  --adjudications .build/judge-calibration/adjudications-jx-6dbd69dec7456178-reference-v2.json \
+  --subset .build/judge-calibration/set-x1r-20261009 \
+  --regrade .build/judge-calibration/adjudications-js-d6e4fafd1df7aa90.json \
+  --authorized-by "..." --applied-by "..." --revised-on YYYY-MM-DD \
+  --output .build/judge-calibration/adjudications-jx-6dbd69dec7456178-reference-v3.json
+```
+
+**Combined rule (`score --combined-rule`, history only).** This rule was built to grade the now withdrawn evidence-relative target by machine, from a reference-only judge plus metadata (`boros-judge-calibration-combined-rule-v1`). It is kept so that the recorded figures can be reproduced. It is not a current grader, and the code marks it as superseded.
 
 > accept = the judge accepts, OR (the answer is a decline AND the annotated gold turns of an answerable question were not all delivered whole); otherwise the judge's verdict.
 
@@ -316,11 +419,10 @@ Truth: the accepted declines on answerable questions that the user's labels iden
 - **Missed declines.** In the 50-item set: 002, 015 and 023. In the extension: 011, 020 and 027, plus 024, which `lexical-with-partial` catches. Precision is 16 of 16 (no false positive among 43 answerable non-declines, 0-8%).
 - **Assessment.** The classifier is not reliable enough to decide accepts. It misses about a third of the declines, its recall interval reaches down to 49 percent, and it finds none of the 13 abstention declines. That last miss shows that the phrase list covers only some decline wordings. Widening the list after reading these 79 items would fit it to them.
 - **The rule's ceiling.** Even with the user's own decline list in place of the classifier (an analysis, not a mode), the combined rule leaves 11 (v3) or 14 (v4) false rejects among the 65 evidence-relative accepts. The reason is that "right given the delivered evidence" also accepts non-decline answers that are consistent with an insufficient pack (jc-035 and jx-003, 005, 007, 013, 014, 019 and 025). A reference-only judge rejects those by design. jc-023 is also out of reach: it is a decline the user accepted on a pack whose annotated turns were all delivered.
-- **Proposed alternatives (not implemented).**
-  1. A decline-classification judge task: question and answer only, yes or no to "does the answer say the information is not available instead of answering?". Calibrate it against these 79 labels (23 answerable and 13 abstention positives), and use it in place of the lexical classifier.
-  2. For full evidence-relative grading, an evidence-aware verdict task in which the judge sees the delivered evidence, as the superseded prompt set v1 proposed. Calibrate it against the evidence-relative target.
-
-  Either needs its own prompt, calibration run and authorization.
+- **A further miss.** Under the final reference classification, extension item-019 is also a decline (a partial fact, then a decline). The truth set above predates that reading and counts it as a non-decline.
+- **Alternatives considered (not implemented):**
+  1. **Withdrawn: an evidence-aware verdict task.** In it the judge would see the delivered evidence, as the superseded prompt set v1 proposed, so that it could grade the evidence-relative target. That target is withdrawn ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)), so this proposal is withdrawn with it.
+  2. **Not proposed for now: a decline-classification judge task.** Question and answer only, yes or no to "does the answer say the information is not available instead of answering?". It no longer bears on the verdict. It could one day count declines for A2 reports, next to the faithful field, if hand counts become impractical. It would need its own prompt, calibration and authorization.
 
 ## Candidate judges
 
@@ -610,7 +712,7 @@ Proposed measurement, as a P4 extension once P5 or another authorized run produc
 
 The user adjudicated all 50 items of set `jc-9adfaeeb572b8380` in one pass with the local form, applying the [category tolerances](#category-tolerances-user-decision-october-8-2026). The export's `adjudicator` field is blank; the adjudicator is the user. The export is private at `.build/judge-calibration/adjudications-jc-9adfaeeb572b8380.json` (SHA-256 `503e814290e5ee1f64567cc053280a3b7ea67c377e016cbe174da1fbd11f35ce`); the score report is `.build/judge-calibration/score-human-v1-20261009.json` (SHA-256 `51ff25b3e41a0fabbb43dcc14eec16a5dbb5e7d4404d19fe7d2faf7c4e75fed4`). Free-text notes stay private.
 
-The same day the user settled the verdict rubric and added the faithful field, and a revised file applies those decisions; see [Revision of October 9, 2026](#revision-of-october-9-2026). **The current evidence-relative reference is [adjudication v3](#decline-rule-change-user-decision-october-9-2026-later-the-same-day); the revised (v2) file is the reference target.** The totals and the sufficiency comparison immediately below are the first export's, kept as recorded.
+The same day the user settled the verdict rubric and added the faithful field, and a revised file applies those decisions; see [Revision of October 9, 2026](#revision-of-october-9-2026). **The revised (v2) file is the current 50-item reference adjudication ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)); adjudication v3 is superseded.** The totals and the sufficiency comparison immediately below are the first export's, kept as recorded.
 
 ### Totals (first export)
 
@@ -636,7 +738,7 @@ In the first export, ten of the 11 answerable items with insufficient evidence h
 
 User decisions of October 9, 2026: the answer verdict means agreement with the reference under the LongMemEval tolerances, so a decline on an answerable question is a reject even when the evidence lacked the answer (the sufficiency field captures that retrieval failure); and a new **faithful** field records whether the answer is honest about and consistent with the delivered evidence. The coordinator applied these decisions to the first export as a v2 revision, at `.build/judge-calibration/adjudications-jc-9adfaeeb572b8380-v2.json` (private; SHA-256 `7fb07112939eab8688f4559c853e5a511a0fde9f9362a4d03302dc96517140fb`). Its revision block names the first export's SHA-256 (`503e8142…5ce`), and `score --original-adjudications` verified it: the 13 listed items are exactly the difference between the two files (13 verdict changes, 1 sufficiency change, 10 faithful values), with no unlisted change.
 
-**Superseded in part, October 9, 2026 (later the same day).** The user reversed the decline part of this revision: an honest decline on insufficient evidence is an accept again. The current evidence-relative reference is [adjudication v3](#decline-rule-change-user-decision-october-9-2026-later-the-same-day). This v2 file is kept unchanged as the 50-item reference target. The figures in this section and the next describe the v2 file.
+**In force again (user decision, October 9, 2026, latest).** Later the same day, the user briefly reversed the decline part of this revision ([adjudication v3](#decline-rule-change-user-decision-october-9-2026-later-the-same-day)). The user then withdrew that reversal ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)). This v2 file, unchanged, is the current 50-item reference adjudication. The figures in this section and the next describe it.
 
 Changed items (13):
 
@@ -682,7 +784,7 @@ Seven accepted or rejected Qwen answers carry notes about visible metadata, enve
 
 ### Next steps (proposed)
 
-1. Extend the set with at least 25 likely-wrong answers (recent-only, insufficient-pack and earlier rejected attempts), adjudicated the same way, so false-accept intervals can separate judges. Assembled October 9, 2026 as the 29-item [extension set](#likely-wrong-extension-set-assembled-and-adjudicated-october-9-2026) `jx-6dbd69dec7456178`, with 7 self-correction candidates. The user adjudicated it the same day (25 accepted, 4 rejected), and both prompt sets judged it ([result](#prompt-sets-v3-and-v4-on-79-items-measured-october-9-2026)).
+1. Extend the set with at least 25 likely-wrong answers (recent-only, insufficient-pack and earlier rejected attempts), adjudicated the same way, so false-accept intervals can separate judges. Assembled October 9, 2026 as the 29-item [extension set](#likely-wrong-extension-set-assembled-and-adjudicated-october-9-2026) `jx-6dbd69dec7456178`, with 7 self-correction candidates. The user adjudicated it the same day: 25 accepted and 4 rejected under the withdrawn rule, 5 and 24 in the final reference file. Both prompt sets judged it ([result](#prompt-sets-v3-and-v4-on-79-items-measured-october-9-2026)).
 2. Run the four built judge runners over the 50 items under filled declarations, after authorization.
 3. Re-judge the Qwen-labelled records that inform current claims with the best-calibrated judge.
 
@@ -840,7 +942,8 @@ By sampling stratum:
 
 - **Self-correction stratum.** The four rejects are items 004, 008 and 009 (all three on question gpt4_70e84552) and item-017. The three accepts, items 010, 012 and 022, are all on question 00ca467f. The heuristic flagged them, but the user did not judge them to be self-corrections. The coordinator's summary gave this stratum as 3 rejected and 4 accepted. The file and the score both give 4 rejected (item-017 is a reject in this stratum) and 3 accepted.
 - **Sufficiency against the annotation proxy.** The six sufficient packs are exactly the six items with every annotated turn delivered, so agreement is 29 of 29.
-- **Rejected stratum.** Every prior judge had rejected these 8 answers against the reference. The user accepted all 8 as right given the evidence: 3 are declines and 5 are non-decline answers on insufficient packs.
+- **Rejected stratum.** Every prior judge had rejected these 8 answers against the reference. Under the withdrawn rule the user accepted all 8 as right given the evidence: 3 are declines and 5 are non-decline answers on insufficient packs. In the [final reference adjudication](#decline-rule-reversal-user-decision-october-9-2026-latest) all 8 are rejects.
+- **Use of this export.** The figures above describe the user's export as recorded under the withdrawn rule. The extension's reference adjudication is the final `-reference-v2` file, a verified revision of this export with 20 verdicts flipped to reject (5 accepted, 24 rejected).
 
 ## Prompt sets v3 and v4 on 79 items (measured, October 9, 2026)
 
@@ -856,7 +959,8 @@ The 50-item labels are the existing runs: `labels-vertex-sonnet-v3-r3.json` (`55
 - declarations `declarations/vertex-sonnet-{v3,v4}-x1-r3.json`
 - runs `runs/vertex-sonnet-{v3,v4}-x1-r3/`
 - labels `labels-vertex-sonnet-v3-x1-r3.json` (`d569536a…7842`) and `labels-vertex-sonnet-v4-x1-r3.json` (`a114065c…6294`)
-- score and pooled reports `scores-20261009-decline-rule/`
+- score and pooled reports against the first targets (history): `scores-20261009-decline-rule/`
+- score and pooled reports against the final reference target: `scores-20261009-reference-final/`
 
 **Run.** A standalone access probe and each session's probe returned `reachable` (HTTP 400 on an empty body). Each prompt set made 29 count requests and 87 generations. All 174 replies parsed: bare JSON, `end_turn`, 0 thinking tokens, a mean of 11.3 (v3) and 11.1 (v4) output tokens. Every extension item was unanimous, 3 to 0, under both prompt sets, so there is no `unknown`. Cost:
 
@@ -864,9 +968,48 @@ The 50-item labels are the existing runs: `labels-vertex-sonnet-v3-r3.json` (`55
 - v4: $0.114522 observed (52,431 input and 966 output tokens), $0.160716 reserved under a $0.30 cap.
 - Total: $0.221136, within the authorized $0.60. Request limits were 100 generations and 60 counts per declaration, which allowed one resume. Neither run needed one.
 
-### All 79 items
+### Against the final reference target (rescored offline, October 9, 2026)
 
-Rates are majority-of-three verdicts with 95 percent Wilson intervals.
+The saved labels were rescored with `score` and `pool-scores`, with no model call. The targets were the 50-item v2 file and the extension's final `-reference-v2` file ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)). Both revisions verified against their original exports. The 50-item rows reproduce the earlier records exactly. Rates are majority-of-three verdicts with 95 percent Wilson intervals.
+
+| Items | Measure | Prompt set v3 (default) | Prompt set v4 (candidate) |
+|---|---|---|---|
+| All 79 | Error | 9/79, 11% (6-20%) | 8/79, 10% (5-19%) |
+| | False reject | 3/35, 9% (3-22%) | 6/35, 17% (8-33%) |
+| | False accept | 6/44, 14% (6-27%) | 2/44, 5% (1-15%) |
+| 50-item set (v2) | Error | 2/50, 4% (1-13%) | 2/50, 4% (1-13%) |
+| | False reject / false accept | 1/30 / 1/20 | 2/30 / 0/20 |
+| 29-item extension (final) | Error | 7/29, 24% (12-42%) | 6/29, 21% (10-38%) |
+| | False reject / false accept | 2/5 / 5/24 | 4/5 / 2/24 |
+
+Extension per stratum, each cell error / false reject / false accept:
+
+| Stratum (accept, reject) | v3 | v4 |
+|---|---|---|
+| Self-correction (3, 4) | 4/7, 57% (25-84%) / 1/3 / 3/4 | 3/7, 43% (16-75%) / 3/3 / 0/4 |
+| Rejected (0, 8) | 0/8 / none adjudicated accept / 0/8 | the same as v3 |
+| Recent-only (0, 7) | 1/7, 14% (3-51%) / none / 1/7 | the same as v3 |
+| Insufficient pack (2, 5) | 2/7, 29% (8-64%) / 1/2 / 1/5 | the same as v3 |
+
+Item-level disagreements (IDs only):
+
+- **v3:**
+  - false accepts jc-011, jx-004, jx-008, jx-009, jx-024 and jx-029;
+  - false rejects jc-048, jx-007 and jx-022.
+- **v4:**
+  - false accepts jx-024 and jx-029;
+  - false rejects jc-024, jc-048, jx-007, jx-010, jx-012 and jx-022.
+
+What changed from the first reference target:
+
+- **The six classified items.** Both prompt sets rejected items 003, 005, 013, 014, 019 and 025, so the six flips remove six false rejects from each. False reject falls from 9/41 to 3/35 for v3 and from 12/41 to 6/35 for v4.
+- **False accepts.** The counts are unchanged, over 44 adjudicated rejects instead of 38.
+- **Remaining extension false rejects.** These are jx-007, which both prompt sets reject and the reference classification accepts, and jx-022. v4 adds jx-010 and jx-012.
+- **The two unchecked declines.** jx-024 and jx-029 remain false accepts for both prompt sets. Their flip is unchecked. Excluding them, false accept is 4/42 for v3 and 0/42 for v4.
+
+### All 79 items against the first targets (history)
+
+These figures were measured against the first reference target (the extension's derived file, before the six classified flips) and against the withdrawn evidence-relative target. They are superseded by the [rescoring above](#against-the-final-reference-target-rescored-offline-october-9-2026) and kept as history. Rates are majority-of-three verdicts with 95 percent Wilson intervals.
 
 | Target and grader | Measure | Prompt set v3 (default) | Prompt set v4 (candidate) |
 |---|---|---|---|
@@ -882,24 +1025,24 @@ Rates are majority-of-three verdicts with 95 percent Wilson intervals.
 
 `lexical-with-partial` gives the same combined figures, because both judges already accept item-024, the only partial decline. With the user's own decline list in place of the classifier, an analysis rather than a mode, the combined rule's error would be 15/79 (v3; false reject 11/65, 17%, 10-28%) and 14/79 (v4; false reject 14/65, 22%, 13-33%).
 
-### Per set
+### Per set (history)
 
 | Set, target and grader | v3 error | v3 false reject | v3 false accept | v4 error | v4 false reject | v4 false accept |
 |---|---|---|---|---|---|---|
 | 50 items, reference (v2) | 2/50, 4% (1-13%) | 1/30 | 1/20 | 2/50, 4% (1-13%) | 2/30 | 0/20 |
-| 50 items, evidence-relative (v3), judge | 12/50, 24% (14-37%) | 11/40 | 1/10 | 12/50, 24% (14-37%) | 12/40 | 0/10 |
+| 50 items, evidence-relative (v3, withdrawn), judge | 12/50, 24% (14-37%) | 11/40 | 1/10 | 12/50, 24% (14-37%) | 12/40 | 0/10 |
 | 50 items, evidence-relative, combined | 6/50, 12% (6-24%) | 5/40 | 1/10 | 6/50, 12% (6-24%) | 6/40 | 0/10 |
-| 29 items, reference (derived) | 13/29, 45% (28-62%) | 8/11 | 5/18 | 12/29, 41% (26-59%) | 10/11 | 2/18 |
+| 29 items, first reference (derived) | 13/29, 45% (28-62%) | 8/11 | 5/18 | 12/29, 41% (26-59%) | 10/11 | 2/18 |
 | 29 items, evidence-relative, judge | 23/29, 79% (62-90%) | 20/25 | 3/4 | 22/29, 76% (58-88%) | 22/25 | 0/4 |
 | 29 items, evidence-relative, combined | 14/29, 48% (31-66%) | 11/25 | 3/4 | 13/29, 45% (28-62%) | 13/25 | 0/4 |
 
 The 50-item reference rows reproduce the earlier records exactly.
 
-### Extension per stratum
+### Extension per stratum (history)
 
 Each cell gives error / false reject / false accept.
 
-| Stratum (items) | Reference target, v3 | Reference target, v4 | Evidence-relative judge, v3 and v4 | Evidence-relative combined, v3 and v4 |
+| Stratum (items) | First reference target, v3 | First reference target, v4 | Evidence-relative judge (withdrawn), v3 and v4 | Evidence-relative combined (withdrawn), v3 and v4 |
 |---|---|---|---|---|
 | Self-correction (7: 3 accept, 4 reject) | 4/7, 57% (25-84%) / 1/3 / 3/4 | 3/7, 43% (16-75%) / 3/3 / 0/4 | as the reference target (no declines in this stratum) | as the reference target |
 | Rejected (8) | 5/8, 62% (31-86%) / 5/5 / 0/3 | the same as v3 | 8/8 / 8/8 / none adjudicated reject | 6/8, 75% (41-93%) / 6/8 / none |
@@ -908,14 +1051,14 @@ Each cell gives error / false reject / false accept.
 
 The two prompt sets differ only in the self-correction stratum.
 
-### Item-level disagreements (IDs only)
+### Item-level disagreements against the first targets (IDs only, history)
 
 `jc-` is the 50-item set, `jx-` the extension.
 
-- **Reference target, v3:**
+- **First reference target, v3:**
   - false accepts jc-011, jx-004, jx-008, jx-009, jx-024 and jx-029;
   - false rejects jc-048, jx-003, jx-005, jx-007, jx-013, jx-014, jx-019, jx-022 and jx-025.
-- **Reference target, v4:**
+- **First reference target, v4:**
   - false accepts jx-024 and jx-029;
   - false rejects jc-024, jc-048, jx-003, jx-005, jx-007, jx-010, jx-012, jx-013, jx-014, jx-019, jx-022 and jx-025.
 - **Evidence-relative target, judge alone.** The false accepts are the reference target's self-corrections: jc-011, jx-004, jx-008 and jx-009 for v3, none for v4. The false rejects are the reference target's false rejects plus jc-035 and every accepted decline that both judges reject: jc-002, 012, 014, 015, 023, 025, 031, 038 and 040, and the 12 extension declines other than jx-024 and jx-029 (31 for v3, 34 for v4).
@@ -929,13 +1072,13 @@ The two prompt sets differ only in the self-correction stratum.
 ### Reading and recommendation
 
 - **Self-corrections.** The user rejected six self-corrections across the 79 items: jc-010, jc-011, jx-004, jx-008, jx-009 and jx-017. v4 rejects all six. v3 accepts four of them (jc-011, jx-004, jx-008 and jx-009). Three of those four are on question gpt4_70e84552, which matches the replay finding.
-- **What v4 costs.** v4 also rejects jx-010 and jx-012, two of the three 00ca467f answers the user accepted, and jc-024, a preference answer. Both prompt sets reject jx-022 and jc-048. So v4 trades 4 false accepts for 3 false rejects.
-- **Reference target.** v4's two false accepts are jx-024 and jx-029, the two flipped declines that both prompt sets accept and whose flip is unchecked. On the 77 items whose reference target is undisputed, v4 has 0 false accepts and v3 has 4.
+- **What v4 costs.** v4 also rejects jx-010 and jx-012, two of the three 00ca467f answers the user accepted, and jc-024, a preference answer. Both prompt sets reject jx-007, jx-022 and jc-048. So v4 trades 4 false accepts for 3 false rejects.
+- **Final reference target.** Against it, v3 has 9/79 errors and v4 8/79 ([rescoring](#against-the-final-reference-target-rescored-offline-october-9-2026)). v4's two false accepts are jx-024 and jx-029, the two flipped declines that both prompt sets accept and whose flip is unchecked. On the other 77 items, false accept is 0 of 42 adjudicated rejects for v4 and 4 of 42 for v3.
 - **Statistics.** Every overall interval overlaps, so 79 items do not separate the prompt sets statistically.
-- **Recommendation (the user decides; the default is unchanged).** Use prompt set v4 as the default judge for the reference-correct measure. A false accept inflates an accepted-answer count directly, and v4's false accepts on undisputed items are 0 of 36 against v3's 4 of 36. v4 applies the user's self-correction rule as written. Its extra false rejects fall on one question family and one preference item.
+- **Recommendation (the user decides; the default is unchanged).** Use prompt set v4 as the default judge for the reference-correct measure. A false accept inflates an accepted-answer count directly, and v4's false accepts on the 77 undisputed items are 0 of 42 against v3's 4 of 42. v4 applies the user's self-correction rule as written. Its extra false rejects fall on one question family and one preference item.
 
-  Caveats: the extension's reference-target false rejects are an upper bound (see [Two scoring targets](#two-scoring-targets-and-the-combined-rule-implemented-october-9-2026)), and a change of default is a new judge configuration whose rates are the v4 column above.
-- **Evidence-relative grading.** Neither prompt set grades evidence-relative correctness alone; about half of the evidence-relative accepts are false rejects. The combined rule roughly halves the error, but at 24 to 25 percent it is not adequate as an A2 grader. The decline-classification task or the evidence-aware verdict task [proposed above](#lexical-decline-classifier-against-the-users-labels-measured-october-9-2026) is needed first.
+  Caveat: a change of default is a new judge configuration whose rates are the v4 column of the rescoring.
+- **Evidence-relative grading: withdrawn.** Against that target, neither prompt set graded alone: about half of the evidence-relative accepts were false rejects. The combined rule's 24 to 25 percent error was not adequate either. The user withdrew the target ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)), so no further grader is proposed for it.
 
 ## Default judge (user decision, October 9, 2026)
 
@@ -952,7 +1095,11 @@ The user selected Vertex Sonnet 5.5 as the default evaluation judge. Plan P4 ste
   | False accept | 1/20, 5% (1-24%) |
 
   An accepted-answer count is reported with these rates and the run's capture hash. A count produced without this configuration is a model opinion, as before.
-- **Rates after the extension (October 9, 2026).** These 50-item rates are rates against the reference target. On all 79 items the same configuration has, against the reference target, error 15/79, 19% (12-29%), false reject 9/41 and false accept 6/38, 16% (7-30%). Against the evidence-relative target its error is 35/79 alone and 20/79 with the combined rule. See [Prompt sets v3 and v4 on 79 items](#prompt-sets-v3-and-v4-on-79-items-measured-october-9-2026). Which rates later acceptances carry, and whether the default moves to prompt set v4 (recommended there), is for the user to decide; until then reports may attach both the 50-item and the 79-item reference-target rates.
+- **Rates after the extension (October 9, 2026).** These 50-item rates are against the reference target, the verdict's meaning ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)). On all 79 items, against the final reference target, the same configuration has error 9/79, 11% (6-20%), false reject 3/35, 9% (3-22%), and false accept 6/44, 14% (6-27%). See [the rescoring](#against-the-final-reference-target-rescored-offline-october-9-2026). Two decisions are for the user:
+  - which rates later acceptances carry;
+  - whether the default moves to prompt set v4, which is recommended there.
+
+  Until then reports may attach both the 50-item and the 79-item rates. The earlier 79-item figures (15/79 against the first reference target, and the evidence-relative figures) are superseded.
 - **Known disagreements.** item-011, a self-correction, is rejected by the adjudication, and Sonnet leans toward accepting it. item-048 is a borderline preference answer, accepted by the adjudication and rejected by Sonnet.
 - **Self-correction rule: closed October 9, 2026.** The user decided that self-corrections are rejected ([Self-corrections](#self-corrections-user-decision-october-9-2026)). The default judge's prompt does not state that rule. It accepted 3 of the 4 self-contradicting gpt4_70e84552 replay answers, so its false-accept rate on this kind of answer is probably higher than the calibrated 1/20 suggests. Prompt set v4 adds the rule and is recorded below as a [candidate](#vertex-sonnet-prompt-set-v4-candidate-measured-october-9-2026). The default judge is unchanged until the coordinator and the user decide.
 - **Limits.** The false-accept interval reaches 24 percent. 10 of the 20 adjudicated rejects are declines, which are easy to reject. The set has no Claude-authored answers, so self-preference is untested; see [Self-preference](#self-preference). Each run still needs its own authorization, frozen declaration and spending cap.
@@ -993,11 +1140,13 @@ To start P4 adjudication now (no model calls):
 1. Decided October 8, 2026: apply the upstream LongMemEval tolerances (see [Category tolerances](#category-tolerances-user-decision-october-8-2026)). Still open: whether to adjudicate the two-item correct-plus-unsupported stratum as is or add reviewer-constructed items.
 2. Open `.build/judge-calibration/set-v1-20261008/adjudication-form.html` locally, adjudicate the 50 items, and export the decisions into `.build/judge-calibration/`. A designated reviewer may do this instead; the export records the adjudicator name. Done October 9, 2026, then revised the same day.
 3. Optional: record faithful on the 40 items where it is not adjudicated. The set's original form predates the field; regenerate the form with the `form` command (see [Adjudication format](#adjudication-format)), import the revised file, record faithful, and export. A new export carries no revision block, so keep the revised file as the record of the October 9 changes.
-4. Review the decline-rule follow-up of October 9, 2026 ([decline-rule change](#decline-rule-change-user-decision-october-9-2026-later-the-same-day), [two targets](#two-scoring-targets-and-the-combined-rule-implemented-october-9-2026)):
-   - object to item-035's revert to accept if it should stay a reject;
-   - say whether extension items 024 and 029 are reference-wrong, as the derived reference target assumes;
-   - say whether the 8 non-decline accepts on insufficient packs (003, 005, 007, 013, 014, 019, 023 and 025) agree with the reference;
+4. Open items after the [decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest):
+   - say whether extension items 024 and 029 are reference-wrong, as the final reference file assumes;
    - decide whether prompt set v4 becomes the default judge.
+
+   Settled October 9, 2026:
+   - item-035 is a reject again (v2);
+   - the 8 non-decline accepts on insufficient packs were classified by the coordinator at the user's instruction (6 rejects, 2 accepts), without a form re-grade.
 
 To run judges, each run needs its own authorization. The runners are built; none has run. For every judge: copy its template to `.build/judge-calibration/declarations/`, fill the fields in the table above, run the dry run, run `check-declaration` until it reports `"complete": true`, then authorize and run the execute command.
 
@@ -1025,7 +1174,16 @@ After labels exist, `score` produces the rates. P4 step 3 then selects the judge
 
 ## Verification
 
-- `python3 scripts/test_judge_calibration.py`: 28 synthetic contracts, all passing. Three were added on October 9, 2026 for the decline-rule change:
+- `python3 scripts/test_judge_calibration.py`: 29 synthetic contracts, all passing. One was added on October 9, 2026 for the decline-rule reversal. It covers `merge-regrade`:
+  - the subset-to-source mapping through `source_item_id`, and only verdict, sufficiency, faithful and a non-empty note applied;
+  - an empty re-grade note keeping the earlier note, and the reveal record and unsupported flag unchanged;
+  - the base's `derived` block not copied, and a revision block with the base hash, the reference-agreement rubric, the `regrade` record and one change per changed item, verified by `score --original-adjudications`;
+  - refusal of a mismatched set ID or items hash, an incomplete or partial re-grade, a re-grade with its own revision block, a re-grade that changes nothing, a key naming another set, a remapped, duplicate or unknown source item, and a tampered subset item;
+  - the CLI writing a 0600 file, printing no note text, and refusing an existing destination.
+
+  With the same change, the helper formerly named for the evidence-relative set was renamed `_withdrawn_rule_set`. The code's descriptions now present the reference-agreement target as the rule, and the combined rule as history.
+
+  Three were added earlier on October 9, 2026 for the decline-rule change, which was later withdrawn:
   - the derived reference target: derivation from a v2 export (hash, listed flips, revision block not copied), provenance verified against the source, refusal of unknown, abstention, not-accepted and duplicate items while deriving, and the fixed codes for a changed source hash, an unlisted verdict, note or sufficiency change, a target mismatch, an invalid or extra change field, a duplicate or unknown item, an abstention item, a `revision` block, an invalid block and a v1 file; the CLI writes a 0600 file, prints IDs and hashes only and refuses an existing destination; `score` reports the derivation;
   - the lexical decline classifier equal to `answer_presentation_replay.decline_outcome` (including the 200-character boundary and a typographic apostrophe), and the combined rule: rule accepts only for a lexical decline with gold not delivered whole, abstention left to the judge, a judge tie left `unknown`, the `lexical-with-partial` mode, disagreement IDs, the labels hash, an invalid mode refused, and no answer or note text in the output;
   - `pool-scores`: summed counts and recomputed Wilson intervals over two sets, `set_id:item_id` disagreements, and refusal of a duplicate set, a variant missing from one report and a foreign format.
