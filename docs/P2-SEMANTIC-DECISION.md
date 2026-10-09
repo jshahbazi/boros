@@ -9,11 +9,12 @@ Each section says whether it describes **implemented** code, **measured** result
 - **Measured.** Semantic fusion lowers R2 on both cohorts: development 50/90 against 60/90 for lexical alone, regression 8/12 against 9/12. Searching every chunk instead of a 4,096-chunk prefix changes nothing at cohort scale, because no history has more than 407 eligible vectors. A fusion that cannot displace lexical primaries delivers exactly what lexical alone delivers (60/90, 9/12) and wins no case.
 - **Diagnosis.** Displacement comes from vector coverage, not from semantic-only results. Reciprocal-rank fusion gives a bonus to every lexical hit that has a vector. The English-only gate leaves 96 percent of assistant bytes without a vector. Lexical hits on assistant turns therefore sink below lexical hits ranked 17 to 100 that happen to have vectors.
 - **Recommendation (proposed).** Turn semantic retrieval off the ordinary path and use lexical selection alone. Do not adopt either global variant. Stop spending background maintenance budget on the semantic index for the ordinary path.
+- **Decision (implemented).** On October 8, 2026, the user turned semantic retrieval off for ordinary Send and stopped background semantic indexing. Both are controlled by one policy value. See [Decision](#decision).
 
 ## What was implemented
 
 - `Sources/Boros/GlobalSemanticSearch.swift` adds brute-force cosine search over every eligible published chunk. It is an explicit evaluation option and is not the shipped default. It opens a separate read-only, query-only connection to the semantic sidecar and applies the same eligibility rules as `SemanticIndex.search`, but without the 4,096-row cap. Those rules cover scope, the source frontier, the publication frontier, ready jobs, supported chunks and exclusions. The search reads every row in one deferred read transaction. It decodes each row with the same little-endian float32 layout, unit-norm check and in-order Double dot product, and keeps the best chunk per source. A different encoder identity is refused. So is a population above 1,048,576 rows; the search never truncates. Only the selected results are verified against their original sources and re-read. Vector bytes, metadata rows and the query embedding are charged to the episode lease. The returned manifest is not written to the sidecar, so `SemanticIndex.replay` cannot replay it.
-- `SemanticSearchSelection` reaches `ChatContextPreparation.prepareEvidence` through `AnswerAttemptCoordinator` and `ComponentContextPreparationOperation`. It defaults to `.shipped` at every level, so ordinary Send still calls `SemanticIndex.search` unchanged. `ContextRetrievalStrategy` is unchanged; its public values stay frozen.
+- `SemanticSearchSelection` reaches `ChatContextPreparation.prepareEvidence` through `AnswerAttemptCoordinator` and `ComponentContextPreparationOperation`. It defaults to `.shipped` at every level, so at the time of this measurement ordinary Send still called `SemanticIndex.search` unchanged. The [Decision](#decision) below later removed semantic retrieval from ordinary Send. `ContextRetrievalStrategy` is unchanged; its public values stay frozen.
 - Harness arms `global_hybrid` and `global_fill` select the two modes. The harness also records content-free diagnostics: primary order, exchange-expansion decisions, and the shipped manifest's per-result paths and scores, replayed from each attempt's sidecar.
 - `scripts/semantic_decision_diagnosis.py` computes the diagnosis below from a harness report, the cohort annotations and the cached sidecars. It reads annotations only in the scorer.
 - `scripts/global_semantic_scale.py` with `Tests/Evaluation/GlobalSemanticScale.swift` times the committed search over synthetic sidecars.
@@ -40,7 +41,7 @@ Parameters were declared in `GlobalSemanticSearchParameters` before any developm
 | Arm | Population | Fusion | Lexical window | Parameter digest |
 |---|---|---|---|---|
 | lexical | none | lexical order | 16 | n/a |
-| hybrid (ordinary Send) | first 4,096 eligible chunks in source order | reciprocal rank, constant 60, equal weights; the fused score of each source is the sum over the lexical and semantic lists | 100 | n/a |
+| hybrid (ordinary Send before the decision) | first 4,096 eligible chunks in source order | reciprocal rank, constant 60, equal weights; the fused score of each source is the sum over the lexical and semantic lists | 100 | n/a |
 | global_hybrid | every eligible chunk | same as hybrid | 100 | `dff7d1c9…` |
 | global_fill | every eligible chunk | lexical primaries keep their slots and order; semantic-only sources fill only the slots lexical leaves empty | 16 (the result limit) | `ac77ab20…` |
 
@@ -56,7 +57,7 @@ Implementation: commit `9ca96cd` with a clean tree. Retrieval harness binary SHA
 |---|---:|---:|---:|---:|---:|---:|
 | recent_only | 0/90 | 0/90 | 2/165 | 0/12 | 0/12 | 0/18 |
 | lexical | 60/90 | 60/90 (66.7%) | 119/165 | 9/12 | 9/12 | 15/18 |
-| hybrid (ordinary Send) | 50/90 | 50/90 (55.6%) | 114/165 | 8/12 | 8/12 | 14/18 |
+| hybrid (ordinary Send before the decision) | 50/90 | 50/90 (55.6%) | 114/165 | 8/12 | 8/12 | 14/18 |
 | global_hybrid | 50/90 | 50/90 (55.6%) | 114/165 | 8/12 | 8/12 | 14/18 |
 | global_fill | 60/90 | 60/90 (66.7%) | 119/165 | 9/12 | 9/12 | 15/18 |
 
@@ -203,13 +204,81 @@ Against the gates: L1 has an interim target of 2 s and a release target of 0.5 s
 
 ## Recommendation (proposed)
 
-1. **Turn semantic retrieval off the ordinary path.** Ordinary Send should use the lexical selection that the `lexical` arm measures: hybrid strategy, no semantic index. On both cohorts it is strictly better than the shipped fusion (+10 development cases, +1 regression case, 11/11 assistant recall against 6/11). It is never worse in any category, and it is about 2.2 s faster at p50 per preparation on these histories. This needs a product change outside this package: the GUI and coordinator wiring of `semanticIndex`. This package does not change the shipped default.
+1. **Turn semantic retrieval off the ordinary path.** Ordinary Send should use the lexical selection that the `lexical` arm measures: hybrid strategy, no semantic index. On both cohorts it is strictly better than the shipped fusion (+10 development cases, +1 regression case, 11/11 assistant recall against 6/11). It is never worse in any category, and it is about 2.2 s faster at p50 per preparation on these histories. This needs a product change outside this package: the GUI and coordinator wiring of `semanticIndex`. This package does not change the shipped default. (Adopted; see [Decision](#decision).)
 2. **Do not adopt `global_hybrid`.** On cohort-size histories it is the shipped ranking. Its loss mechanism is the fusion itself, not the population.
 3. **Do not adopt `global_fill`.** It can only match lexical (60/90, 9/12). It won no case in 114 attempts, adds about 0.2 s of search and an encoder call, and fails the default episode budget at about 57,000 events.
 4. **Stop spending background maintenance budget on the semantic index for the ordinary path**, as step 4 directs when fusion does not raise R2. Keep `SemanticIndex` and its contracts for the explicit memory browser and later experiments.
 5. **Step 5 (encoder).** Coverage holes from the English-only gate showed up clearly. About 96 percent of assistant bytes and 25 percent of human bytes have no vector, and they cause the measured fusion losses. But step 5's precondition is that step 4 shows semantic value. Step 4 did not: across 114 attempts, no semantic-only result produced a case that lexical missed. A full-coverage encoder would remove the coverage bias in fusion, but whether semantic recall would then add cases is unmeasured. That decision belongs to the plan owner.
 
 The two fusion wins point at P2 step 3, wider windows and cost-aware packing, rather than at semantic recall. Four of the five recovered turns came from lexical primaries ranked 11 to 16, lost at the 16-slot expansion cap.
+
+## Decision
+
+**User decision, October 8, 2026.** The user accepted recommendations 1 and 4: semantic retrieval is off for ordinary Send, and the application no longer runs background semantic indexing. This section describes **implemented** code and **measured** confirmation; the earlier sections remain the evidence.
+
+### What changed (implemented)
+
+- **One named policy.** `SemanticRetrievalPolicy.ordinarySend` in `Sources/Boros/SemanticRetrievalPolicy.swift` is `.disabledByPolicy`. It governs both decisions below. Setting it to `.enabled` restores fused retrieval on ordinary Send and background semantic maintenance together.
+- **Ordinary Send retrieves lexically.** Every ordinary user-answering path passes the policy:
+  - selected-Qwen GUI Send (`AnswerAttemptCoordinator`, constructed in `BonsaiPlayground.sendSharedAttempt`);
+  - native-profile GUI Send (`ChatContextPreparation.prepare` on the preparation queue);
+  - the `--ui-self-test` observation of that native path, so the check sees what Send does.
+  
+  The coordinator and `ComponentContextPreparationOperation` drop the index when the policy withholds it, and `ChatContextPreparation` ignores any index it is still handed. Preparation is the `lexical` harness arm: the hybrid strategy with no semantic index, the any-term lexical query, primary completion and the v1/16 exchange expansion. No query embedding and no vector read occur.
+- **Honest audits.** Under the policy, the retrieval audit records `"semantic_retrieval": "disabled_by_policy"` next to `"mode": "lexical"`. The audit is persisted with each invocation's admission record. Before this change, a missing index recorded only `"semantic_available": false`, and the status line said "Archive recall used lexical search; semantic recall is unavailable." Under the policy, that notice is no longer shown, because lexical selection is the intended path. The bounded-window notice ("Archive recall inspected a bounded lexical candidate window; additional evidence may remain.") still appears when it applies. `semantic_available: false` is kept for compatibility with existing consumers and remains true as a statement: no index was used. A preparation that receives no index without the policy (for example the `lexical` harness arm or the imported-chat lexical protocol) still reports "unavailable" as before.
+- **No background semantic indexing.** At launch the application no longer constructs `SemanticIndex`. Constructing it ran the metered two-sentence encoder probe and took the sidecar owner lock. Startup and post-Send maintenance triggers no longer schedule semantic work; both go through `ApplicationSemanticMaintenance`. The Background Indexing Status sheet now says "Semantic indexing is turned off by policy. Ordinary Send searches original sources lexically, and no background encoder work is scheduled." It also says that sidecar files from earlier versions remain on disk unused. The durable allowance counters it shows are unchanged.
+- **Harness arm `ordinary_send`.** This arm opens the history's real semantic index and passes it through `SemanticRetrievalPolicy.ordinarySend`, exactly as the GUI does. The report compares it with `lexical` on every history and checks three things: delivered ranges, traced candidates, and the recorded policy.
+- **Contract checks.** Sixteen synthetic contracts in `Sources/Boros/SemanticRetrievalPolicyChecks.swift` run inside `--semantic-self-test`. They cover:
+  - the policy value;
+  - status wording that reports neither failure nor unavailability;
+  - no sidecar, owner lock or probe charge when the application opens under the policy;
+  - no scheduled semantic work: no encoder call and no ledger window;
+  - lexical indexing continuing;
+  - an explicit on-demand build still publishing vectors;
+  - ordinary Send preparation running no semantic search and recording `disabled_by_policy`, with selection identical to the no-index lexical call;
+  - native-profile preparation under the same policy;
+  - the coordinator dropping the index for ordinary Send;
+  - explicit evaluation hybrid still receiving the index, ranking with fusion and writing a manifest;
+  - a missing index without the policy still reported as unavailable.
+
+### What did not change
+
+- `SemanticIndex.swift`, `GlobalSemanticSearch.swift`, the main store schema, the semantic sidecar schema and the background ledger are unchanged. Lexical FTS indexing is synchronous with capture and unaffected.
+- Explicit paths still construct and use an index on demand with the `.enabled` default:
+  - `AnswerEvaluationCommand` hybrid attempts;
+  - the harness `hybrid`, `global_hybrid` and `global_fill` arms;
+  - the imported-chat `hybrid_context` protocol;
+  - `--semantic-self-test` and the background worker suites.
+  
+  `hybrid` still means fused retrieval. `AnswerEvaluationCommand`'s `ordinary-v1` preparation mode still builds an index for hybrid attempts, so its hybrid arm now measures the explicit fused configuration, not shipped Send.
+- The native investigation route never used the semantic index and is unchanged.
+- The Memory source browser uses lexical and literal search only and is unchanged.
+- **Existing vectors are not deleted.** A store that earlier versions indexed keeps its `semantic/` sidecar on disk; the application neither opens nor removes it. Deletion requires its own contract (AGENTS.md). For scale, the cached harness stores hold LongMemEval public histories, not a user store. Across 242 cached histories of 409 to 608 events, the sidecar was 1.8 to 3.0 MB per history (median 2.2 MB). That is about 4.5 KB per event against about 22.7 KB per event for the main store. Each stored vector is 2,048 bytes (512 float32 values). A linear extrapolation to 100,000 events at the current English-only yield gives about 450 MB of sidecar. That figure is an estimate, not a measurement. Backups already exclude the sidecar. A restore therefore no longer rebuilds one in the background under the policy.
+
+### Cost that stops (from existing records)
+
+- **At every launch:** one reserved and armed background work item, the two-sentence public encoder probe (2 encoder calls, 65 input bytes), and opening the sidecar database.
+- **After every Send and at launch:** a scheduled worker slice of up to 128 chunks (`maximumChunksPerRun`). Each chunk is one Apple encoder call over up to 1,024 bytes, a source read and seal under the logical-work recipe, and a vector publication. All of it was charged against the daily allowance in [BACKGROUND-INDEX-BUDGET.md](BACKGROUND-INDEX-BUDGET.md): 4,096 encoder calls, 16 MiB encoder input, 512 MiB logical source work, 32 MiB vector publication, 100,000 metadata rows and 4,096 new source jobs per 24-hour window.
+- **Wall time:** building an index for one roughly 500-event history took 19.2 s (development) and 17.1 s (regression) at p50 in the P1 harness ([RETRIEVAL-HARNESS.md](RETRIEVAL-HARNESS.md)). This is the closest recorded proxy for background work per 500 events.
+- **Not recorded:** energy and physical disk I/O.
+- **Per Send:** hybrid preparation took 2.9 s against 0.65 s for lexical (development p50, above). That difference included one query embedding and the sidecar search, manifest and raw-snapshot writes.
+
+### Measured confirmation
+
+Regression cohort, one replicate, three workers. The run used this change's working tree on top of `dd389da` (the report records `working_tree_modified: true`). Harness binary SHA-256 `994bf9fc…`, build digest `72f31f6a…`, ingestion digest `925bba6e…`. Private report: `.build/evaluation/semantic-off-regression.json`. Editing the harness source changed the store cache key, so all 14 stores were rebuilt; no cache was reused. There were zero preparation failures, zero runner starts and zero refused generation requests.
+
+| Arm | R1 | R2 | Turns whole | Preparation p50 / p95 |
+|---|---:|---:|---:|---|
+| lexical | 9/12 | 9/12 | 15/18 | 626 / 1,016 ms |
+| ordinary_send (GUI configuration, real index withheld by policy) | 9/12 | 9/12 | 15/18 | 629 / 2,497 ms |
+| hybrid (explicit fused retrieval) | 8/12 | 8/12 | 14/18 | 3,013 / 5,136 ms |
+
+`lexical` 9/12 and `hybrid` 8/12 reproduce the earlier records. In all 14 histories, `ordinary_send` matched `lexical` on three counts:
+- the same recent sources and delivered byte ranges;
+- the same traced candidates, with no trace omitted in either arm;
+- a preparation that received no semantic index and recorded `disabled_by_policy` with `mode: lexical`.
+
+The development cohort was not rerun. Its ordinary Send figure, 60/90, is the `lexical` measurement above, and this equivalence is what carries that figure over. The `ordinary_send` p95 includes one slower attempt under three concurrent workers; its median matches `lexical`. Semantic index construction for these stores took 21.0 s at p50 and 25.6 s at p95 per history, 11,180 chunks published in total. That cost is now confined to explicit builds. `python3 scripts/check.py` passes with 4,420 checks. These include the 16 policy contracts and 25 recall-floor comparisons; the floor now holds `ordinary_send` at the lexical figures, 9/12 and 15/18. After P2 step 3 (`b4b5e80`) was merged, a rerun (`.build/evaluation/semantic-off-regression-merged.json`) reproduced the same three figures and the 14/14 equivalence. `check.py` then passed with 4,451 checks.
 
 ## Limits
 

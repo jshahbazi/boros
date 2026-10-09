@@ -95,6 +95,7 @@ final class AnswerAttemptCoordinator {
     private let semanticIndex: SemanticIndex?
     private let retrievalStrategy: ContextRetrievalStrategy
     private let semanticSearch: SemanticSearchSelection
+    private let semanticRetrieval: SemanticRetrievalPolicy
     private let limits: EpisodeLimits
     private let clock: EpisodeClockSource
     private let runner: AnswerAttemptRunning
@@ -131,11 +132,15 @@ final class AnswerAttemptCoordinator {
          semanticQueryUTF8Range: Range<Int>? = nil,
          evidenceSourceIDs: [String]? = nil,
          semanticSearch: SemanticSearchSelection = .shipped,
+         semanticRetrieval: SemanticRetrievalPolicy = .enabled,
          clock: EpisodeClockSource = SystemEpisodeClock(), runner: AnswerAttemptRunning = ModelRunner(),
          onStage: ((AnswerAttemptStage, AnswerAttemptPreparation?) -> Void)? = nil,
          onText: @escaping (String) -> Void, onComplete: @escaping (AnswerAttemptCompletion, String) -> Void) {
         self.store = store; self.conversationID = conversationID; self.projectID = projectID
-        self.prompt = prompt; self.conversation = conversation; self.semanticIndex = semanticIndex
+        // Ordinary Send passes SemanticRetrievalPolicy.ordinarySend; under the
+        // current policy its preparation never receives the index.
+        self.prompt = prompt; self.conversation = conversation; self.semanticIndex = semanticRetrieval.admit(semanticIndex)
+        self.semanticRetrieval = semanticRetrieval
         self.lexicalQueryUTF8Range = lexicalQueryUTF8Range
         self.semanticQueryUTF8Range = semanticQueryUTF8Range
         self.evidenceSourceIDs = evidenceSourceIDs
@@ -204,11 +209,16 @@ final class AnswerAttemptCoordinator {
                     retrievalStrategy: retrievalStrategy, lexicalQueryUTF8Range: lexicalQueryUTF8Range,
                     semanticQueryUTF8Range: semanticQueryUTF8Range,
                     evidenceSourceIDs: evidenceSourceIDs,
-                    episodeLease: lease, semanticSearch: semanticSearch) { [self] in prepared($0) }
+                    episodeLease: lease, semanticSearch: semanticSearch,
+                    semanticRetrieval: semanticRetrieval) { [self] in prepared($0) }
             }
             self.operation = operation; operation.start()
         } catch { finish(failureResult(error)) }
     }
+
+    /// Content-free: whether this attempt's preparation can consult a semantic
+    /// index. False for ordinary Send under the current policy.
+    var preparationReceivesSemanticIndex: Bool { semanticIndex != nil }
 
     func cancel() { terminate(reason: .cancelled) }
 

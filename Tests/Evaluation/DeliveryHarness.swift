@@ -105,7 +105,7 @@ enum DeliveryHarness {
             guard input.version == 1 else { throw Failure.invalid }
             if args[0] == "select" {
                 guard input.declared_source_ids == nil, !input.arms.isEmpty,
-                      input.arms.allSatisfy({ ["recent_only", "lexical", "hybrid"].contains($0) || exchangeLimits($0) != nil || globalArms[$0] != nil }) else { throw Failure.invalid }
+                      input.arms.allSatisfy({ ["recent_only", "lexical", "hybrid", "ordinary_send"].contains($0) || exchangeLimits($0) != nil || globalArms[$0] != nil }) else { throw Failure.invalid }
             } else {
                 guard let ids = input.declared_source_ids, !ids.isEmpty, input.arms == ["declared_sources"] else { throw Failure.invalid }
             }
@@ -237,7 +237,10 @@ enum DeliveryHarness {
                     attributes: [.posixPermissions: 0o700])
                 try FileManager.default.copyItem(at: baselineURL, to: attempt)
                 let owner = try MemoryStore(directory: attempt)
-                let semantic: SemanticIndex? = arm == "hybrid" || globalArms[arm] != nil ? try SemanticIndex(store: owner) : nil
+                // `ordinary_send` opens the history's index too, then passes it
+                // through the ordinary Send policy exactly as the GUI does.
+                let semantic: SemanticIndex? = arm == "hybrid" || arm == "ordinary_send" || globalArms[arm] != nil
+                    ? try SemanticIndex(store: owner) : nil
                 DispatchQueue.main.async { self.attempt(arm: arm, owner: owner, semantic: semantic, directory: attempt, started: armStart) }
             } catch {
                 results.append(["arm": arm, "failure_stage": "setup", "failure": "attempt_setup_failed"])
@@ -260,6 +263,7 @@ enum DeliveryHarness {
                 lexicalQueryUTF8Range: queryRange(question), semanticQueryUTF8Range: queryRange(question),
                 evidenceSourceIDs: arm == "declared_sources" ? input.declared_source_ids : nil,
                 semanticSearch: globalArms[arm].map { SemanticSearchSelection($0) } ?? .shipped,
+                semanticRetrieval: arm == "ordinary_send" ? .ordinarySend : .enabled,
                 runner: runner,
                 onStage: { stage, preparation in
                     // Stop at the answering boundary: the GUI Stop path. The
@@ -275,6 +279,7 @@ enum DeliveryHarness {
                         item["failure_stage"] = captured == nil ? "preparation" : "none"
                         item["episode_state"] = completion.episode?.state.rawValue as Any? ?? NSNull()
                         item["preparation_milliseconds"] = completion.timing.preparationMilliseconds as Any? ?? NSNull()
+                        item["preparation_received_semantic_index"] = coordinatorRef?.preparationReceivesSemanticIndex as Any? ?? NSNull()
                         if let preparation = captured {
                             try self.describe(preparation, episodeID: completion.identifiers.episodeID, owner: owner, into: &item)
                             self.describeSemantic(preparation, arm: arm, semantic: semantic, into: &item)
@@ -340,7 +345,7 @@ enum DeliveryHarness {
             }
             let retrieval = audit["retrieval"] as? [String: Any] ?? [:]
             var summary: [String: Any] = [:]
-            for name in ["mode", "semantic_available", "failure", "coverage_complete", "inspected_sources", "complete_sources",
+            for name in ["mode", "semantic_available", SemanticRetrievalPolicy.auditField, "failure", "coverage_complete", "inspected_sources", "complete_sources",
                          "pending_sources", "unsupported_sources", "failed_sources", "candidate_window_full",
                          "candidate_window_complete", "continuation_available", "query_disposition"] {
                 if let value = retrieval[name] { summary[name] = value }

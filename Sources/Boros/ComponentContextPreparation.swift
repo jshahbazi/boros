@@ -42,6 +42,7 @@ final class ComponentContextPreparationOperation {
     private let semanticIndex: SemanticIndex?
     private let retrievalStrategy: ContextRetrievalStrategy
     private let semanticSearch: SemanticSearchSelection
+    private let semanticRetrieval: SemanticRetrievalPolicy
     private let lease: EpisodeLease
     private let queue = DispatchQueue(label: "Boros.context.components", qos: .userInitiated)
     private let lock = NSLock()
@@ -60,6 +61,7 @@ final class ComponentContextPreparationOperation {
          evidenceSourceIDs: [String]? = nil,
          episodeLease: EpisodeLease, preselectedSnapshot: ContextSnapshot? = nil,
          semanticSearch: SemanticSearchSelection = .shipped,
+         semanticRetrieval: SemanticRetrievalPolicy = .enabled,
          completion: @escaping (Result<PreparedComponentContext, Error>) -> Void) {
         self.store = store; self.conversationID = conversationID; self.projectID = projectID
         self.humanEventID = humanEventID; self.prompt = prompt; self.settings = settings
@@ -67,7 +69,8 @@ final class ComponentContextPreparationOperation {
         self.semanticQueryUTF8Range = semanticQueryUTF8Range
         self.evidenceSourceIDs = evidenceSourceIDs
         self.preselectedSnapshot = preselectedSnapshot
-        self.conversation = conversation; self.semanticIndex = semanticIndex; self.lease = episodeLease
+        self.conversation = conversation; self.semanticIndex = semanticRetrieval.admit(semanticIndex); self.lease = episodeLease
+        self.semanticRetrieval = semanticRetrieval
         self.retrievalStrategy = retrievalStrategy
         self.semanticSearch = semanticSearch
         self.completion = completion
@@ -198,7 +201,7 @@ final class ComponentContextPreparationOperation {
                                     episodeLease: self.lease, lexicalQueryUTF8Range: self.lexicalQueryUTF8Range,
                                     semanticQueryUTF8Range: self.semanticQueryUTF8Range,
                                     evidenceSourceIDs: self.evidenceSourceIDs, componentPolicy: self.policy,
-                                    semanticSearch: self.semanticSearch)
+                                    semanticSearch: self.semanticSearch, semanticRetrieval: self.semanticRetrieval)
                                 self.countEvidence(candidate, recentReceipt: receipt)
                             } else { self.countEvidence(snapshot, recentReceipt: receipt) }
                         }

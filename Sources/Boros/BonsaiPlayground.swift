@@ -514,7 +514,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private func initializeSemanticIndex(memory: MemoryStore) {
         guard semanticIndex == nil else { return }
         do {
-            semanticIndex = try SemanticIndex(store: memory)
+            // Under SemanticRetrievalPolicy.ordinarySend the sidecar is not
+            // opened, so no encoder probe or background semantic work runs.
+            semanticIndex = try ApplicationSemanticMaintenance.openIndex(store: memory)
             semanticInitializationBudgetFailure = nil
         } catch let failure as BackgroundIndexBudgetError {
             semanticInitializationBudgetFailure = failure
@@ -526,13 +528,14 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     }
 
     private func scheduleSemanticMaintenance() {
-        guard !CommandLine.arguments.contains("--ui-self-test"), let store else { return }
+        guard SemanticRetrievalPolicy.ordinarySend.permitsBackgroundIndexing,
+              !CommandLine.arguments.contains("--ui-self-test"), let store else { return }
         if semanticIndex == nil, semanticInitializationBudgetFailure != nil,
            let snapshot = try? store.backgroundBudgetSnapshot(), snapshot.pauseReason != .clockUnavailable,
            snapshot.rolloverEligible || (snapshot.remaining.encoderCalls >= 2 && snapshot.remaining.encoderInputBytes >= 65) {
             initializeSemanticIndex(memory: store)
         }
-        semanticIndex?.schedule(projectID: projectID)
+        ApplicationSemanticMaintenance.schedule(semanticIndex, projectID: projectID)
     }
 
     @objc private func showBackgroundIndexStatus() {
@@ -544,7 +547,9 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             let reason = semanticIndex?.backgroundPauseReason ?? semanticInitializationBudgetFailure?.failureCode
                 ?? snapshot.pauseReason.map { $0 == .exhausted ? BackgroundIndexBudgetError.exhausted.failureCode : BackgroundIndexBudgetError.clockUnavailable.failureCode }
             let state: String
-            if reason == BackgroundIndexBudgetError.adapterViolation.failureCode { state = "Indexing is paused because the semantic encoder failed a verification check." }
+            let semanticIndexing = SemanticRetrievalPolicy.ordinarySend.permitsBackgroundIndexing
+            if !semanticIndexing { state = SemanticRetrievalPolicy.disabledStatus }
+            else if reason == BackgroundIndexBudgetError.adapterViolation.failureCode { state = "Indexing is paused because the semantic encoder failed a verification check." }
             else if reason == BackgroundIndexBudgetError.clockUnavailable.failureCode { state = "Indexing is paused because the clock could not be verified." }
             else if reason != nil && reason != BackgroundIndexBudgetError.exhausted.failureCode { state = "Indexing is paused because maintenance could not be verified." }
             else if snapshot.window == nil { state = "No maintenance allowance has been started." }
@@ -559,7 +564,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                             "Declared source work: \(window.charged.rawSourceBytes) bytes.",
                             "Calls with unknown input-token usage: \(window.unknownEncoderCalls)."]
             }
-            details.append("Semantic coverage may be incomplete. Original sources remain searchable.")
+            details.append(semanticIndexing ? "Semantic coverage may be incomplete. Original sources remain searchable."
+                : SemanticRetrievalPolicy.disabledStorageNote)
             alert.informativeText = details.joined(separator: "\n\n")
         } catch { alert.informativeText = "The maintenance budget could not be verified. Original-source search remains available." }
         alert.beginSheetModal(for: window)
@@ -814,7 +820,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             if CommandLine.arguments.contains("--ui-self-test"), let observe = preparedSendObserverForChecks {
                 let snapshot = try ChatContextPreparation.prepare(store: store, conversationID: activeChat.id,
                     projectID: projectID, prompt: prompt, system: settings.system, excludingEventID: humanID,
-                    semanticIndex: semanticIndex, episodeLease: lease)
+                    semanticIndex: semanticIndex, episodeLease: lease, semanticRetrieval: .ordinarySend)
                 observe(snapshot)
                 _ = try lease.finish(reason: .cancelled)
                 return
@@ -868,9 +874,11 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             let outcome: Result<PreparedEpisodeContext, Error>
             do {
                 _ = try lease.checkActive()
+                // Ordinary Send for native profiles: same policy as the
+                // selected-Qwen path (docs/P2-SEMANTIC-DECISION.md).
                 let snapshot = try ChatContextPreparation.prepare(store: store, conversationID: activeChat.id,
                     projectID: scope, prompt: prompt, system: frozenSettings.system, excludingEventID: humanID,
-                    semanticIndex: index, episodeLease: lease)
+                    semanticIndex: index, episodeLease: lease, semanticRetrieval: .ordinarySend)
                 var preparedSettings = frozenSettings
                 preparedSettings.messagesOverride = snapshot.messages.map { ["role": $0.role, "content": $0.content] }
                 let body: Data
@@ -1002,6 +1010,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private func sendSharedAttempt(prompt: String, settings: GenerationSettings, store: MemoryStore, chat: StoredConversation) {
         let attempt = AnswerAttemptCoordinator(store: store, conversationID: chat.id, projectID: projectID,
             prompt: prompt, settings: settings, conversation: conversation, semanticIndex: semanticIndex,
+            // Ordinary Send: lexical selection by user decision, October 8,
+            // 2026 (docs/P2-SEMANTIC-DECISION.md). The harness `ordinary_send`
+            // arm constructs this same configuration.
+            semanticRetrieval: .ordinarySend,
             runner: runner, onStage: { [weak self] stage, preparation in
                 guard let self, self.generating else { return }
                 self.preparingContext = stage == .preparing

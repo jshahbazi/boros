@@ -375,6 +375,11 @@ def compile_harness(scratch: Path):
     global_semantic = "Sources/Boros/GlobalSemanticSearch.swift"
     if (ROOT / global_semantic).exists():
         relatives.append(global_semantic)
+    # ChatContextPreparation also takes the ordinary Send semantic policy;
+    # the imported-chat protocols pass none and keep the `.enabled` default.
+    semantic_policy = "Sources/Boros/SemanticRetrievalPolicy.swift"
+    if (ROOT / semantic_policy).exists():
+        relatives.append(semantic_policy)
     hashes = {}
     captured = scratch / "source"
     for relative in relatives:
