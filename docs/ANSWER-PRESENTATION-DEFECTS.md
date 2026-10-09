@@ -437,7 +437,9 @@ Inferred, not measured:
 - **Position is not the cause.** V4 does not move the gold excerpt, and V3 used the same excerpt at the same offset.
 - **G and A cannot be separated here.** The quoted user-role presentation of the recent block (fix A) may also weaken the separation between "this conversation" and the historical block. Only a V4-without-G ablation would separate them. The two replays share the recent block, the framing and the question, so they are not independent samples.
 
-### Proposed mitigation (implemented as V5 and tested; not adopted, see [FRAMING-V5.md](FRAMING-V5.md))
+### Proposed mitigation (not implemented)
+
+Update, October 9, 2026: implemented as V5 and tested under the rule below; not adopted. See [FRAMING-V5.md](FRAMING-V5.md).
 
 **Proposal, not implemented.** Reword fix G so that its scope and trigger are explicit. Keep the no-disclaimer clause. For example:
 
