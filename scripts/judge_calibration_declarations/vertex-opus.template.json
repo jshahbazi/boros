@@ -1,5 +1,5 @@
 {
-  "format": "boros-judge-calibration-vertex-declaration-v1",
+  "format": "boros-judge-calibration-vertex-declaration-v2",
   "judge": "vertex-opus",
   "status": "template; not authorized; no call has been made",
   "authorization": {
@@ -22,7 +22,8 @@
     "count_tokens_before_generation": true,
     "refuse_if_counted_cost_exceeds_cap": true,
     "unbilled_access_probe_before_first_generation": true,
-    "extended_thinking": false,
+    "thinking": "omitted-adaptive",
+    "effort": "low",
     "sampling_parameters_sent": [],
     "automatic_retries": 0,
     "stages_per_item": [
@@ -30,7 +31,7 @@
       "verdict"
     ],
     "replicates": 3,
-    "max_output_tokens_per_request": 256,
+    "max_output_tokens_per_request": 2048,
     "max_concurrent_requests": 2,
     "stop_on_first_infrastructure_failure": true
   },
@@ -46,6 +47,11 @@
     "sufficiency_sha256": "c604485853f65670fa54599aceb06f5d152a8798b03dc518cca6de73ec76b857",
     "upstream_protocol_sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
     "source": "scripts/judge_calibration.py JUDGE_PROMPTS (verdict: unchanged upstream LongMemEval QA prompt; sufficiency: new prompt)"
+  },
+  "reply_schemas": {
+    "version": "boros-judge-calibration-reply-schemas-v1",
+    "sha256": "089f6abbd4ee62321396ed07e5929cfe30394cfe04f6c44e9512f60bc3fca549",
+    "transport": "output_config.format, type json_schema"
   },
   "pricing": {
     "input_usd_per_million_tokens": "REQUIRED",

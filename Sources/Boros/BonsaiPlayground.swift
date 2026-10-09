@@ -110,6 +110,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private var conversation = Conversation()
     private var pendingPrompt = ""
     private var pendingResponse = ""
+    // Display only: rendering never changes stored, copied, exported or dispatched text.
+    private var showsOriginalText = false
+    private var pendingMessageLocation: Int?
+    private var pendingVisibleText = ""
+    private var streamingRenderScheduled = false
+    private var streamingRenderInterval: TimeInterval = 0.25
     private var preparedSendObserverForChecks: ((ContextSnapshot) -> Void)?
     private var sharedAttemptObserverForChecks: ((AnswerAttemptCoordinator) -> Void)?
     private var sharedCompletionObserverForChecks: ((AnswerAttemptCompletion) -> Void)?
@@ -142,6 +148,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let conversationLabel = label("Conversation")
         let responseScroll = textArea(editable: false)
         responseView = responseScroll.documentView as? NSTextView
+        if let transcript = responseView as? TranscriptTextView {
+            transcript.originalTextShown = { [weak self] in self?.showsOriginalText ?? false }
+            transcript.toggleOriginalText = { [weak self] in self?.toggleOriginalText(nil) }
+        }
         let composer = NSStackView()
         composer.orientation = .vertical
         composer.alignment = .leading
@@ -222,7 +232,11 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         scroll.hasHorizontalScroller = false
         scroll.borderType = .bezelBorder
         let frame = NSRect(x: 0, y: 0, width: 800, height: 120)
-        let text: NSTextView = editable ? DraftTextView(frame: frame) : NSTextView(frame: frame)
+        // The transcript uses TextKit 1 so rendered text blocks and tables lay out predictably.
+        let text: NSTextView = editable ? DraftTextView(frame: frame) : TranscriptTextView(usingTextLayoutManager: false)
+        text.frame = frame
+        text.isAutomaticLinkDetectionEnabled = false
+        text.isAutomaticDataDetectionEnabled = false
         text.isEditable = editable
         text.isSelectable = true
         text.isRichText = false
@@ -585,10 +599,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             conversationSelector.addItems(withTitles: storedChats.map { "\($0.title) · \(String($0.id.prefix(8)))" })
             conversationSelector.selectItem(at: storedChats.firstIndex(where: { $0.id == activeChat.id }) ?? 0)
             responseView.string = ""
+            pendingMessageLocation = nil
             conversation.reset()
             for event in try store.events(conversationID: activeChat.id) {
                 let speaker = event.role == .human ? "You" : "Assistant · " + event.status.rawValue
-                appendTranscript(speaker + " · " + event.id, body: event.text.isEmpty ? "[No output captured]" : event.text)
+                if event.text.isEmpty { appendTranscript(speaker + " · " + event.id, placeholder: "[No output captured]") }
+                else { appendTranscript(speaker + " · " + event.id, body: event.text, assistant: event.role != .human) }
             }
             restoringDraft = true
             replaceDraft(try store.loadDraft(conversationID: activeChat.id))
@@ -846,8 +862,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         pendingContextSnapshot = nil; pendingNativeConfiguration = nil
         pendingEpisode = lease; pendingAnswerWork = nil; preparingContext = true
         pendingPrompt = prompt; pendingResponse = ""
-        appendTranscript("You", body: prompt)
-        appendTranscript(selectedProfile.speakerName, body: "")
+        appendTranscript("You", body: prompt, assistant: false)
+        beginPendingAssistantMessage()
         replaceDraft("")
         setGenerating(true)
         started = Date()
@@ -1071,8 +1087,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         pendingContextSnapshot = nil; pendingNativeConfiguration = nil; pendingRetrievalNotice = nil
         pendingEpisode = attempt.lease; pendingAnswerWork = nil; preparingContext = true
         pendingPrompt = prompt; pendingResponse = ""
-        appendTranscript("You", body: prompt)
-        appendTranscript(selectedProfile.speakerName, body: "")
+        appendTranscript("You", body: prompt, assistant: false)
+        beginPendingAssistantMessage()
         replaceDraft(""); setGenerating(true); started = Date()
         status.stringValue = "Preparing context…"
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
@@ -1123,7 +1139,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         let scroll = responseView.enclosingScrollView!
         let atBottom = scroll.contentView.bounds.maxY >= responseView.bounds.maxY - 24
         pendingResponse += text
-        responseView.textStorage?.append(NSAttributedString(string: text, attributes: bodyAttributes))
+        pendingVisibleText += text
+        responseView.textStorage?.append(NSAttributedString(string: text,
+            attributes: showsOriginalText ? bodyAttributes : AnswerRendering.proseAttributes))
+        scheduleStreamingRender()
         if atBottom { responseView.scrollRangeToVisible(NSRange(location: responseView.string.utf16.count, length: 0)) }
     }
 
@@ -1183,6 +1202,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             conversation.append(user: pendingPrompt, assistant: pendingResponse)
         } else { replaceDraft(pendingPrompt) }
         persistDraft()
+        renderPendingAssistantMessage()
+        pendingMessageLocation = nil; pendingVisibleText = ""
         if resolved.failure != nil && (!resolved.stopped || resolved.failure == "incomplete_result") {
             responseView.textStorage?.append(NSAttributedString(string: "\n\n" + resolved.message))
         }
@@ -1266,14 +1287,87 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         [.font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular), .foregroundColor: NSColor.textColor]
     }
 
-    private func appendTranscript(_ speaker: String, body: String) {
+    private func appendSpeaker(_ speaker: String) {
         responseView.textStorage?.append(NSAttributedString(string: speaker + "\n", attributes: [
             .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.labelColor
         ]))
+    }
+
+    /// Appends one stored message. The displayed form is a projection; the
+    /// message's original text travels with it for copy and "Show Original Text".
+    private func appendTranscript(_ speaker: String, body: String, assistant: Bool) {
+        appendSpeaker(speaker)
         if !body.isEmpty {
-            responseView.textStorage?.append(NSAttributedString(string: body + "\n\n", attributes: bodyAttributes))
+            responseView.textStorage?.append(AnswerRendering.message(body, assistant: assistant,
+                rendered: !showsOriginalText, rawAttributes: bodyAttributes))
+            responseView.textStorage?.append(NSAttributedString(string: "\n\n", attributes: bodyAttributes))
         }
         responseView.scrollRangeToVisible(NSRange(location: responseView.string.utf16.count, length: 0))
+    }
+
+    private func appendTranscript(_ speaker: String, placeholder: String) {
+        appendSpeaker(speaker)
+        responseView.textStorage?.append(NSAttributedString(string: placeholder + "\n\n", attributes: bodyAttributes))
+        responseView.scrollRangeToVisible(NSRange(location: responseView.string.utf16.count, length: 0))
+    }
+
+    private func beginPendingAssistantMessage() {
+        appendSpeaker(selectedProfile.speakerName)
+        responseView.scrollRangeToVisible(NSRange(location: responseView.string.utf16.count, length: 0))
+        pendingMessageLocation = responseView.textStorage?.length
+        pendingVisibleText = ""
+    }
+
+    /// Replaces the in-progress answer, always the last transcript text, with
+    /// the display form of exactly the deltas already shown.
+    private func renderPendingAssistantMessage() {
+        guard let location = pendingMessageLocation, let storage = responseView.textStorage,
+              location <= storage.length, !pendingVisibleText.isEmpty else { return }
+        storage.replaceCharacters(in: NSRange(location: location, length: storage.length - location),
+            with: AnswerRendering.message(pendingVisibleText, assistant: true, rendered: !showsOriginalText,
+                                          rawAttributes: bodyAttributes))
+    }
+
+    private func scheduleStreamingRender() {
+        guard !showsOriginalText, !streamingRenderScheduled, pendingMessageLocation != nil else { return }
+        streamingRenderScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + streamingRenderInterval) { [weak self] in
+            guard let self else { return }
+            self.streamingRenderScheduled = false
+            guard self.generating, self.pendingMessageLocation != nil else { return }
+            let started = Date()
+            self.renderPendingAssistantMessage()
+            // Long answers re-render less often so streaming stays responsive.
+            self.streamingRenderInterval = max(0.25, Date().timeIntervalSince(started) * 10)
+        }
+    }
+
+    /// Re-renders every displayed message from its original text.
+    private func rerenderTranscript() {
+        guard let storage = responseView.textStorage else { return }
+        let limit = min(pendingMessageLocation ?? storage.length, storage.length)
+        var ranges: [(NSRange, TranscriptMessageSource)] = []
+        storage.enumerateAttribute(.borosMessageSource, in: NSRange(location: 0, length: limit), options: []) { value, range, _ in
+            if let source = value as? TranscriptMessageSource { ranges.append((range, source)) }
+        }
+        var delta = 0
+        storage.beginEditing()
+        for (range, source) in ranges.reversed() {
+            let replacement = AnswerRendering.message(source.text, assistant: source.isAssistant,
+                rendered: !showsOriginalText, rawAttributes: bodyAttributes)
+            storage.replaceCharacters(in: range, with: replacement)
+            delta += replacement.length - range.length
+        }
+        if let location = pendingMessageLocation {
+            pendingMessageLocation = location + delta
+            renderPendingAssistantMessage()
+        }
+        storage.endEditing()
+    }
+
+    @objc private func toggleOriginalText(_ sender: Any?) {
+        showsOriginalText.toggle()
+        rerenderTranscript()
     }
 
     private func replaceDraft(_ text: String) {
@@ -1289,6 +1383,10 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     @objc private func redoEdit(_ sender: Any?) { activeUndoManager?.redo() }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleOriginalText(_:)) {
+            menuItem.state = showsOriginalText ? .on : .off
+            return true
+        }
         if menuItem.action == #selector(showBackgroundIndexStatus) { return memoryHealthy && !archiveOperationInProgress }
         if menuItem.action == #selector(createBackup) || menuItem.action == #selector(restoreBackup) {
             return memoryHealthy && !archiveOperationInProgress
@@ -1721,7 +1819,8 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                     checks[prefix + "_durable_v3_original_input_proof_revalidated"] =
                         (try? revalidateSharedInputProof(store: store, result: result)) == true
                     checks[prefix + "_durable_text_matches_visible_transcript"] = assistant?.text.isEmpty == false
-                        && responseView.string.contains(assistant!.text) && assistant?.status == result.captureStatus
+                        && AnswerRendering.originalText(in: NSRange(location: 0, length: responseView.textStorage!.length),
+                            of: responseView.textStorage!).contains(assistant!.text) && assistant?.status == result.captureStatus
                     checks[prefix + "_operational_outcome"] = result.episode?.state == (cancel ? .cancelled : .completed)
                         && result.captureStatus == (cancel ? .partial : .complete)
                     checks[prefix + "_invalid_json_warning_matches_captured_output"] =
@@ -1755,6 +1854,58 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
             } catch { checks["gui_shared_fixture_setup"] = false; completion(checks) }
         }
         next(cancel: false)
+    }
+
+    /// Synthetic display checks: the transcript renders assistant Markdown,
+    /// while copy, "Show Original Text" and the store keep the exact bytes.
+    private func transcriptRenderingChecks(store: MemoryStore, chat: StoredConversation) throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        let source = "## Synthetic heading\r\n\r\n**Bold** and `code` with $2 \\times 3$, $20 and $30, cited [E1][E2].\n\n```\nlet x = 1\n```\n- item  \n"
+        let human = "Synthetic *literal* human"
+        let turn = UUID().uuidString
+        _ = try store.append(conversationID: chat.id, role: .human, text: human, status: .complete, turnID: turn, eventID: UUID().uuidString)
+        _ = try store.append(conversationID: chat.id, role: .assistant, text: source, status: .complete, turnID: turn, eventID: UUID().uuidString)
+        let priorChat = activeChat
+        activeChat = chat; restoreActiveConversation()
+        let storage = responseView.textStorage!
+        let visible = responseView.string
+        checks["gui_assistant_markdown_rendered"] = !visible.contains("**Bold**") && visible.contains("Bold")
+            && !visible.contains("```") && visible.contains("2 \u{00D7} 3") && visible.contains("$20 and $30")
+            && visible.contains("[E1][E2]") && !visible.contains("## Synthetic")
+        checks["gui_human_text_shown_as_typed"] = visible.contains(human)
+        let original = AnswerRendering.originalText(in: NSRange(location: 0, length: storage.length), of: storage)
+        checks["gui_transcript_original_text_is_exact"] = original.contains(source) && original.contains(human)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("dev.boros.checks." + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        responseView.setSelectedRange(NSRange(location: 0, length: storage.length))
+        let wrote = responseView.writeSelection(to: pasteboard, types: [.string])
+        checks["gui_copy_writes_original_text"] = wrote && pasteboard.string(forType: .string) == original
+        checks["gui_copy_writes_plain_text_only"] = !(pasteboard.types ?? []).contains { $0 == .rtf || $0 == .rtfd || $0 == .html }
+        responseView.setSelectedRange(NSRange(location: 0, length: 0))
+        var remote = false
+        storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length), options: []) { attributes, _, _ in
+            if attributes[.link] != nil || attributes[.attachment] != nil { remote = true }
+        }
+        checks["gui_transcript_has_no_link_or_attachment_attributes"] = !remote
+        toggleOriginalText(nil)
+        checks["gui_show_original_text_displays_stored_bytes"] = showsOriginalText && responseView.string.contains(source)
+        toggleOriginalText(nil)
+        checks["gui_rendered_view_restored_after_toggle"] = !showsOriginalText && responseView.string == visible
+        let viewMenu = NSApplication.shared.mainMenu?.items.first(where: { $0.title == "View" })?.submenu
+        checks["gui_show_original_text_menu_available"] = viewMenu?.items.contains { $0.action == #selector(toggleOriginalText(_:)) } == true
+        beginPendingAssistantMessage()
+        appendVisibleGenerationText("Streaming **bold** ")
+        appendVisibleGenerationText("and $x^2$")
+        let pendingStart = pendingMessageLocation ?? 0
+        renderPendingAssistantMessage()
+        let tail = (responseView.string as NSString).substring(from: pendingStart)
+        checks["gui_streamed_answer_renders_committed_text"] = tail.contains("bold") && !tail.contains("**")
+            && AnswerRendering.originalText(in: NSRange(location: pendingStart, length: storage.length - pendingStart), of: storage)
+                == "Streaming **bold** and $x^2$"
+        pendingMessageLocation = nil; pendingVisibleText = ""; pendingResponse = ""
+        checks["gui_rendering_leaves_store_unchanged"] = try store.events(conversationID: chat.id).suffix(2).map(\.text) == [human, source]
+        activeChat = priorChat; restoreActiveConversation()
+        return checks
     }
 
     func uiChecks() -> [String: Bool] {
@@ -1999,6 +2150,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
                 checks["failed_stream_capture_finalizes_committed_prefix"] = try store.events(conversationID: activeChat.id).last?.text == "Synthetic committed prefix"
                     && store.invocation(id: failedInvocationID)?.terminalReason == .captureFailure
                 checks["api_token_budget_is_explicit_and_enabled"] = endpointTokenLimit.stringValue == "32768" && endpointTokenLimit.isEnabled
+                checks.merge(try transcriptRenderingChecks(store: store, chat: activeChat)) { _, new in new }
             } catch { checks["durable_ui_checks"] = false }
         } else { checks["durable_store_available"] = false }
         checks["new_chat_has_unique_identifier"] = priorChatID != nil
@@ -2071,6 +2223,12 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
         }
         editItem.title = "Edit"; editItem.submenu = editMenu
         menu.addItem(editItem)
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        let original = viewMenu.addItem(withTitle: "Show Original Text", action: #selector(toggleOriginalText(_:)), keyEquivalent: "u")
+        original.target = self; original.keyEquivalentModifierMask = [.command, .option]
+        viewItem.title = "View"; viewItem.submenu = viewMenu
+        menu.addItem(viewItem)
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
@@ -2491,6 +2649,16 @@ private enum BonsaiPlayground {
                 let data = try JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys])
                 print(String(decoding: data, as: UTF8.self)); exit(checks.values.allSatisfy { $0 } ? 0 : 1)
             } catch { print("{\"source_time_self_test\":false}"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--answer-rendering-self-test") {
+            let checks = AnswerRenderingChecks.run()
+            if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.sortedKeys]) { print(String(decoding: data, as: UTF8.self)) }
+            exit(checks.values.allSatisfy { $0 } ? 0 : 1)
+        }
+        if CommandLine.arguments.contains("--answer-rendering-benchmark") {
+            let timings = AnswerRenderingChecks.benchmark()
+            if let data = try? JSONSerialization.data(withJSONObject: timings, options: [.sortedKeys]) { print(String(decoding: data, as: UTF8.self)) }
+            exit(0)
         }
         if CommandLine.arguments.contains("--recent-source-framing-self-test") {
             do {

@@ -1,7 +1,7 @@
 {
-  "format": "boros-judge-calibration-vertex-declaration-v2",
+  "format": "boros-judge-calibration-vertex-declaration-v3",
   "judge": "vertex-sonnet",
-  "status": "template; not authorized; no call has been made",
+  "status": "version 3 template (instructed JSON replies; structured outputs are blocked by organization policy on llm-train-482420); not authorized; no call has been made",
   "authorization": {
     "authorized_by": "REQUIRED",
     "authorized_on": "REQUIRED",
@@ -43,17 +43,23 @@
     "item_count": "REQUIRED"
   },
   "prompts": {
-    "version": "boros-judge-calibration-prompts-v2",
-    "sha256": "1cce15660c8a730df03f5654926356715842e5c5bdbb64709a4a1c6cd1990221",
+    "version": "boros-judge-calibration-prompts-v3",
+    "sha256": "b6bcccc27ac4d16fc9d5cb550d3201c3f56f44a251190087af740180fafd317c",
     "verdict_sha256": "85fa445ad2cda3f103a89828f126834795beffafce991bf676b90531ffc2b40c",
     "sufficiency_sha256": "c604485853f65670fa54599aceb06f5d152a8798b03dc518cca6de73ec76b857",
     "upstream_protocol_sha256": "ecce9c4c79dc89d99534ac17b383a5cbb5b9f0c69ee98adaf0684742e3d95251",
-    "source": "scripts/judge_calibration.py JUDGE_PROMPTS (verdict: unchanged upstream LongMemEval QA prompt; sufficiency: new prompt)"
+    "reply_instructions_sha256": "8ecc9d7d83ede598616631604f3ef92f89c609c507a59c5ea9f1c2097252cbcb",
+    "source": "scripts/judge_calibration.py JUDGE_PROMPTS_V3 (the unchanged v2 verdict and sufficiency prompts plus one reply-format system line per stage from REPLY_INSTRUCTIONS)"
   },
-  "reply_schemas": {
-    "version": "boros-judge-calibration-reply-schemas-v1",
-    "sha256": "089f6abbd4ee62321396ed07e5929cfe30394cfe04f6c44e9512f60bc3fca549",
-    "transport": "output_config.format, type json_schema"
+  "reply_format": {
+    "mode": "instructed-json",
+    "structured_outputs": false,
+    "version": "boros-judge-calibration-reply-instructions-v1",
+    "sha256": "8ecc9d7d83ede598616631604f3ef92f89c609c507a59c5ea9f1c2097252cbcb",
+    "parse_tolerance": [
+      "surrounding_whitespace",
+      "single_markdown_code_fence"
+    ]
   },
   "pricing": {
     "input_usd_per_million_tokens": "REQUIRED",

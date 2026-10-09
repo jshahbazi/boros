@@ -230,3 +230,98 @@ python3 scripts/test_answer_presentation_defects.py
 - The 126 envelope answers cover 21 distinct questions, at temperature 0 with one seed, so repeated runs largely repeat the same behavior. Per-run rates are not independent estimates.
 - Echo rates under the GUI's saved System text, with thinking on, or in multi-turn live chats where stored echoes compound, are unmeasured.
 - Item note topics were derived by keyword match. One note (item-032) matched no presentation keyword.
+
+## Fix E: rendered answer display
+
+**Implemented October 9, 2026, with the user's authorization.** For fix E only, this section supersedes "None is implemented" above. Fixes A, B, C, D, F and G are tracked separately. Fix E changes the display only. It changes no prompt, stored text, export, backup or model request. It does not fix the envelope echo, raw IDs or disclaimers. An echoed header that is rendered is still wrong. The private adjudication form in `scripts/judge_calibration.py` is unchanged.
+
+### What it does
+
+- `Sources/Boros/AnswerRendering.swift` renders assistant messages in the GUI conversation transcript: restored history, the streamed answer and the completed answer. Human messages appear exactly as typed, in the proportional font, and are never parsed. The memory browser still shows paged exact source bytes. It is a source inspector, and a page boundary can split Markdown.
+- **View > Show Original Text** (Option-Command-U) switches the whole transcript between the rendered view and the previous plain monospaced display of the stored bytes. The same toggle is in the transcript's context menu, which also offers **Copy Original Message**.
+- Copy and drag write plain text only, mapped back to the stored text. Every rendered character carries the original UTF-16 span that produced it. Every message carries its complete stored text. If a selection reaches a message's first or last rendered character, it extends to that message's start or end. Selecting a whole message therefore copies its exact bytes, including fences, markers and line endings. A selection inside a message copies the source span it covers. For example, selecting the rendered words "Step one" copies `Step** one`.
+- Rendering only reads stored text. The store, the history sent to the model, backups and the shared-answer capture are untouched. The shared-answer UI integration check now compares the stored answer with the original text behind the display, not with the rendered string.
+- While an answer streams, committed deltas are appended as plain text. The in-progress answer is re-rendered at most every 0.25 s. For long answers, the interval grows to ten times the last render time. On completion, the renderer formats exactly the text already shown.
+
+### Parser and frameworks
+
+Foundation's `AttributedString(markdown:)` handles inline syntax only, resolves reference definitions and gives no source positions. Instead, a small bounded parser was written. It uses only AppKit text classes: `NSAttributedString`, `NSParagraphStyle`, `NSTextBlock` and `NSTextTable` in a TextKit 1 `NSTextView`. No third-party dependency was added. The repository has no `Package.swift`. `scripts/build.py` compiles every `Sources/Boros/*.swift` file with `swiftc` and links only system frameworks.
+
+| Construct | Rendered |
+|---|---|
+| `**bold**`, `*italic*`, `_italic_`, `***both***`, `~~strike~~` | Font traits and strikethrough. Delimiters follow the CommonMark flanking rules, including intraword `_` and the rule of three. A single `~` stays literal, so `~5` is not struck. |
+| `` `code` `` | Monospaced, with a background. Contents are literal. |
+| Fenced code blocks (backtick or tilde) and indented code blocks | Monospaced lines in a full-width shaded block. Info strings are hidden. As in CommonMark, an unclosed fence runs to the end of the answer. |
+| ATX headings `#` to `######` | Bold, at 20, 17, 15 or 13 pt. Setext headings are not supported, so `---` under text is a rule. |
+| Unordered and ordered lists, including nested lists | Bullets (`•`, `◦`, `▪` by depth) with hanging indents. Ordered lists keep the source numbers. A child marker indented less than the parent's content column still nests. An ordered item can interrupt a paragraph only if it starts with `1`. |
+| Block quotes, including nested quotes | Secondary text color, with a left bar. |
+| GitHub tables | `NSTextTable`, with a bold shaded header row and column alignment. Up to 24 columns; wider tables stay plain text. |
+| Thematic breaks | A thin full-width rule. |
+| Line breaks inside a paragraph | Kept as line breaks rather than joined into spaces, so chat text keeps its shape. |
+
+These stay literal text: raw HTML, images (`![...](...)`; nothing loads), reference definitions and reference links, footnotes, task-list checkboxes, setext headings, bare URLs and emoji shortcodes.
+
+### Links
+
+Only inline links `[text](url)` and angle-bracket autolinks `<url>` become clickable. The URL must be absolute `http` or `https`, with a host and no embedded user name or password. With any other destination (`javascript:`, `file:`, `data:`, `mailto:`, relative or scheme-relative), the whole construct stays literal. Links use a private attribute instead of AppKit's `.link`, so AppKit's link handling and link previews never engage. A link opens with `NSWorkspace` only on a single unmodified click that does not drag a selection. Its tooltip shows the full URL. Automatic link and data detection are off. No rendered message has a `.link` or `.attachment` attribute, so nothing loads remotely.
+
+### Citation labels
+
+Host labels such as `[E1]`, from the parallel fix D work, render as plain text. Reference links are not supported, so `[E1]`, `[E1][E2]`, `[E1, E2]`, `[E1] (see above)` and `[E1]: https://...` stay literal. Link-shaped forms whose bracket text contains only citation labels, such as `[E1](https://...)` or `[E1, E2](...)`, also stay literal and are never linked.
+
+### Math heuristic
+
+Math spans use Times New Roman, with letters in italic and other characters upright. Unicode replaces `\times`, `\cdot`, `\div`, `\pm`, comparison and arrow commands, set and logic symbols, Greek letters and common function names. `\frac{a}{b}` becomes `a/b`. A part that is not a single number or a single word gets parentheses, as in `(a+1)/(2b)`. `\sqrt{x}` becomes `√x` or `√(x+1)`. `\binom{n}{k}` becomes `C(n, k)`. `\text{...}` and similar commands become upright text. `^` and `_` arguments use a smaller font with a baseline offset. `\left`, `\right` and sizing commands are dropped. Unknown commands stay literal. This is not TeX layout: there are no stacked fractions, matrices or alignment.
+
+Recognized delimiters are `$$...$$`, `\(...\)` and `\[...\]`. `$$...$$` spans can be up to 4,000 UTF-16 units and are centered when they make up the whole paragraph. Single-dollar `$...$` counts as math only when all of these hold:
+
+1. The opening `$` is unescaped and not part of `$$`. It is not preceded by an ASCII letter or digit, as in `US$5`. It is followed by a non-whitespace character.
+2. The closing `$` is the next unescaped `$`, on the same line and within 400 UTF-16 units. It is preceded by a non-whitespace character and is not followed by a digit or another `$`. If that next `$` fails these tests, the opening `$` is literal.
+3. The content is not prose. Outside TeX command names and `\text{...}`-style arguments, it has fewer than two words of three or more ASCII letters.
+4. If the content starts with a digit and contains whitespace, it must also contain an operator or TeX command (`\ ^ _ = + - * / < > ( ) × · −`). Otherwise it reads as money.
+
+An escaped `\$` is always a literal dollar, and code spans are never math. The synthetic contracts check that these stay unchanged: `$20 and $30`, `It costs $5, $10, and $15.`, `US$5 or US$7`, `$1,000-$2,000`, `$5 per month, i.e. 60$ per year`, `Between $20 and $30 or 5$`, `Pay $20 (about $25) today`, `Cost: $ 5$`, `Totals $12.50/$13.75` and `$$ is slang`. Known limits: `price $5$` renders `5` as math. As in CommonMark, `2*3*4` italicizes the `3`; spaced arithmetic such as `2 * 3 * 4` is unaffected.
+
+### Untrusted input and performance
+
+The parser works line by line, and every scan has a limit: link labels up to 1,000 units, destinations up to 2,048 and inline math up to 400. Containers nest at most 8 levels deep; deeper content appears as plain lines. Unmatched delimiters stay literal. Answers over 400,000 UTF-16 units appear as plain text without parsing. Malformed input never throws. The affected construct falls back to literal text.
+
+Measured on this development Mac with `Boros --answer-rendering-benchmark`. These are synthetic answers with one run each, not a controlled benchmark:
+
+| Synthetic answer (UTF-16 units) | Parse and render | TextKit 1 layout, 800 pt wide |
+|---|---:|---:|
+| 2,360 (10 sections) | 0.032 s | 0.003 s |
+| 24,411 (100 sections) | 0.015 s | 0.017 s |
+| 214,911 (850 sections) | 0.132 s | 0.152 s |
+| 400,224 (over the limit, plain-text fallback) | 0.001 s | not measured |
+
+The first row includes one-time font setup. Each section holds a heading, bold, italic, code, math, dollar amounts, a citation label, nested lists, a quote, a fenced block and a table.
+
+The contracts set these bounds: a synthetic answer of more than 200,000 UTF-16 units, with every construct in each section, renders in under 2 s. An adversarial 300,000-unit delimiter string also renders in under 2 s. The plain-text fallback renders in under 1 s.
+
+### Verification
+
+- `--answer-rendering-self-test` has 61 checks in `Sources/Boros/AnswerRenderingChecks.swift`, run by `scripts/check.py`. They cover:
+  - each construct;
+  - links and unsafe schemes;
+  - images and HTML;
+  - citation labels;
+  - math rendering and the dollar heuristic;
+  - exact original-text recovery for whole and partial selections, including CRLF, combining marks and emoji;
+  - copy through the transcript view to a private pasteboard;
+  - 300 seeded random inputs plus hand-written malformed and pathological inputs;
+  - the absence of remote-capable attributes;
+  - full-width block layout;
+  - the performance bounds.
+- `--ui-self-test` gains 11 GUI checks. They cover:
+  - rendered assistant text and literal human text;
+  - the exact original text behind the transcript;
+  - copy;
+  - the Show Original Text toggle and menu item;
+  - rendering of a streamed answer from committed deltas;
+  - the absence of `.link` and `.attachment` attributes;
+  - unchanged stored events.
+- Visual check. A synthetic OpenAI-style chat was imported with `scripts/import_chat.py` into a scratch store, and the built app was launched on that store. `screencapture` lacked permission, so a temporary hook captured the window offscreen with AppKit's `cacheDisplay`. The hook was removed before commit. No model was called.
+  - Rendered mode showed every construct in the table above, inline and display math, and a clickable `https` link. `$20 and $30` was unchanged and `[E1] and [E2][E3]` appeared as plain text. HTML, image and `javascript:` link text stayed literal.
+  - Original mode reproduced the previous monospaced display of the stored bytes.
+  - The first capture exposed a defect: AppKit text blocks without a set width shrank to one glyph per line. Blocks and tables now fill the available width. A layout contract fails if this regresses; disabling the fix makes it fail.

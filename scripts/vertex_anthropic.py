@@ -28,10 +28,22 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 PROJECT_ID = "llm-train-482420"  # display name "llm-train"
 LOCATION = "global"
 MODEL = "claude-opus-5-5"  # default for existing callers
-# Models a run may select. Sonnet is treated exactly like Opus: no sampling
-# parameter and no extended thinking. Whether Sonnet 5.5 would accept
-# `temperature` was not tested; the adapter never sends it.
+# Models a run may select. By default both are treated alike: no sampling
+# parameter and no `thinking` field. Omitting `thinking` runs adaptive thinking on
+# both models, and its tokens count against `max_tokens` (observed October 9, 2026
+# on Sonnet 5.5 through usage.output_tokens_details.thinking_tokens). The adapter
+# never sends `temperature`, `top_p` or `top_k`.
 MODELS = ("claude-opus-5-5", "claude-sonnet-5-5")
+# Opt-in generation controls (see payload). The defaults send none of them, so
+# existing callers keep their request bodies byte for byte.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# `between_tools` turns thinking off on Sonnet 5.5 only. It takes no other field
+# and is accepted only at effort `high` or below (Sonnet's default effort is high).
+# Opus 5.5 thinking cannot be disabled (`disabled` and `budget_tokens` return
+# HTTP 400); its depth is controlled by `output_config.effort` alone.
+BETWEEN_TOOLS = {"type": "between_tools"}
+BETWEEN_TOOLS_MODELS = ("claude-sonnet-5-5",)
+BETWEEN_TOOLS_EFFORTS = ("low", "medium", "high")
 ANTHROPIC_VERSION = "vertex-2023-10-16"
 # Opus 5.5 rejects `temperature` (HTTP 400, "deprecated for this model"; observed
 # October 8, 2026), so sampling is the provider default and replies are not pinned.
@@ -164,23 +176,87 @@ def _split(messages):
     return "\n\n".join(system), turns
 
 
-def payload(messages, max_tokens):
-    """Generation body. The model is in the URL; no extended thinking or sampling parameter is sent."""
+def _require_schema(schema):
+    """A JSON schema for structured outputs: every object closed with additionalProperties false."""
+    def walk(value, depth=0):
+        require(depth < 32, "output_schema_invalid")
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                require(value.get("additionalProperties") is False and isinstance(value.get("properties"), dict)
+                        and isinstance(value.get("required"), list), "output_schema_invalid")
+            for child in value.values():
+                walk(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, depth + 1)
+        else:
+            require(value is None or isinstance(value, (str, int, float, bool)), "output_schema_invalid")
+    require(isinstance(schema, dict) and schema.get("type") == "object", "output_schema_invalid")
+    walk(schema)
+
+
+def output_format(schema):
+    """`output_config.format` value that constrains the response text to `schema` (structured outputs)."""
+    _require_schema(schema)
+    return {"type": "json_schema", "schema": schema}
+
+
+def generation_controls(model=MODEL, *, thinking=None, effort=None):
+    """Validated opt-in `thinking` and `output_config.effort` for `model`; fixed codes on refusal.
+
+    `thinking` is None (field omitted: adaptive thinking) or exactly {"type": "between_tools"}
+    (Sonnet 5.5 only, at effort high or below). `disabled`, `enabled`, `adaptive` with options and
+    `budget_tokens` are refused. `effort` is None (provider default) or one of EFFORTS.
+    """
+    require_model(model)
+    require(effort is None or effort in EFFORTS, "effort_invalid")
+    if thinking is not None:
+        require(isinstance(thinking, dict) and thinking == BETWEEN_TOOLS, "thinking_invalid")
+        require(model in BETWEEN_TOOLS_MODELS, "thinking_unsupported_for_model")
+        require(effort is None or effort in BETWEEN_TOOLS_EFFORTS, "effort_invalid_with_between_tools")
+    return {"thinking": dict(thinking) if thinking is not None else None, "effort": effort}
+
+
+def payload(messages, max_tokens, *, model=MODEL, schema=None, thinking=None, effort=None):
+    """Generation body. The model is in the URL; no sampling parameter is ever sent.
+
+    Without the keyword options the body is unchanged from earlier versions: no `thinking` and
+    no `output_config` field. The options are opt-in: `schema` adds `output_config.format`
+    (structured outputs); `thinking` and `effort` are validated for `model` by generation_controls.
+    """
     require(type(max_tokens) is int and max_tokens > 0, "output_limit_invalid")
     system, turns = _split(messages)
     body = {"anthropic_version": ANTHROPIC_VERSION, "messages": turns, "max_tokens": max_tokens}
     if system:
         body["system"] = system
+    if schema is None and thinking is None and effort is None:
+        return body
+    controls = generation_controls(model, thinking=thinking, effort=effort)
+    output_config = {}
+    if controls["effort"] is not None:
+        output_config["effort"] = controls["effort"]
+    if schema is not None:
+        output_config["format"] = output_format(schema)
+    if output_config:
+        body["output_config"] = output_config
+    if controls["thinking"] is not None:
+        body["thinking"] = controls["thinking"]
     return body
 
 
-def count_payload(messages, model=MODEL):
-    """Token-count body for exactly the input a generation payload would send."""
+def count_payload(messages, model=MODEL, *, schema=None):
+    """Token-count body for the input a generation payload would send.
+
+    With `schema`, the same `output_config.format` is included, because structured outputs add
+    input tokens. Thinking and effort do not change the input and are not sent to the count endpoint.
+    """
     require_model(model)
     system, turns = _split(messages)
     body = {"anthropic_version": ANTHROPIC_VERSION, "model": model, "messages": turns}
     if system:
         body["system"] = system
+    if schema is not None:
+        body["output_config"] = {"format": output_format(schema)}
     return body
 
 
@@ -220,6 +296,31 @@ def parse_usage(value):
     return {"input_tokens": prompt, "output_tokens": completion, "reasoning_tokens": 0,
             "nonreasoning_output_upper_bound": completion, "cached_input_tokens": read,
             "total_tokens": prompt + completion}
+
+
+def response_metadata(raw):
+    """Stop reason and thinking-token count of a response, or None values. Never raises, never text.
+
+    Thinking tokens come from usage.output_tokens_details.thinking_tokens when the provider reports
+    them. parse_usage keeps reporting reasoning as zero, so existing callers' records are unchanged.
+    """
+    empty = {"stop_reason": None, "thinking_tokens": None}
+    try:
+        value = _strict_json(raw)
+    except VertexError:
+        return empty
+    if not isinstance(value, dict):
+        return empty
+    stop = value.get("stop_reason")
+    usage = value.get("usage") if isinstance(value.get("usage"), dict) else {}
+    details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+    thinking = details.get("thinking_tokens")
+    return {"stop_reason": stop if stop in STOP_REASONS else ("other" if stop is not None else None),
+            "thinking_tokens": thinking if type(thinking) is int and thinking >= 0 else None}
+
+
+# Known stop reasons; any other value is recorded as "other" so receipts carry no provider text.
+STOP_REASONS = ("end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal")
 
 
 def parse_response(raw, model=MODEL):
