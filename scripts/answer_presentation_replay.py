@@ -10,6 +10,10 @@ LongMemEval question-arm cases (docs/ANSWER-PRESENTATION-DEFECTS.md):
   native runs (7 frozen pilot questions from natural-v5, 14 independent questions from
   independent-v1). 42 generations. It measures fix G: declines, AI or memory
   disclaimers, and correct abstentions.
+- ``retrieval-on-21``: the same 21 questions and runner inputs with past-conversation retrieval
+  on. The runner can select only the recorded ``hybrid`` attempt (explicit fused retrieval with
+  the history's semantic index), not the ``lexical`` selection of ordinary Send. 42 generations.
+  It measures whether fix G declines when the delivered evidence holds the gold turns.
 
 Both arms run the same verified binary through the existing ``--answer-evaluation``
 path with the frozen runner input; only the context framing differs (V3 pinned with
@@ -27,7 +31,12 @@ Commands:
 - ``run``: execute the declared runs in order through the local server only. A durable
   ledger refuses any run beyond the declared generation limit.
 - ``measure``: apply the detector in ``answer_presentation_defects.py`` and print counts,
-  identifiers and booleans only.
+  identifiers and booleans only. Each attempt's gold delivery (whole, partial, none) is scored
+  from the runner's own delivered ranges as the retrieval harness scores R2.
+- ``judge-set``: build a private, blinded verdict item set (the calibration item shape, no
+  evidence) from a finished replay, for ``judge_calibration_run.py`` under a verdict-only
+  declaration. ``judge-summary``: join the judge's labels (majority of three, ties ``unknown``)
+  with the measured rows and print IDs, classes and counts only.
 
 Privacy: inputs, answers and native reports stay in the private output directory
 (0700 directories, 0600 files). stdout never carries question, answer, evidence or
@@ -79,6 +88,12 @@ INDEPENDENT_QUESTIONS = ("0862e8bf_abs", "1192316e", "1a1907b4", "1b9b7252", "1f
                          "gpt4_70e84552")
 RECENT_ONLY_CASES = tuple((question_id, "natural-v5", "recent_only", None) for question_id in PILOT_QUESTIONS) \
     + tuple((question_id, "independent-v1", "recent_only", None) for question_id in INDEPENDENT_QUESTIONS)
+# The same 21 questions and frozen runner inputs with past-conversation retrieval on. The
+# answer-evaluation runner can select only the recorded ``hybrid`` attempt: for it, the runner
+# builds the history's semantic index and passes it to the coordinator (explicit fused retrieval,
+# the harness ``hybrid`` arm). It has no option for the ``lexical`` selection that ordinary Send
+# uses since October 8, 2026 (docs/P2-SEMANTIC-DECISION.md).
+RETRIEVAL_ON_CASES = tuple((question_id, run, "hybrid", policy) for question_id, run, _, policy in RECENT_ONLY_CASES)
 # Questions whose saved recent-only answers carried an AI or memory disclaimer.
 DISCLAIMER_QUESTIONS = ("031748ae_abs", "0862e8bf_abs", "1192316e")
 V3 = "context-source-snapshot-v3"
@@ -93,6 +108,28 @@ COHORTS = {
                        "arms": (("v3-pinned", V3), ("v4-default", None)),
                        "authorization": "user, 2026-10-09: up to 42 local generations, local server only; paired V3 "
                                         "versus V4 (default) replay of the recent-only arm on the 21 distinct questions"},
+    "retrieval-on-21": {"cases": RETRIEVAL_ON_CASES, "generation_limit": 42,
+                        "arms": (("v3-pinned", V3), ("v4-default", None)),
+                        "authorization": "user, 2026-10-09: up to 42 local generations (21 questions x 2 framings), "
+                                         "local model server only; paired V3 versus V4 replay of the same 21 questions "
+                                         "with past-conversation retrieval on (lexical if the runner can select it, "
+                                         "else the recorded hybrid arm, stated clearly)"},
+}
+# Arm descriptions recorded in the declaration, per cohort.
+ARM_DESCRIPTIONS = {
+    "echo-7": {"main-v3": "context-source-snapshot-v3, pinned with --context-framing; the framing of main",
+               "fix-v4": "context-source-snapshot-v4 (fixes A, D, G), the new default"},
+    "recent-only-21": {"v3-pinned": "context-source-snapshot-v3, pinned with --context-framing",
+                       "v4-default": "no --context-framing flag: the binary's default, context-source-snapshot-v4 "
+                                     "(fixes A, D, G); the reported framing is verified at measurement"},
+}
+ARM_DESCRIPTIONS["retrieval-on-21"] = dict(ARM_DESCRIPTIONS["recent-only-21"])
+RETRIEVAL_SELECTION = {
+    "echo-7": "the declared attempt's recorded strategy",
+    "recent-only-21": "recent_only attempt: no past-conversation retrieval",
+    "retrieval-on-21": "hybrid attempt: the runner constructs the history's semantic index and passes it to the "
+                       "coordinator (explicit fused retrieval, the retrieval harness hybrid arm). The runner has no "
+                       "option for the lexical selection that ordinary Send uses since 2026-10-08.",
 }
 DETECTOR = ("copied_header", "fabricated_event_ids", "repeated_question", "raw_event_ids", "ai_disclaimer",
             "plain_decline", "latex", "answer_bytes", "answer_words", "addresses_question", "contains_reference",
@@ -198,6 +235,7 @@ def declare(args):
                                                     or {}).get("promptTokens"),
                          "recorded_delivered_recent_sha256": digest(canonical(
                              recorded["metadata"].get("delivered_recent_source_ids") or [])),
+                         "recorded_delivered_ranges_sha256": ranges_digest(recorded["metadata"].get("delivered_ranges")),
                          "abstention": question_id.endswith("_abs"),
                          "recorded_binary_sha256": report["implementation"].get("binary_sha256")})
     configuration = {key: value for key, value in baseline.CONFIGURATION.items() if key != "system"}
@@ -223,9 +261,8 @@ def declare(args):
         "arms": ({"main-v3": "context-source-snapshot-v3, pinned with --context-framing; the framing of main at "
                              + git("rev-parse", "main")[:7],
                   "fix-v4": "context-source-snapshot-v4 (fixes A, D, G), the new default"} if args.cohort == "echo-7" else
-                 {"v3-pinned": "context-source-snapshot-v3, pinned with --context-framing",
-                  "v4-default": "no --context-framing flag: the binary's default, context-source-snapshot-v4 (fixes A, "
-                                "D, G); the reported framing is verified at measurement"}),
+                 dict(ARM_DESCRIPTIONS[args.cohort])),
+        "retrieval_selection": RETRIEVAL_SELECTION[args.cohort],
         "disclaimer_questions": list(DISCLAIMER_QUESTIONS),
         "both_arms_same_binary": True,
         "detector": {"module": "scripts/answer_presentation_defects.py", "tool_version": apd.TOOL_VERSION,
@@ -244,7 +281,14 @@ def declare(args):
                          "outcome": "decline (decline_opening), partial_decline (a plain_decline phrase later "
                                     "in the answer only), or answer (no plain_decline phrase); lexical, not a judge",
                          "delivered_gold_turns": "delivered recent sources whose benchmark turn is marked has_answer",
-                         "delivered_answer_session_sources": "delivered recent sources from a gold answer session"}},
+                         "delivered_answer_session_sources": "delivered recent sources from a gold answer session",
+                         "gold_delivery": "annotated has_answer turns against the attempt's delivered_ranges, scored "
+                                          "by retrieval_harness.coverage: whole (every gold turn's bytes covered), "
+                                          "partial (some gold bytes, not every turn whole), none, or no_gold_turns",
+                         "decline_class": "a decline or partial_decline outcome on an answerable question is "
+                                          "false_decline when gold_delivery is whole, justified_decline when none, "
+                                          "decline_partial_gold when partial; abstention_decline on abstention "
+                                          "questions"}},
         "runs": runs}
     private_write(output / "declaration.json", canonical(declaration) + b"\n")
     private_write(output / "ledger.jsonl", b"")
@@ -343,12 +387,86 @@ def delivered_evidence(history, delivered_ids):
             "delivered_answer_session_sources": sum(1 for label in delivered if label.get("session_id") in gold_sessions)}
 
 
+def ranges_digest(ranges):
+    """Order-independent digest of delivered (event ID, offset, byte length) triples; no text."""
+    triples = sorted([item["event_id"], item["offset"], item["byte_length"]] for item in ranges or [])
+    return digest(canonical(triples))
+
+
+def gold_delivery(history, delivered_ranges):
+    """Content-free delivery of the annotated gold turns, scored as the retrieval harness scores R2.
+
+    The gold turns are the history's source labels marked ``has_answer``. The runner's delivered
+    ranges (historical excerpts and whole recent sources, as byte offset and length) go through
+    ``retrieval_harness.coverage`` unchanged: a turn is delivered whole when the union of its
+    delivered ranges covers all of its UTF-8 bytes, and it has bytes delivered when any range is
+    non-empty. Class: ``whole`` (every gold turn whole), ``partial`` (some gold bytes delivered but
+    not every turn whole), ``none`` (no gold byte delivered) or ``no_gold_turns``.
+    """
+    import retrieval_harness as harness
+    sizes = {event["id"]: len(event["text"].encode()) for event in history["events"]}
+    positives = [label["event_id"] for label in history.get("source_labels") or [] if label.get("has_answer") is True]
+    attempt = {"recent_source_ids": [], "evidence": [
+        {"event_id": item["event_id"], "offset": item["offset"], "bytes": item["byte_length"]}
+        for item in delivered_ranges or []]}
+    whole, partial = harness.coverage(attempt, sizes)
+    delivered_whole = sum(1 for identifier in positives if identifier in whole)
+    any_bytes = sum(1 for identifier in positives if identifier in partial)
+    if not positives:
+        kind = "no_gold_turns"
+    elif delivered_whole == len(positives):
+        kind = "whole"
+    elif any_bytes:
+        kind = "partial"
+    else:
+        kind = "none"
+    return {"gold_turns": len(positives), "gold_turns_whole": delivered_whole, "gold_turns_any_bytes": any_bytes,
+            "gold_delivery": kind}
+
+
+def decline_class(outcome, abstention, delivery):
+    """Lexical decline classified against gold delivery: ``false_decline`` (answerable, every gold turn
+    delivered whole), ``justified_decline`` (answerable, no gold byte delivered),
+    ``decline_partial_gold`` (answerable, some but not all gold delivered), ``abstention_decline``;
+    None when the outcome is not a decline. A partial decline is classified the same way."""
+    if outcome not in ("decline", "partial_decline"):
+        return None
+    if abstention:
+        return "abstention_decline"
+    return {"whole": "false_decline", "none": "justified_decline"}.get(delivery, "decline_partial_gold")
+
+
+def measured_answers(output: Path, dataset: Path):
+    """Per declared run: (declaration entry, frozen history, answer text or None). Private; no output."""
+    declaration = json.loads((output / "declaration.json").read_text())
+    cohort = COHORTS[declaration.get("cohort", "echo-7")]
+    frozen = histories(dataset, [tuple(case) for case in declaration.get("cases") or cohort["cases"]])
+    done = ledger(output)
+    out = []
+    for index, entry in enumerate(declaration["runs"]):
+        history, document, _ = frozen[(entry["question_id"], entry["source_run"])]
+        require(digest(canonical(document)) == entry["runner_input_sha256"], "frozen_input_changed")
+        finished = [row for row in done if row["run"] == index and row.get("invocation_started") is True]
+        native = output / (finished[-1]["directory"] if finished else "missing")
+        answer = None
+        if (native / "report.json").exists():
+            report = json.loads((native / "report.json").read_text())
+            item = [attempt for attempt in report["attempts"] if attempt["ordinal"] == entry["attempt"]][0]
+            path = native / item["answer_file"]
+            answer = path.read_text() if path.exists() else ""
+        out.append((index, entry, history, answer))
+    return declaration, out
+
+
 def measure(args):
-    output = args.output.absolute()
+    print(json.dumps(measurement(args.output.absolute(), args.dataset), indent=1))
+
+
+def measurement(output: Path, dataset: Path):
     declaration = json.loads((output / "declaration.json").read_text())
     cohort_name = declaration.get("cohort", "echo-7")
     cohort = COHORTS[cohort_name]
-    frozen = histories(args.dataset, [tuple(case) for case in declaration.get("cases") or cohort["cases"]])
+    frozen = histories(dataset, [tuple(case) for case in declaration.get("cases") or cohort["cases"]])
     rows = []
     ledger_rows = ledger(output)
     attempts_made = {"answer_generations": sum(1 for row in ledger_rows if row.get("invocation_started") is True),
@@ -387,9 +505,14 @@ def measure(args):
                    delivered_recent_matches_recorded=(digest(canonical(item.get("delivered_recent_source_ids") or []))
                                                       == entry["recorded_delivered_recent_sha256"]
                                                       if "recorded_delivered_recent_sha256" in entry else None),
+                   delivered_ranges_match_recorded=(ranges_digest(item.get("delivered_ranges"))
+                                                    == entry["recorded_delivered_ranges_sha256"]
+                                                    if "recorded_delivered_ranges_sha256" in entry else None),
                    abstention=entry["question_id"].endswith("_abs"),
                    **delivered_evidence(history, item.get("delivered_recent_source_ids")),
+                   **gold_delivery(history, item.get("delivered_ranges")),
                    **measure_answer(answer, probe["prompt"], probe["answer"], known, item.get("citation_labels")))
+        row["decline_class"] = decline_class(row["outcome"], row["abstention"], row["gold_delivery"])
         rows.append(row)
     totals = {}
     for arm, _ in cohort["arms"]:
@@ -398,11 +521,17 @@ def measure(args):
                        **{name: sum(int(row[name]) for row in measured) for name in DETECTOR if name not in ("answer_bytes", "answer_words")},
                        "median_answer_words": sorted(row["answer_words"] for row in measured)[len(measured) // 2] if measured else None}
     groups = {}
-    if cohort_name == "recent-only-21":
+    if cohort_name in ("recent-only-21", "retrieval-on-21"):
         subsets = {"abstention": lambda row: row["abstention"], "answerable": lambda row: not row["abstention"],
-                   "disclaimer_questions": lambda row: row["question_id"] in DISCLAIMER_QUESTIONS,
-                   "answerable_without_delivered_gold": lambda row: not row["abstention"] and not row["delivered_gold_turns"],
-                   "answerable_with_delivered_gold": lambda row: not row["abstention"] and bool(row["delivered_gold_turns"])}
+                   "disclaimer_questions": lambda row: row["question_id"] in DISCLAIMER_QUESTIONS}
+        if cohort_name == "recent-only-21":
+            subsets.update({
+                "answerable_without_delivered_gold": lambda row: not row["abstention"] and not row["delivered_gold_turns"],
+                "answerable_with_delivered_gold": lambda row: not row["abstention"] and bool(row["delivered_gold_turns"])})
+        else:
+            subsets.update({f"answerable_gold_{kind}": (lambda kind: lambda row: not row["abstention"]
+                                                        and row["gold_delivery"] == kind)(kind)
+                            for kind in ("whole", "partial", "none")})
         for arm, _ in cohort["arms"]:
             measured = [row for row in rows if row["arm"] == arm and row.get("status") == "measured"]
             groups[arm] = {name: {"answers": len(chosen),
@@ -413,28 +542,163 @@ def measure(args):
                                   "contains_reference": sum(1 for row in chosen if row["contains_reference"]),
                                   "copied_header": sum(row["copied_header"] for row in chosen),
                                   "with_raw_event_ids": sum(1 for row in chosen if row["raw_event_ids"]),
-                                  "incomplete_result": sum(1 for row in chosen if row["failure"] == "incomplete_result")}
+                                  "incomplete_result": sum(1 for row in chosen if row["failure"] == "incomplete_result"),
+                                  "false_decline": sum(1 for row in chosen if row["decline_class"] == "false_decline"),
+                                  "justified_decline": sum(1 for row in chosen
+                                                           if row["decline_class"] == "justified_decline"),
+                                  "decline_partial_gold": sum(1 for row in chosen
+                                                              if row["decline_class"] == "decline_partial_gold")}
                            for name, test in subsets.items() for chosen in [[row for row in measured if test(row)]]}
-    print(json.dumps({"version": VERSION, "cohort": cohort_name, "ledger": attempts_made, "rows": rows, "totals": totals,
-                      "groups": groups}, indent=1))
+    return {"version": VERSION, "cohort": cohort_name, "ledger": attempts_made, "rows": rows, "totals": totals,
+            "groups": groups}
+
+
+# ----------------------------------------------------------------- verdict judging of replay answers
+
+JUDGE_SET_FORMAT = "boros-answer-replay-judge-set-v1"
+JUDGE_KEY_FORMAT = "boros-answer-replay-judge-key-v1"
+
+
+def judge_items(cohort_name, answered, dataset_records, seed):
+    """Blinded verdict items (judge_calibration item shape) and their private key.
+
+    Items are built exactly as ``judge_calibration.blind_item`` builds calibration items: question,
+    date, type and reference from the pinned dataset record (``attach_question``), the abstention
+    flag, no evidence (the verdict prompt never sees it), and the answer with the same identifier
+    scrub. Item IDs are opaque and their order is a seeded hash order, so arms interleave and the
+    judge never sees the arm, run or question ID. Returns (items document, key document)."""
+    import judge_calibration as jc
+    candidates = []
+    for index, entry, _history, answer in answered:
+        require(answer is not None, "answer_missing")
+        candidate = jc.new_candidate(run=f"replay-{cohort_name}", run_family="answer-presentation-replay",
+                                     arm=entry["arm"], question_id=entry["question_id"], answer_model=MODEL,
+                                     operational_complete=True, answer_sha256=digest(answer.encode()))
+        jc.attach_question(candidate, dataset_records)
+        require(candidate["reference"] is not None, "question_missing_from_dataset")
+        jc.verify_answer(candidate, answer)
+        candidates.append((jc.rank(seed, str(index), entry["question_id"], entry["arm"]), index, entry, candidate))
+    candidates.sort(key=lambda value: value[0])
+    items, keys = [], []
+    for position, (_rank, index, entry, candidate) in enumerate(candidates, start=1):
+        item, replaced = jc.blind_item(candidate, f"item-{position:03d}")
+        items.append(item)
+        keys.append({"item_id": item["item_id"], "run": candidate["run"], "arm": entry["arm"], "run_index": index,
+                     "question_id": entry["question_id"], "abstention": bool(candidate["abstention"]),
+                     "question_type": candidate["question_type"], "answer_sha256": candidate["answer_sha256"],
+                     "item_sha256": digest(canonical(item)), "identifier_substitutions": replaced})
+    set_id = "jr-" + digest(canonical({"seed": seed, "keys": [[key["run_index"], key["answer_sha256"]] for key in
+                                                              sorted(keys, key=lambda key: key["run_index"])]}))[:16]
+    items_document = {"format": jc.ITEMS_FORMAT, "set_id": set_id, "items": items}
+    key_document = {"format": JUDGE_KEY_FORMAT, "set_id": set_id, "seed": seed, "items": keys}
+    require(not jc.blinding_violations(items_document, key_document), "blinding_violation")
+    return items_document, key_document
+
+
+def judge_set(args):
+    """Writes the private verdict item set of a finished replay: items.json, key.json, manifest.json."""
+    import judge_calibration as jc
+    output = args.output.absolute()
+    declaration, answered = measured_answers(output, args.dataset)
+    require(all(answer is not None for _, _, _, answer in answered), "replay_incomplete")
+    seed = digest((output / "declaration.json").read_bytes())
+    items_document, key_document = judge_items(declaration["cohort"], answered, jc.load_dataset(args.dataset), seed)
+    destination = output / "judge-set"
+    jc.make_private_directory(destination, fresh=True)
+    items_sha = jc.write_private_json(destination / "items.json", items_document)
+    key_sha = jc.write_private_json(destination / "key.json", key_document)
+    manifest = {"format": JUDGE_SET_FORMAT, "set_id": items_document["set_id"], "item_count": len(items_document["items"]),
+                "items_sha256": items_sha, "key_sha256": key_sha, "seed": seed, "cohort": declaration["cohort"],
+                "replay_declaration_sha256": seed, "tasks": ["verdict"],
+                "item_builder": "judge_calibration.attach_question + blind_item with no evidence",
+                "identifier_substitutions": sum(entry["identifier_substitutions"] for entry in key_document["items"]),
+                "identity_mention_items": jc.identity_mentions(items_document)}
+    jc.write_private_json(destination / "manifest.json", manifest)
+    print(json.dumps({"set_id": manifest["set_id"], "items": manifest["item_count"], "items_sha256": items_sha,
+                      "key_sha256": key_sha, "identifier_substitutions": manifest["identifier_substitutions"],
+                      "identity_mention_items": len(manifest["identity_mention_items"])}))
+
+
+def majority_of_three(verdicts):
+    """Default-judge vote: accept or reject when at least two of the three replicates agree; a tie or
+    an unparseable majority is ``unknown``, never counted as accept."""
+    require(len(verdicts) == 3, "replicates_not_three")
+    for label in ("accept", "reject"):
+        if sum(1 for value in verdicts if value == label) >= 2:
+            return label
+    return "unknown"
+
+
+def judge_summary_rows(measure_rows, key_document, labels_document):
+    """Joins verdict labels with measured rows by run index. IDs, classes and labels only."""
+    require(labels_document.get("set_id") == key_document["set_id"], "labels_set_mismatch")
+    labels = labels_document["labels"]
+    out = []
+    for key in sorted(key_document["items"], key=lambda key: key["run_index"]):
+        row = measure_rows[key["run_index"]]
+        require(row["question_id"] == key["question_id"] and row["arm"] == key["arm"], "key_row_mismatch")
+        verdicts = [entry.get("verdict") for entry in labels.get(key["item_id"], [{}, {}, {}])]
+        out.append({"question_id": key["question_id"], "arm": key["arm"], "abstention": key["abstention"],
+                    "gold_delivery": row["gold_delivery"], "outcome": row["outcome"],
+                    "decline_class": row["decline_class"], "contains_reference": row["contains_reference"],
+                    "replicate_verdicts": verdicts, "verdict": majority_of_three(verdicts)})
+    return out
+
+
+def judge_tables(rows, arms):
+    def counts(chosen):
+        return {"answers": len(chosen), **{label: sum(1 for row in chosen if row["verdict"] == label)
+                                           for label in ("accept", "reject", "unknown")}}
+    tables = {}
+    for arm in arms:
+        mine = [row for row in rows if row["arm"] == arm]
+        answerable = [row for row in mine if not row["abstention"]]
+        tables[arm] = {"all": counts(mine), "abstention": counts([row for row in mine if row["abstention"]]),
+                       "answerable": counts(answerable),
+                       "answerable_gold_whole": counts([row for row in answerable if row["gold_delivery"] == "whole"]),
+                       "answerable_gold_not_whole": counts([row for row in answerable if row["gold_delivery"] != "whole"]),
+                       "answerable_gold_partial": counts([row for row in answerable if row["gold_delivery"] == "partial"]),
+                       "answerable_gold_none": counts([row for row in answerable if row["gold_delivery"] == "none"]),
+                       "lexical_decline": counts([row for row in mine if row["outcome"] != "answer"]),
+                       "false_decline": counts([row for row in mine if row["decline_class"] == "false_decline"])}
+    return tables
+
+
+def judge_summary(args):
+    import judge_calibration as jc
+    output = args.output.absolute()
+    key_document = jc.load_json(output / "judge-set" / "key.json")
+    labels_document = jc.load_json(args.labels)
+    require(labels_document.get("replicates") == 3 and labels_document.get("complete") is True, "labels_incomplete")
+    measured = measurement(output, args.dataset)
+    rows = judge_summary_rows(measured["rows"], key_document, labels_document)
+    arms = [arm for arm, _ in COHORTS[measured["cohort"]]["arms"]]
+    print(json.dumps({"set_id": key_document["set_id"], "judge": labels_document.get("judge"),
+                      "declaration_sha256": labels_document.get("declaration_sha256"),
+                      "prompts": labels_document.get("prompts"), "rows": rows, "tables": judge_tables(rows, arms)},
+                     indent=1))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("declare", "run", "measure"):
+    for name in ("declare", "run", "measure", "judge-set", "judge-summary"):
         command = commands.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
-        if name in ("declare", "measure"):
+        if name in ("declare", "measure", "judge-set", "judge-summary"):
             command.add_argument("--dataset", type=Path, required=True)
         if name in ("declare", "run"):
             command.add_argument("--binary", type=Path, required=True)
         if name == "declare":
             command.add_argument("--cohort", choices=sorted(COHORTS), default="echo-7")
+        if name == "judge-summary":
+            command.add_argument("--labels", type=Path, required=True)
     args = parser.parse_args(argv)
+    import judge_calibration as jc
     try:
-        {"declare": declare, "run": run, "measure": measure}[args.command](args)
-    except (ReplayError, e.EvaluationError) as error:
+        {"declare": declare, "run": run, "measure": measure, "judge-set": judge_set,
+         "judge-summary": judge_summary}[args.command](args)
+    except (ReplayError, e.EvaluationError, jc.CalibrationError) as error:
         print(json.dumps({"error": str(error)}))
         return 1
     return 0

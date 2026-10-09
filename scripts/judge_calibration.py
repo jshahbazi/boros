@@ -1721,6 +1721,11 @@ LOCAL_JUDGES = ("jevk5", "qwen-local")
 JUDGE_SCORE_NAMES = {"vertex-opus": "vertex-opus", "vertex-sonnet": "vertex-sonnet", "jevk5": "jevk5-mcp",
                      "qwen-local": "qwen-local"}
 STAGES = ("sufficiency", "verdict")
+# A declaration may restrict each item to the verdict task only (for example the default judge,
+# whose sufficiency labels are not used). Prompts, reply format and parsing are unchanged; only
+# the sufficiency requests are left out of the plan.
+VERDICT_ONLY_STAGES = ("verdict",)
+STAGE_PLANS = (STAGES, VERDICT_ONLY_STAGES)
 MAX_REPLICATES = 10
 QWEN_ENDPOINT = "http://127.0.0.1:11234/v1/chat/completions"
 REQUIRED = "REQUIRED"
@@ -1821,8 +1826,14 @@ def _check_vertex_controls(document, model, problems):
         problems.append("stale_field:execution.extended_thinking")
 
 
-def planned_requests(item_count: int, replicates: int) -> int:
-    return item_count * len(STAGES) * replicates
+def declared_stages(document) -> tuple:
+    """The declaration's per-item stages when they are an accepted plan, else both stages."""
+    stages = tuple(((document or {}).get("execution") or {}).get("stages_per_item") or ())
+    return stages if stages in STAGE_PLANS else STAGES
+
+
+def planned_requests(item_count: int, replicates: int, stages=STAGES) -> int:
+    return item_count * len(stages) * replicates
 
 
 def _positive_int(value, maximum=None):
@@ -1857,8 +1868,10 @@ def check_declaration(document, set_dir: Path | None = None):
     replicates = execution.get("replicates")
     if not _positive_int(replicates, MAX_REPLICATES):
         problems.append("replicates")
-    if execution.get("stages_per_item") != list(STAGES):
+    stages_declared = execution.get("stages_per_item")
+    if not (isinstance(stages_declared, list) and tuple(stages_declared) in STAGE_PLANS):
         problems.append("stages")
+    stages = declared_stages(document)
     retries = execution.get("automatic_retries")
     if type(retries) is not int or retries < 0 or type(execution.get("stop_on_first_infrastructure_failure")) is not bool:
         problems.append("execution_contract")
@@ -1932,11 +1945,11 @@ def check_declaration(document, set_dir: Path | None = None):
                 "items_sha256"] or calibration.get("item_count") != manifest["item_count"]:
             problems.append("calibration_set_mismatch")
         if _positive_int(replicates, MAX_REPLICATES):
-            planned = planned_requests(manifest["item_count"], replicates)
+            planned = planned_requests(manifest["item_count"], replicates, stages)
             if vertex:
                 if _positive_int(limits.get("max_generation_requests")) and limits["max_generation_requests"] < planned:
                     problems.append("generation_limit_below_plan")
-                unique = manifest["item_count"] * len(STAGES)
+                unique = manifest["item_count"] * len(stages)
                 if _positive_int(limits.get("max_count_requests")) and limits["max_count_requests"] < unique:
                     problems.append("count_limit_below_plan")
             elif _positive_int(limits.get("max_requests")) and limits["max_requests"] < planned:

@@ -165,16 +165,18 @@ def render(judge, item, stage, prompt_function, declaration):
 
 
 def build_plan(items, declaration, prompt_function):
-    """Deterministic order: replicate, then item ID, then stage (sufficiency before verdict)."""
+    """Deterministic order: replicate, then item ID, then stage (sufficiency before verdict). A
+    verdict-only declaration (``stages_per_item: ["verdict"]``) plans no sufficiency request."""
     judge = declaration["judge"]
+    stages = jc.declared_stages(declaration)
     rendered = {}
     for item in items:
-        for stage in jc.STAGES:
+        for stage in stages:
             rendered[(item["item_id"], stage)] = render(judge, item, stage, prompt_function, declaration)
     plan = []
     for replicate in range(1, declaration["execution"]["replicates"] + 1):
         for item in items:
-            for stage in jc.STAGES:
+            for stage in stages:
                 body, characters, count_body = rendered[(item["item_id"], stage)]
                 plan.append({"request_id": f"{item['item_id']}-{stage}-r{replicate}", "item_id": item["item_id"],
                              "stage": stage, "replicate": replicate, "body": body,
@@ -823,7 +825,7 @@ def dry_run(set_dir: Path, declaration_path: Path, output: Path, prompt_function
     output = jc.check_private_destination(output, root, git_ignore)
     unique = {(entry["item_id"], entry["stage"]): entry for entry in plan}
     by_stage = {}
-    for stage in jc.STAGES:
+    for stage in jc.declared_stages(declaration):
         characters = [entry["characters"] for entry in unique.values() if entry["stage"] == stage]
         by_stage[stage] = {"unique_requests": len(characters),
                            "requests": sum(1 for entry in plan if entry["stage"] == stage),
