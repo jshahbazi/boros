@@ -13,6 +13,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import judge_calibration as jc  # noqa: E402
@@ -298,6 +299,223 @@ class Contracts(unittest.TestCase):
             path.write_text(json.dumps(bad))
             with self.assertRaises(jc.CalibrationError):
                 jc.score(out, path)
+
+    def _revision_pair(self, directory):
+        """Synthetic v1 export and a v2 revision of it that lists every change."""
+        original_decisions = [{"verdict": "accept", "sufficiency": "sufficient", "unsupported_claims": False,
+                               "note": f"synthetic note {i}", "sufficiency_at_reveal": "sufficient",
+                               "revealed": True} for i in range(8)]
+        out, original_path, manifest, ids = self._scored_set(directory, original_decisions)
+        original = json.loads(original_path.read_text())
+        original["format"] = jc.ADJUDICATION_FORMAT_V1
+        original_path.write_text(json.dumps(original))
+        revised = copy.deepcopy(original)
+        revised.update(format=jc.ADJUDICATION_FORMAT, adjudicator="synthetic adjudicator")
+        for decision in revised["decisions"].values():
+            decision["faithful"] = None
+        first, second = ids["00000000"], ids["00000005"]
+        revised["decisions"][first].update(verdict="reject", faithful="yes")
+        revised["decisions"][second].update(verdict="reject", sufficiency="insufficient", faithful="yes")
+        revised["revision"] = {
+            "of_export_sha256": hashlib.sha256(original_path.read_bytes()).hexdigest(),
+            "revised_on": "2026-10-09", "authorized_by": "synthetic", "applied_by": "synthetic",
+            "rubric": "synthetic rubric", "faithful_coverage": "synthetic coverage",
+            "changes": [{"item": first, "verdict": "accept->reject", "faithful": "yes", "reason": "synthetic"},
+                        {"item": second, "verdict": "accept->reject", "sufficiency": "sufficient->insufficient",
+                         "faithful": "yes", "reason": "synthetic"}]}
+        revised_path = Path(directory) / "adjudications-v2.json"
+        revised_path.write_text(json.dumps(revised))
+        return out, original_path, revised_path, revised, manifest, ids
+
+    def test_adjudication_formats_v1_and_v2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out, path, manifest, ids = self._scored_set(directory, [{"verdict": "accept"}] * 8)
+            base = json.loads(path.read_text())
+            for form, faithful, code in (
+                    (jc.ADJUDICATION_FORMAT_V1, None, None),
+                    (jc.ADJUDICATION_FORMAT, None, None),
+                    (jc.ADJUDICATION_FORMAT, "yes", None),
+                    (jc.ADJUDICATION_FORMAT, "unsure", None),
+                    (jc.ADJUDICATION_FORMAT, "maybe", "adjudication_faithful_invalid"),
+                    (jc.ADJUDICATION_FORMAT, True, "adjudication_faithful_invalid"),
+                    (jc.ADJUDICATION_FORMAT_V1, "yes", "adjudication_faithful_requires_v2"),
+                    ("boros-judge-calibration-adjudications-v3", None, "adjudication_format")):
+                document = copy.deepcopy(base)
+                document["format"] = form
+                if faithful is not None or form == jc.ADJUDICATION_FORMAT:
+                    document["decisions"][ids["00000001"]]["faithful"] = faithful
+                path.write_text(json.dumps(document))
+                if code is None:
+                    loaded = jc.read_adjudications(path, manifest)
+                    self.assertEqual(loaded["format"], form)
+                    self.assertIsNone(loaded["revision"])
+                    self.assertEqual(len(loaded["decisions"]), 8)
+                else:
+                    with self.assertRaisesRegex(jc.CalibrationError, f"^{code}$"):
+                        jc.read_adjudications(path, manifest)
+            v1 = dict(copy.deepcopy(base), format=jc.ADJUDICATION_FORMAT_V1, revision={})
+            path.write_text(json.dumps(v1))
+            with self.assertRaisesRegex(jc.CalibrationError, "^adjudication_revision_requires_v2$"):
+                jc.read_adjudications(path, manifest)
+            self.assertIn(jc.ADJUDICATION_FORMAT_V1, jc.ADJUDICATION_FORMATS)
+            self.assertTrue(jc.ADJUDICATION_FORMAT.endswith("-v2"))
+
+    def test_revision_consistency_checks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out, original_path, revised_path, revised, manifest, ids = self._revision_pair(directory)
+            loaded = jc.read_adjudications(revised_path, manifest, original_path)
+            self.assertTrue(loaded["revision"]["original_verified"])
+            self.assertEqual(loaded["revision"]["changed_items"], 2)
+            self.assertEqual(loaded["revision"]["changes_by_field"], {"verdict": 2, "faithful": 2, "sufficiency": 1})
+            self.assertFalse(jc.read_adjudications(revised_path, manifest)["revision"]["original_verified"])
+            first, other = ids["00000000"], ids["00000003"]
+
+            def expect(code, mutate, *, with_original=True):
+                document = copy.deepcopy(revised)
+                mutate(document)
+                revised_path.write_text(json.dumps(document))
+                with self.assertRaisesRegex(jc.CalibrationError, f"^{code}$"):
+                    jc.read_adjudications(revised_path, manifest, original_path if with_original else None)
+
+            expect("adjudication_revision_original_hash",
+                   lambda d: d["revision"].update(of_export_sha256="0" * 64))
+            # A verdict changed on an item the revision does not list.
+            expect("adjudication_revision_unlisted_change",
+                   lambda d: d["decisions"][other].update(verdict="reject"))
+            # A note edited without being listed, and a form-history field changed.
+            expect("adjudication_revision_unlisted_change",
+                   lambda d: d["decisions"][other].update(note="edited"))
+            expect("adjudication_revision_unlisted_change",
+                   lambda d: d["decisions"][other].update(revealed=False))
+            # Faithful set on an item without a listed change.
+            expect("adjudication_revision_unlisted_change",
+                   lambda d: d["decisions"][other].update(faithful="no"))
+            # The listed target differs from the revised file (detectable without the original).
+            expect("adjudication_revision_target_mismatch",
+                   lambda d: d["revision"]["changes"][0].update(faithful="no"), with_original=False)
+            # The listed source differs from the original.
+            expect("adjudication_revision_source_mismatch",
+                   lambda d: d["revision"]["changes"][0].update(verdict="unsure->reject"))
+            # A listed change that did not happen.
+            expect("adjudication_revision_listed_change_absent",
+                   lambda d: d["revision"]["changes"][0].update(unsupported_claims="true->false"))
+            expect("adjudication_revision_listed_change_absent",
+                   lambda d: d["revision"]["changes"][0].update(note="changed"))
+            expect("adjudication_revision_unknown_item",
+                   lambda d: d["revision"]["changes"].append({"item": "item-999", "verdict": "accept->reject"}))
+            expect("adjudication_revision_duplicate_item",
+                   lambda d: d["revision"]["changes"].append(dict(d["revision"]["changes"][0])))
+            for bad in ("accept=>reject", "accept->accept", "accept->maybe", "a->b->c", ""):
+                expect("adjudication_revision_change_invalid",
+                       lambda d, bad=bad: d["revision"]["changes"][0].update(verdict=bad), with_original=False)
+            expect("adjudication_revision_change_invalid",
+                   lambda d: d["revision"]["changes"][0].update(revealed="true->false"), with_original=False)
+            expect("adjudication_revision_invalid", lambda d: d["revision"].update(changes=[]))
+            expect("adjudication_revision_invalid", lambda d: d["revision"].update(revised_on="October 9"))
+            expect("adjudication_revision_invalid", lambda d: d["revision"].pop("authorized_by"))
+            expect("adjudication_revision_missing", lambda d: d.pop("revision"))
+            # A listed note change is accepted when the note did change; its text is never compared.
+            document = copy.deepcopy(revised)
+            document["decisions"][first]["note"] = "edited synthetic note"
+            document["revision"]["changes"][0]["note"] = "changed"
+            revised_path.write_text(json.dumps(document))
+            self.assertEqual(jc.read_adjudications(revised_path, manifest, original_path)["revision"]
+                             ["changes_by_field"]["note"], 1)
+            # The CLI refuses an inconsistent file with exit 1 and the fixed code only.
+            document["decisions"][other]["verdict"] = "reject"
+            revised_path.write_text(json.dumps(document))
+            stdout = io.StringIO()
+            with unittest.mock.patch("sys.stdout", stdout):
+                code = jc.main(["score", "--set", str(out), "--adjudications", str(revised_path),
+                                "--original-adjudications", str(original_path), "--no-prior"])
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(stdout.getvalue()), {"error": "adjudication_revision_unlisted_change"})
+
+    def test_faithful_reporting_stays_out_of_error_rates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out, original_path, revised_path, revised, manifest, ids = self._revision_pair(directory)
+            labels = {"format": jc.LABELS_FORMAT, "set_id": manifest["set_id"], "judge": "vertex-opus",
+                      "labels": {item: {"verdict": "accept"} for item in ids.values()}}
+            label_path = Path(directory) / "labels.json"
+            label_path.write_text(json.dumps(labels))
+            result = jc.score(out, revised_path, [("vertex-opus", str(label_path))],
+                              original_adjudications=original_path)
+            summary = result["adjudication"]
+            self.assertEqual(summary["format"], jc.ADJUDICATION_FORMAT)
+            self.assertEqual(summary["faithful_adjudicated"], 2)
+            self.assertEqual(summary["faithful"], {"yes": 2, "not_adjudicated": 6})
+            self.assertEqual(summary["faithful_set_by_revision"], 2)
+            self.assertEqual(summary["verdict_faithful_sufficiency"],
+                             {"accept/not_adjudicated/sufficient": 6, "reject/yes/sufficient": 1,
+                              "reject/yes/insufficient": 1})
+            self.assertEqual(summary["faithful_by_answerer"], {"openai": {"not_adjudicated": 3, "yes": 1},
+                                                               "qwen": {"not_adjudicated": 3, "yes": 1}})
+            self.assertEqual(summary["faithful_by_category"]["multi-session"], {"yes": 1, "not_adjudicated": 3})
+            self.assertEqual(sum(sum(v.values()) for v in summary["faithful_by_stratum"].values()), 8)
+            self.assertEqual(summary["revision"]["changed_item_ids"], sorted([ids["00000000"], ids["00000005"]]))
+            self.assertNotIn("listed", summary["revision"])
+            # A revision's sufficiency change is not a change after reveal in the form.
+            self.assertEqual(summary["sufficiency_changed_after_reveal"], 0)
+            self.assertEqual(summary["verdict"], {"accept": 6, "reject": 2})
+            # Faithful never enters judge error rates: changing it leaves every rate identical.
+            flipped = copy.deepcopy(revised)
+            flipped.pop("revision")
+            for decision in flipped["decisions"].values():
+                decision["faithful"] = "no"
+            flipped_path = Path(directory) / "flipped.json"
+            flipped_path.write_text(json.dumps(flipped))
+            other = jc.score(out, flipped_path, [("vertex-opus", str(label_path))])
+            column = lambda r: {e["judge"]: e for e in r["candidate_judges"]}["vertex-opus"]  # noqa: E731
+            self.assertEqual(column(result)["grounded"], column(other)["grounded"])
+            self.assertEqual(column(result)["grounded"]["overall"]["false_accept"]["count"], 2)
+            self.assertEqual(other["adjudication"]["faithful"], {"no": 8})
+            self.assertEqual(result["historical_labels"], other["historical_labels"])
+            # Without a revision, a form-side sufficiency change after reveal is still counted.
+            self.assertEqual(other["adjudication"]["sufficiency_changed_after_reveal"], 1)
+            self.assertIn("faithful", result["definitions"])
+            printed = json.dumps(result)
+            self.assertNotIn("synthetic note", printed)
+            self.assertNotIn("synthetic rubric", printed)
+
+    def test_form_records_and_exports_faithful(self):
+        c = candidate("r", "q0000014", "hybrid", None, labels={"x": {"verdict": "accept"}})
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "set"
+            jc.assemble([c], "seed", out, per_stratum=1, minimum=1)
+            form = (out / "adjudication-form.html").read_text()
+            destination = Path(directory) / "forms" / "adjudication-form.html"
+            summary = jc.regenerate_form(out, destination)
+            # Same template and data as at assembly; only the item key order differs (items.json is key-sorted).
+            items_raw = (out / "items.json").read_bytes()
+            self.assertEqual(destination.read_bytes(),
+                             jc.render_form(json.loads(items_raw), hashlib.sha256(items_raw).hexdigest()))
+            data = lambda html: json.loads(re.search(r'id="data">(.*?)</script>', html, re.S).group(1))  # noqa: E731
+            self.assertEqual(data(destination.read_text()), data(form))
+            self.assertEqual(stat.S_IMODE(os.stat(destination).st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(destination.parent).st_mode), 0o700)
+            self.assertEqual(summary["adjudication_format"], jc.ADJUDICATION_FORMAT)
+            self.assertEqual(summary["form_sha256"], hashlib.sha256(destination.read_bytes()).hexdigest())
+            with self.assertRaisesRegex(jc.CalibrationError, "^file_exists$"):
+                jc.regenerate_form(out, destination)
+            with self.assertRaisesRegex(jc.CalibrationError, "^form_output_not_html$"):
+                jc.regenerate_form(out, Path(directory) / "forms" / "form.json")
+            (out / "items.json").chmod(0o600)
+            (out / "items.json").write_text((out / "items.json").read_text() + " ")
+            with self.assertRaisesRegex(jc.CalibrationError, "^items_hash_mismatch$"):
+                jc.regenerate_form(out, Path(directory) / "forms" / "again.html")
+        for value in ("yes", "no", "unsure"):
+            self.assertIn(f'<input type="radio" name="faithful" value="{value}">', form)
+        # Faithful sits in the answer block, which opens only after the reveal.
+        self.assertLess(form.index('id="answerblock"'), form.index('name="faithful"'))
+        self.assertLess(form.index('name="faithful"'), form.index('<fieldset><legend>Note'))
+        self.assertIn("3. Faithful to the evidence", form)
+        self.assertIn("A decline (\"no record of that\") on an answerable question is a reject", form)
+        self.assertIn(f'format:"{jc.ADJUDICATION_FORMAT}"', form)
+        self.assertIn("faithful:FAITHFUL.indexOf(d.faithful) >= 0 ? d.faithful : null", form)
+        self.assertIn(json.dumps(list(jc.ADJUDICATION_FORMATS)) + ".indexOf(parsed.format)", form)
+        self.assertIn("state.decisions = normalized(parsed.decisions)", form)
+        self.assertNotIn("__ADJ_FORMAT", form)
+        self.assertIn("connect-src 'none'", form)
 
     def test_judge_messages_keep_answer_out_of_sufficiency(self):
         c = candidate("r", "q0000011", "hybrid", None, answer="UNIQUE-ANSWER-TOKEN")
