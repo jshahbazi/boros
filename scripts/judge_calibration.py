@@ -19,7 +19,15 @@ Commands:
 - ``score``: compare adjudications (format v1, or v2 with the faithful field and
   an optional revision block) with judge labels (prior labels from the key and
   new label files) and report false-accept and false-reject rates with 95
-  percent Wilson intervals, sufficiency agreement and faithful counts.
+  percent Wilson intervals, sufficiency agreement and faithful counts. A derived
+  reference-target file is checked against its source; ``--combined-rule`` adds
+  the evidence-relative combined rule (judge accept, or a lexical decline when
+  the annotated gold turns were not delivered whole).
+- ``derive-reference``: write the reference target derived from an
+  evidence-relative adjudication: the listed accepted declines on answerable
+  questions become rejects, recorded in a ``derived`` block with the source hash.
+- ``pool-scores``: sum the overall counts of several score reports (one per set)
+  per candidate judge and recompute the rates and intervals.
 - ``check-declaration``: validate a filled judge run declaration (Vertex or local judge).
   The judge runner is ``judge_calibration_run.py``.
 
@@ -1717,7 +1725,55 @@ def error_block(rows):
             "error": rate(false_accepts + false_rejects, len(rows))}
 
 
-def score_judge(name, family, model, labels, key_items, decisions):
+def disagreement_ids(rows):
+    """Item IDs only: false accepts and false rejects."""
+    return {"false_accept": sorted(row["item_id"] for row in rows
+                                   if row["truth"] == "reject" and row["label"] == "accept"),
+            "false_reject": sorted(row["item_id"] for row in rows
+                                   if row["truth"] == "accept" and row["label"] == "reject")}
+
+
+# The combined rule grades "right given the delivered evidence" by machine: a reference-only judge's accept, or
+# an answer the lexical classifier calls a decline on an answerable question whose annotated gold turns were not
+# all delivered whole. Gold delivery is the key's ``all_annotated_delivered`` (dataset annotations and delivery
+# metadata, no judge); abstention questions have no gold turns, so the rule leaves them to the judge.
+COMBINED_RULE = {
+    "version": "boros-judge-calibration-combined-rule-v1",
+    "rule": "accept if the judge accepts, or if the answer is a lexical decline and the annotated gold turns of an "
+            "answerable question were not all delivered whole; otherwise the judge's verdict",
+    "gold": "key all_annotated_delivered is false (answerable questions only)",
+}
+LEXICAL_DECLINE = {
+    "version": "boros-judge-calibration-lexical-decline-v1",
+    "phrases": "answer_presentation_defects.PLAIN_DECLINES",
+    "opening_characters": 200,
+    "rule": "lowercased answer with typographic apostrophes folded; 'decline' when a plain-decline phrase starts "
+            "within the first 200 characters, 'partial_decline' when one occurs only later, else 'answer'; the "
+            "same rule as answer_presentation_replay.decline_outcome",
+}
+COMBINED_DECLINE_OUTCOMES = {"lexical": ("decline",), "lexical-with-partial": ("decline", "partial_decline")}
+
+
+def lexical_decline(answer: str) -> str:
+    """'decline', 'partial_decline' or 'answer' (lexical, not a judge)."""
+    import answer_presentation_defects as apd  # deferred: that module imports this one
+
+    lower = answer.lower().replace("’", "'")
+    positions = [lower.find(phrase) for phrase in apd.PLAIN_DECLINES if phrase in lower]
+    if positions and min(positions) < LEXICAL_DECLINE["opening_characters"]:
+        return "decline"
+    return "partial_decline" if positions else "answer"
+
+
+def combined_verdict(verdict, rule_accept: bool):
+    """The combined rule for one item: the judge's verdict unless the decline-and-gold-missing rule accepts."""
+    if verdict is None:
+        return None
+    return "accept" if rule_accept else verdict
+
+
+def score_judge(name, family, model, labels, key_items, decisions, combined=None):
+    """``combined``: item ID -> True when the combined rule accepts regardless of the judge (score --combined-rule)."""
     by_item = {entry["item_id"]: entry for entry in key_items}
     result = {"judge": name, "family": family, "model": model, "labelled_items": len(labels)}
     if not labels:
@@ -1725,6 +1781,8 @@ def score_judge(name, family, model, labels, key_items, decisions):
         return result
     unknown = no_verdict = 0
     rows = {"grounded": [], "reference_only": []}
+    if combined is not None:
+        rows["combined"] = []
     sufficiency_pairs, agreements = [], []
     for item_id, label in labels.items():
         entry = by_item.get(item_id)
@@ -1745,10 +1803,12 @@ def score_judge(name, family, model, labels, key_items, decisions):
         elif entry["answerer_family"] != "unknown":
             relation = "other_family"
         for variant in rows:
-            expected = truth(decision, variant)
-            if expected is not None and verdict in ("accept", "reject"):
-                rows[variant].append({"truth": expected, "label": verdict, "category": entry["category"],
-                                      "stratum": entry["stratum"], "relation": relation})
+            # The combined rule is graded against the supplied (evidence-relative) adjudication as recorded.
+            expected = truth(decision, "grounded" if variant == "combined" else variant)
+            label = combined_verdict(verdict, combined.get(item_id, False)) if variant == "combined" else verdict
+            if expected is not None and label in ("accept", "reject"):
+                rows[variant].append({"truth": expected, "label": label, "category": entry["category"],
+                                      "stratum": entry["stratum"], "relation": relation, "item_id": item_id})
         adjudicated = decision.get("sufficiency")
         if adjudicated in ("sufficient", "insufficient") and sufficiency in ("sufficient", "insufficient"):
             sufficiency_pairs.append((adjudicated, sufficiency))
@@ -1761,6 +1821,7 @@ def score_judge(name, family, model, labels, key_items, decisions):
             for row in variant_rows:
                 groups[row[dimension]].append(row)
             block[f"by_{dimension}"] = {group: error_block(members) for group, members in sorted(groups.items())}
+        block["disagreements"] = disagreement_ids(variant_rows)
         result[variant] = block
     relations = {row["relation"] for row in rows["grounded"]}
     result["self_preference"] = {
@@ -1896,13 +1957,105 @@ def validate_revision(document, decisions, manifest, original_raw: bytes | None 
             "original_verified": original_verified, "listed": listed}
 
 
-def read_adjudications(path: Path, manifest, original: Path | None = None):
-    """-> {"format", "decisions", "revision"} with the revision checked against the original when given."""
+# A reference-only verdict prompt (prompt sets v2 to v4) never sees the evidence, so it cannot grade "right given
+# the delivered evidence". Its target is derived mechanically from the evidence-relative adjudication.
+REFERENCE_TARGET = "reference"
+REFERENCE_TARGET_RULE = ("identical to the evidence-relative adjudication except that each listed accepted decline "
+                         "on an answerable question is a reject")
+DERIVED_CHANGE = "accept->reject"
+DERIVED_REASON = "accepted decline on an answerable question"
+
+
+def validate_derivation(document, decisions, manifest, key_items=None, source_raw: bytes | None = None):
+    """Check a ``derived`` block (reference target); with the source export, require that the listed verdict
+    flips are exactly the difference. Returns a content-free summary."""
+    derived = document.get("derived")
+    require(isinstance(derived, dict), "adjudication_derived_invalid")
+    require("revision" not in document, "adjudication_derived_with_revision")
+    require(document.get("format") == ADJUDICATION_FORMAT, "adjudication_derived_invalid")
+    require(derived.get("target") == REFERENCE_TARGET, "adjudication_derived_invalid")
+    require(isinstance(derived.get("of_export_sha256"), str) and SHA256_TEXT.match(derived["of_export_sha256"]),
+            "adjudication_derived_invalid")
+    require(isinstance(derived.get("derived_on"), str) and ISO_DATE.match(derived["derived_on"]),
+            "adjudication_derived_invalid")
+    for field in ("applied_by", "rule"):
+        require(isinstance(derived.get(field), str) and derived[field].strip(), "adjudication_derived_invalid")
+    changes = derived.get("changes")
+    require(isinstance(changes, list) and changes, "adjudication_derived_invalid")
+    abstention = {entry["item_id"]: entry["abstention"] for entry in key_items or []}
+    listed = []
+    for change in changes:
+        require(isinstance(change, dict) and set(change) <= {"item", "verdict", "reason"},
+                "adjudication_derived_change_invalid")
+        item = change.get("item")
+        require(isinstance(item, str) and item in decisions, "adjudication_derived_unknown_item")
+        require(item not in listed, "adjudication_derived_duplicate_item")
+        require(change.get("verdict") == DERIVED_CHANGE and isinstance(change.get("reason", ""), str),
+                "adjudication_derived_change_invalid")
+        require(decisions[item].get("verdict") == "reject", "adjudication_derived_target_mismatch")
+        if key_items is not None:
+            require(abstention.get(item) is False, "adjudication_derived_item_abstention")
+        listed.append(item)
+    source_verified = False
+    if source_raw is not None:
+        require(sha256_bytes(source_raw) == derived["of_export_sha256"], "adjudication_derived_source_hash")
+        try:
+            source_document = json.loads(source_raw)
+        except ValueError as error:
+            raise CalibrationError("adjudication_derived_source_invalid") from error
+        require("derived" not in source_document, "adjudication_derived_source_invalid")
+        _, source = validate_adjudication_document(source_document, manifest)
+        require(set(source) == set(decisions), "adjudication_derived_unlisted_change")
+        for item, after in decisions.items():
+            before = source[item]
+            if item in listed:
+                require(before.get("verdict") == "accept", "adjudication_derived_source_mismatch")
+                before = dict(before, verdict="reject")
+            require(before == after, "adjudication_derived_unlisted_change")
+        source_verified = True
+    return {"target": REFERENCE_TARGET, "of_export_sha256": derived["of_export_sha256"],
+            "derived_on": derived["derived_on"], "changed_item_ids": sorted(listed),
+            "source_verified": source_verified}
+
+
+def derive_reference_target(set_dir: Path, source: Path, decline_items, *, applied_by: str, derived_on: str):
+    """The reference target as a v2 adjudication document with a ``derived`` block (nothing is written)."""
+    manifest = load_json(set_dir / "manifest.json")
+    key = load_json(set_dir / "key.json")
+    require(key["set_id"] == manifest["set_id"], "key_set_mismatch")
+    raw = source.read_bytes()
+    document = json.loads(raw)
+    form, decisions = validate_adjudication_document(document, manifest)
+    require(form == ADJUDICATION_FORMAT and "derived" not in document, "adjudication_derived_source_invalid")
+    require(decline_items and len(set(decline_items)) == len(decline_items), "derived_items_invalid")
+    abstention = {entry["item_id"]: entry["abstention"] for entry in key["items"]}
+    for item in decline_items:
+        require(item in decisions, "adjudication_derived_unknown_item")
+        require(abstention.get(item) is False, "adjudication_derived_item_abstention")
+        require(decisions[item].get("verdict") == "accept", "adjudication_derived_source_mismatch")
+    derived = json.loads(raw)
+    derived.pop("revision", None)  # the source keeps its own revision record; the block names the source hash
+    for item in decline_items:
+        derived["decisions"][item]["verdict"] = "reject"
+    derived["derived"] = {"target": REFERENCE_TARGET, "of_export_sha256": sha256_bytes(raw),
+                          "derived_on": derived_on, "applied_by": applied_by, "rule": REFERENCE_TARGET_RULE,
+                          "changes": [{"item": item, "verdict": DERIVED_CHANGE, "reason": DERIVED_REASON}
+                                      for item in sorted(decline_items)]}
+    validate_derivation(derived, derived["decisions"], manifest, key["items"], raw)
+    return derived
+
+
+def read_adjudications(path: Path, manifest, original: Path | None = None, key_items=None):
+    """-> {"format", "decisions", "revision", "derived"}. ``original`` is the export a revision names, or the
+    source of a derived reference target; either is then checked against it."""
     document = load_json(path)
     form, decisions = validate_adjudication_document(document, manifest)
     original_raw = original.read_bytes() if original is not None else None
+    if "derived" in document:
+        derived = validate_derivation(document, decisions, manifest, key_items, original_raw)
+        return {"format": form, "decisions": decisions, "revision": None, "derived": derived}
     revision = validate_revision(document, decisions, manifest, original_raw)
-    return {"format": form, "decisions": decisions, "revision": revision}
+    return {"format": form, "decisions": decisions, "revision": revision, "derived": None}
 
 
 def load_adjudications(path: Path, manifest, original: Path | None = None):
@@ -1969,16 +2122,40 @@ def separable(results):
     return pairs
 
 
+def combined_rule_inputs(set_dir: Path, key_items, mode: str):
+    """-> (item ID -> rule accepts, content-free summary). Answers are read from items.json; only IDs leave."""
+    require(mode in COMBINED_DECLINE_OUTCOMES, "combined_rule_invalid")
+    items = {item["item_id"]: item for item in load_json(set_dir / "items.json")["items"]}
+    outcomes, gold_missing = {}, set()
+    for entry in key_items:
+        item_id = entry["item_id"]
+        outcomes[item_id] = lexical_decline(items[item_id]["answer"])
+        if not entry["abstention"] and entry.get("all_annotated_delivered") is False:
+            gold_missing.add(item_id)
+    counted = COMBINED_DECLINE_OUTCOMES[mode]
+    accepts = {item_id: outcomes[item_id] in counted and item_id in gold_missing for item_id in outcomes}
+    summary = {**COMBINED_RULE, "decline_classifier": LEXICAL_DECLINE, "mode": mode, "decline_outcomes_counted":
+               list(counted),
+               "lexical_decline_items": sorted(i for i, o in outcomes.items() if o == "decline"),
+               "lexical_partial_decline_items": sorted(i for i, o in outcomes.items() if o == "partial_decline"),
+               "gold_not_whole_items": sorted(gold_missing),
+               "rule_accept_items": sorted(i for i, accepted in accepts.items() if accepted)}
+    return accepts, summary
+
+
 def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True,
-          original_adjudications: Path | None = None):
+          original_adjudications: Path | None = None, combined_rule: str | None = None):
     manifest = load_json(set_dir / "manifest.json")
     key = load_json(set_dir / "key.json")
     require(key["set_id"] == manifest["set_id"], "key_set_mismatch")
     require(sha256_bytes((set_dir / "items.json").read_bytes()) == manifest["items_sha256"], "items_hash_mismatch")
-    loaded = read_adjudications(adjudications, manifest, original_adjudications)
-    decisions, revision = loaded["decisions"], loaded["revision"]
     key_items = key["items"]
+    loaded = read_adjudications(adjudications, manifest, original_adjudications, key_items)
+    decisions, revision = loaded["decisions"], loaded["revision"]
     listed = (revision or {}).get("listed", {})
+    combined, combined_summary = (None, None)
+    if combined_rule is not None:
+        combined, combined_summary = combined_rule_inputs(set_dir, key_items, combined_rule)
 
     def form_sufficiency(item_id, decision):
         # The sufficiency the form recorded, before any listed revision; a revision is not a form change.
@@ -2001,18 +2178,24 @@ def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True
         "revision": None if revision is None else {
             **{name: value for name, value in revision.items() if name != "listed"},
             "changed_item_ids": sorted(listed)},
+        "derived": loaded["derived"],
+        "sha256": sha256_bytes(Path(adjudications).read_bytes()),
     }
-    supplied = {}
+    supplied, label_hashes = {}, {}
     for name, path in label_files:
         declared, labels = load_label_file(Path(path), manifest)
         require(declared in (None, name), "labels_judge_name_mismatch")
         supplied[name] = labels
+        label_hashes[name] = sha256_bytes(Path(path).read_bytes())
     results = []
     for name, info in CANDIDATE_JUDGES.items():
         results.append(score_judge(name, info["family"], info["model"], supplied.pop(name, {}), key_items,
-                                   decisions))
+                                   decisions, combined))
     for name, labels in sorted(supplied.items()):
-        results.append(score_judge(name, "unknown", None, labels, key_items, decisions))
+        results.append(score_judge(name, "unknown", None, labels, key_items, decisions, combined))
+    for result in results:
+        if result["judge"] in label_hashes:
+            result["labels_sha256"] = label_hashes[result["judge"]]
     prior = []
     if include_prior:
         for name, info in PRIOR_JUDGES.items():
@@ -2024,15 +2207,68 @@ def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True
             "items_sha256": manifest["items_sha256"], "adjudication": adjudication_summary,
             "candidate_judges": results, "historical_labels": prior,
             "grounded_error_intervals_separate": separable(results),
+            "combined_rule": combined_summary,
             "definitions": {
                 "false_accept": "judge accept among items adjudicated reject",
                 "false_reject": "judge reject among items adjudicated accept",
                 "grounded": "adjudicated verdict as recorded",
                 "reference_only": "adjudicated reject with the unsupported-claims flag counts as accept",
+                "combined": "the combined rule's verdict (judge accept, or a lexical decline with the gold turns not "
+                            "delivered whole) against the adjudicated verdict as recorded; only with --combined-rule",
+                "targets": "the evidence-relative target is the adjudication as recorded; the reference target is a "
+                           "derived file in which accepted declines on answerable questions are rejects",
+                "disagreements": "item IDs of false accepts and false rejects per variant",
                 "interval": "Wilson score interval, 95 percent, z=1.96",
                 "excluded": "adjudicated unsure and judge unknown labels are excluded from rate denominators",
                 "faithful": "answer honest about and consistent with the delivered evidence, independent of the "
                             "reference; reported only, never part of judge error rates"}}
+
+
+POOL_FORMAT = "boros-judge-calibration-pooled-score-v1"
+
+
+def pool_scores(reports):
+    """Sum the overall counts of score reports over different sets, per candidate judge with labels and per
+    variant, and recompute rates and Wilson intervals. Disagreements are reported as ``set_id:item_id``."""
+    require(reports, "pool_reports_missing")
+    sets = [report.get("set_id") for report in reports]
+    require(all(report.get("format") == "boros-judge-calibration-score-v1" for report in reports), "pool_format")
+    require(len(set(sets)) == len(sets), "pool_duplicate_set")
+    pooled = {}
+    for report in reports:
+        for result in report["candidate_judges"]:
+            if "status" in result:
+                continue
+            judge = pooled.setdefault(result["judge"], {"sets": [], "labels_sha256": {}, "variants": {}})
+            judge["sets"].append(report["set_id"])
+            judge["labels_sha256"][report["set_id"]] = result.get("labels_sha256")
+            for variant in ("grounded", "reference_only", "combined"):
+                if variant not in result:
+                    continue
+                overall = result[variant]["overall"]
+                totals = judge["variants"].setdefault(variant, {"compared": 0, "adjudicated_accept": 0,
+                                                                "adjudicated_reject": 0, "false_accept": 0,
+                                                                "false_reject": 0, "disagreements": {
+                                                                    "false_accept": [], "false_reject": []},
+                                                                "sets": []})
+                totals["sets"].append(report["set_id"])
+                for field in ("compared", "adjudicated_accept", "adjudicated_reject"):
+                    totals[field] += overall[field]
+                totals["false_accept"] += overall["false_accept"]["count"]
+                totals["false_reject"] += overall["false_reject"]["count"]
+                for kind, items in result[variant].get("disagreements", {}).items():
+                    totals["disagreements"][kind] += [f"{report['set_id']}:{item}" for item in items]
+    for judge in pooled.values():
+        for variant, totals in judge["variants"].items():
+            require(totals["sets"] == judge["sets"], "pool_variant_missing")
+            fa, fr = totals["false_accept"], totals["false_reject"]
+            totals["false_accept"] = rate(fa, totals["adjudicated_reject"])
+            totals["false_reject"] = rate(fr, totals["adjudicated_accept"])
+            totals["error"] = rate(fa + fr, totals["compared"])
+    return {"format": POOL_FORMAT, "sets": sets,
+            "adjudications_sha256": {report["set_id"]: report["adjudication"].get("sha256") for report in reports},
+            "derived": {report["set_id"]: report["adjudication"].get("derived") for report in reports},
+            "candidate_judges": pooled}
 
 
 # --------------------------------------------------------------------------- declarations
@@ -2360,7 +2596,20 @@ def main(argv=None):
     scoring.add_argument("--original-adjudications", type=Path,
                          help="the export a v2 revision block names; verifies its hash and the listed changes")
     scoring.add_argument("--no-prior", action="store_true")
+    scoring.add_argument("--combined-rule", choices=sorted(COMBINED_DECLINE_OUTCOMES),
+                         help="add the combined rule (judge accept, or a lexical decline with gold not delivered whole)")
     scoring.add_argument("--output", type=Path, help="private JSON destination under .build")
+    deriving = commands.add_parser("derive-reference")
+    deriving.add_argument("--set", type=Path, required=True)
+    deriving.add_argument("--adjudications", type=Path, required=True, help="evidence-relative v2 adjudication")
+    deriving.add_argument("--decline", action="append", required=True,
+                          help="item-NNN: an accepted decline on an answerable question; repeatable")
+    deriving.add_argument("--applied-by", required=True)
+    deriving.add_argument("--derived-on", required=True, help="YYYY-MM-DD")
+    deriving.add_argument("--output", type=Path, required=True, help="fresh private JSON file under .build")
+    pooling = commands.add_parser("pool-scores")
+    pooling.add_argument("reports", type=Path, nargs="+", help="score reports (--output of score), one per set")
+    pooling.add_argument("--output", type=Path, help="private JSON destination under .build")
     regenerate = commands.add_parser("form")
     regenerate.add_argument("--set", type=Path, required=True)
     regenerate.add_argument("--output", type=Path, required=True,
@@ -2418,10 +2667,25 @@ def main(argv=None):
                 name, path = value.split("=", 1)
                 labels.append((name, path))
             result = score(args.set, args.adjudications, labels, include_prior=not args.no_prior,
-                           original_adjudications=args.original_adjudications)
+                           original_adjudications=args.original_adjudications, combined_rule=args.combined_rule)
             if args.output:
                 destination = check_private_destination(args.output)
                 write_private_json(destination, result)
+            print(json.dumps(result, sort_keys=True, indent=1))
+        elif args.command == "derive-reference":
+            require(ISO_DATE.match(args.derived_on), "derived_on_invalid")
+            destination = check_private_destination(args.output)
+            require(not destination.exists(), "destination_exists")
+            document = derive_reference_target(args.set, args.adjudications, args.decline,
+                                               applied_by=args.applied_by, derived_on=args.derived_on)
+            digest = write_private_json(destination, document)
+            print(json.dumps({"written": str(destination), "sha256": digest,
+                              "of_export_sha256": document["derived"]["of_export_sha256"],
+                              "changed_item_ids": [c["item"] for c in document["derived"]["changes"]]}, indent=1))
+        elif args.command == "pool-scores":
+            result = pool_scores([load_json(path) for path in args.reports])
+            if args.output:
+                write_private_json(check_private_destination(args.output), result)
             print(json.dumps(result, sort_keys=True, indent=1))
         elif args.command == "form":
             destination = check_private_destination(args.output)

@@ -217,22 +217,26 @@ class Contracts(unittest.TestCase):
         self.assertEqual(jc.majority(["accept", "reject"])[0], "unknown")
         self.assertEqual(jc.majority([None]), (None, None))
 
-    def _scored_set(self, directory, decisions, prior=None):
+    def _scored_set(self, directory, decisions, prior=None, answers=None, delivered=None, abstention=None,
+                    seed="seed", name="set"):
         items = []
         for index in range(8):
             c = candidate("r", f"{index:08x}", "hybrid", None,
                           labels=prior[index] if prior else {"qwen-local-qa": {"verdict": "accept"}},
-                          model=jc.QWEN_MODEL if index < 4 else jc.SOL_MODEL, answer=f"a{index}",
+                          model=jc.QWEN_MODEL if index < 4 else jc.SOL_MODEL,
+                          answer=answers[index] if answers else f"a{index}",
+                          delivered=delivered[index] if delivered else True,
+                          abstention=abstention[index] if abstention else False,
                           question_type="temporal-reasoning" if index % 2 else "multi-session")
             items.append(c)
-        out = Path(directory) / "set"
-        manifest = jc.assemble(items, "seed", out, per_stratum=8, minimum=8)
+        out = Path(directory) / name
+        manifest = jc.assemble(items, seed, out, per_stratum=8, minimum=8)
         key = json.loads((out / "key.json").read_text())
         by_question = {entry["question_id"]: entry["item_id"] for entry in key["items"]}
         adjudications = {"format": jc.ADJUDICATION_FORMAT, "set_id": manifest["set_id"],
                          "items_sha256": manifest["items_sha256"],
                          "decisions": {by_question[f"{i:08x}"]: d for i, d in enumerate(decisions)}}
-        path = Path(directory) / "adjudications.json"
+        path = Path(directory) / ("adjudications.json" if name == "set" else f"adjudications-{name}.json")
         path.write_text(json.dumps(adjudications))
         return out, path, manifest, by_question
 
@@ -807,6 +811,188 @@ class Contracts(unittest.TestCase):
             (root / "two" / "items.json").write_text((root / "two" / "items.json").read_text() + " ")
             with self.assertRaisesRegex(jc.CalibrationError, "items_hash_mismatch"):
                 jc.subset_set([(root / "two", "item-001")], "seed", root / "tampered")
+
+    def _evidence_relative_set(self, directory, **options):
+        """Synthetic evidence-relative adjudication: index 0-2 accepted declines on answerable questions with gold
+        missing, 3 a partial decline (gold missing), 4 an abstention decline, 5-7 ordinary answers (7 rejected)."""
+        answers = ["No record of that in the conversations.", "I couldn't find it anywhere.",
+                   "The provided chats don't show it.",
+                   "The answer is probably the second option. " + "Detail. " * 40 + "There is no information about",
+                   "There is no information about that.", "It was 42.", "Blue.", "Tuesday."]
+        delivered = [False, False, True, False, None, True, False, True]
+        abstention = [False, False, False, False, True, False, False, False]
+        decisions = [{"verdict": "accept", "sufficiency": "insufficient", "faithful": "yes", "note": f"note {i}",
+                      "revealed": True, "sufficiency_at_reveal": "insufficient"} for i in range(7)]
+        decisions.append({"verdict": "reject", "sufficiency": "sufficient", "faithful": None, "note": "",
+                          "revealed": True, "sufficiency_at_reveal": "sufficient"})
+        return self._scored_set(directory, decisions, answers=answers, delivered=delivered, abstention=abstention,
+                                **options)
+
+    def test_derived_reference_target_and_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out, path, manifest, ids = self._evidence_relative_set(directory)
+            key_items = json.loads((out / "key.json").read_text())["items"]
+            declines = [ids["00000000"], ids["00000001"], ids["00000002"]]
+            derived = jc.derive_reference_target(out, path, declines, applied_by="synthetic",
+                                                 derived_on="2026-10-09")
+            self.assertEqual(derived["derived"]["of_export_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual([c["item"] for c in derived["derived"]["changes"]], sorted(declines))
+            self.assertNotIn("revision", derived)
+            derived_path = Path(directory) / "derived.json"
+            derived_path.write_text(json.dumps(derived))
+            loaded = jc.read_adjudications(derived_path, manifest, path, key_items)
+            self.assertIsNone(loaded["revision"])
+            self.assertTrue(loaded["derived"]["source_verified"])
+            self.assertEqual(loaded["derived"]["changed_item_ids"], sorted(declines))
+            self.assertEqual(sum(d["verdict"] == "reject" for d in loaded["decisions"].values()), 4)
+            self.assertFalse(jc.read_adjudications(derived_path, manifest)["derived"]["source_verified"])
+            # Refusals while deriving: unknown, abstention and not-accepted items, duplicates.
+            for items, code in (([ids["00000000"], "item-999"], "adjudication_derived_unknown_item"),
+                                ([ids["00000004"]], "adjudication_derived_item_abstention"),
+                                ([ids["00000007"]], "adjudication_derived_source_mismatch"),
+                                ([ids["00000000"], ids["00000000"]], "derived_items_invalid"),
+                                ([], "derived_items_invalid")):
+                with self.assertRaisesRegex(jc.CalibrationError, f"^{code}$"):
+                    jc.derive_reference_target(out, path, items, applied_by="s", derived_on="2026-10-09")
+            other = ids["00000005"]
+
+            def expect(code, mutate, *, with_source=True):
+                document = copy.deepcopy(derived)
+                mutate(document)
+                derived_path.write_text(json.dumps(document))
+                with self.assertRaisesRegex(jc.CalibrationError, f"^{code}$"):
+                    jc.read_adjudications(derived_path, manifest, path if with_source else None, key_items)
+
+            expect("adjudication_derived_source_hash", lambda d: d["derived"].update(of_export_sha256="0" * 64))
+            expect("adjudication_derived_unlisted_change", lambda d: d["decisions"][other].update(verdict="reject"))
+            expect("adjudication_derived_unlisted_change", lambda d: d["decisions"][other].update(note="edited"))
+            expect("adjudication_derived_unlisted_change",
+                   lambda d: d["decisions"][declines[0]].update(sufficiency="sufficient"))
+            expect("adjudication_derived_target_mismatch",
+                   lambda d: d["decisions"][declines[0]].update(verdict="accept"), with_source=False)
+            expect("adjudication_derived_change_invalid",
+                   lambda d: d["derived"]["changes"][0].update(verdict="reject->accept"), with_source=False)
+            expect("adjudication_derived_change_invalid",
+                   lambda d: d["derived"]["changes"][0].update(sufficiency="sufficient"), with_source=False)
+            expect("adjudication_derived_duplicate_item",
+                   lambda d: d["derived"]["changes"].append(dict(d["derived"]["changes"][0])), with_source=False)
+            expect("adjudication_derived_unknown_item",
+                   lambda d: d["derived"]["changes"].append({"item": "item-999", "verdict": "accept->reject"}))
+            expect("adjudication_derived_item_abstention",
+                   lambda d: (d["decisions"][ids["00000004"]].update(verdict="reject"),
+                              d["derived"]["changes"].append({"item": ids["00000004"], "verdict": "accept->reject"})),
+                   with_source=False)
+            expect("adjudication_derived_with_revision", lambda d: d.update(revision={}))
+            expect("adjudication_derived_invalid", lambda d: d["derived"].update(target="evidence"))
+            expect("adjudication_derived_invalid", lambda d: d["derived"].update(changes=[]))
+            expect("adjudication_derived_invalid", lambda d: d["derived"].pop("rule"))
+            expect("adjudication_derived_invalid",
+                   lambda d: (d.update(format=jc.ADJUDICATION_FORMAT_V1),
+                              [decision.pop("faithful") for decision in d["decisions"].values()]),
+                   with_source=False)
+            # The CLI writes a fresh private file and prints IDs and hashes only; score reports the derivation.
+            build = Path(directory) / ".build"
+            build.mkdir()
+            stdout = io.StringIO()
+            with unittest.mock.patch("sys.stdout", stdout), \
+                    unittest.mock.patch.object(jc, "check_private_destination", lambda p, *a, **k: p.resolve()):
+                code = jc.main(["derive-reference", "--set", str(out), "--adjudications", str(path),
+                                "--decline", declines[0], "--decline", declines[1], "--decline", declines[2],
+                                "--applied-by", "synthetic", "--derived-on", "2026-10-09",
+                                "--output", str(build / "derived.json")])
+            self.assertEqual(code, 0)
+            self.assertEqual(stat.S_IMODE((build / "derived.json").stat().st_mode), 0o600)
+            self.assertNotIn("note", stdout.getvalue())
+            with unittest.mock.patch("sys.stdout", io.StringIO()), \
+                    unittest.mock.patch.object(jc, "check_private_destination", lambda p, *a, **k: p.resolve()):
+                self.assertEqual(jc.main(["derive-reference", "--set", str(out), "--adjudications", str(path),
+                                          "--decline", declines[0], "--applied-by", "s", "--derived-on",
+                                          "2026-10-09", "--output", str(build / "derived.json")]), 1)
+            result = jc.score(out, build / "derived.json", original_adjudications=path)
+            self.assertTrue(result["adjudication"]["derived"]["source_verified"])
+            self.assertEqual(result["adjudication"]["verdict"], {"accept": 4, "reject": 4})
+            self.assertIsNone(result["adjudication"]["revision"])
+
+    def test_lexical_decline_and_combined_rule(self):
+        import answer_presentation_replay as apr
+
+        for text in ("No record of that.", "x" * 199 + "no record of", "x" * 200 + "no record of",
+                     "I can’t find it", "It was blue.", ""):
+            self.assertEqual(jc.lexical_decline(text), apr.decline_outcome(text)["outcome"])
+        with tempfile.TemporaryDirectory() as directory:
+            out, path, manifest, ids = self._evidence_relative_set(directory)
+            labels = {"format": jc.LABELS_FORMAT, "set_id": manifest["set_id"], "judge": "vertex-sonnet",
+                      "labels": {item: [{"verdict": "reject"}] * 3 for item in ids.values()}}
+            labels["labels"][ids["00000005"]] = [{"verdict": "accept"}, {"verdict": "accept"}, {"verdict": "reject"}]
+            labels["labels"][ids["00000006"]] = [{"verdict": "accept"}, {"verdict": "reject"}]  # a tie: unknown
+            label_path = Path(directory) / "labels.json"
+            label_path.write_text(json.dumps(labels))
+            plain = jc.score(out, path, [("vertex-sonnet", str(label_path))], include_prior=False)
+            self.assertIsNone(plain["combined_rule"])
+            column = lambda r: {e["judge"]: e for e in r["candidate_judges"]}["vertex-sonnet"]  # noqa: E731
+            self.assertNotIn("combined", column(plain))
+            self.assertEqual(column(plain)["labels_sha256"], hashlib.sha256(label_path.read_bytes()).hexdigest())
+            result = jc.score(out, path, [("vertex-sonnet", str(label_path))], include_prior=False,
+                              combined_rule="lexical")
+            rule = result["combined_rule"]
+            self.assertEqual(rule["lexical_decline_items"],
+                             sorted(ids[f"{i:08x}"] for i in (0, 1, 2, 4)))
+            self.assertEqual(rule["lexical_partial_decline_items"], [ids["00000003"]])
+            # Abstention (4) has no gold turns; 6 is gold-missing but not a decline.
+            self.assertEqual(rule["gold_not_whole_items"], sorted(ids[f"{i:08x}"] for i in (0, 1, 3, 6)))
+            self.assertEqual(rule["rule_accept_items"], sorted([ids["00000000"], ids["00000001"]]))
+            sonnet = column(result)
+            self.assertEqual(sonnet["grounded"]["overall"]["false_reject"]["count"], 5)  # 0-4 (5 accepted)
+            self.assertEqual(sonnet["grounded"]["disagreements"]["false_reject"],
+                             sorted(ids[f"{i:08x}"] for i in range(5)))
+            combined = sonnet["combined"]
+            self.assertEqual(combined["overall"]["compared"], 7)  # 6 is a tie, so unknown and excluded
+            self.assertEqual(combined["disagreements"]["false_reject"],
+                             sorted(ids[f"{i:08x}"] for i in (2, 3, 4)))
+            self.assertEqual(combined["disagreements"]["false_accept"], [])
+            self.assertEqual(combined["overall"]["error"]["count"], 3)
+            with_partial = column(jc.score(out, path, [("vertex-sonnet", str(label_path))], include_prior=False,
+                                           combined_rule="lexical-with-partial"))
+            self.assertEqual(with_partial["combined"]["disagreements"]["false_reject"],
+                             sorted(ids[f"{i:08x}"] for i in (2, 4)))
+            with self.assertRaisesRegex(jc.CalibrationError, "^combined_rule_invalid$"):
+                jc.score(out, path, [("vertex-sonnet", str(label_path))], combined_rule="judge")
+            printed = json.dumps(result)
+            for text in ("No record of that", "couldn't find", "It was 42", "note 1"):
+                self.assertNotIn(text, printed)
+
+    def test_pool_scores_sums_sets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reports = []
+            for seed, name in (("seed-one", "one"), ("seed-two", "two")):
+                out, path, manifest, ids = self._evidence_relative_set(directory, seed=seed, name=name)
+                labels = {"format": jc.LABELS_FORMAT, "set_id": manifest["set_id"], "judge": "vertex-sonnet",
+                          "labels": {item: {"verdict": "reject"} for item in ids.values()}}
+                label_path = Path(directory) / f"labels-{name}.json"
+                label_path.write_text(json.dumps(labels))
+                reports.append(jc.score(out, path, [("vertex-sonnet", str(label_path))], include_prior=False,
+                                        combined_rule="lexical"))
+            self.assertNotEqual(reports[0]["set_id"], reports[1]["set_id"])
+            pooled = jc.pool_scores(reports)
+            sonnet = pooled["candidate_judges"]["vertex-sonnet"]
+            self.assertEqual(set(pooled["candidate_judges"]), {"vertex-sonnet"})
+            grounded = sonnet["variants"]["grounded"]
+            self.assertEqual(grounded["compared"], 16)
+            self.assertEqual(grounded["false_reject"]["count"], 14)
+            self.assertEqual(grounded["false_reject"]["wilson95"], jc.wilson(14, 14))
+            self.assertEqual(grounded["false_accept"]["count"], 0)
+            self.assertEqual(len(grounded["disagreements"]["false_reject"]), 14)
+            self.assertTrue(all(":" in item for item in grounded["disagreements"]["false_reject"]))
+            self.assertEqual(sonnet["variants"]["combined"]["false_reject"]["count"], 10)
+            with self.assertRaisesRegex(jc.CalibrationError, "^pool_duplicate_set$"):
+                jc.pool_scores([reports[0], reports[0]])
+            partial = copy.deepcopy(reports[1])
+            for result in partial["candidate_judges"]:
+                result.pop("combined", None)
+            with self.assertRaisesRegex(jc.CalibrationError, "^pool_variant_missing$"):
+                jc.pool_scores([reports[0], partial])
+            with self.assertRaisesRegex(jc.CalibrationError, "^pool_format$"):
+                jc.pool_scores([dict(reports[0], format="other")])
 
 
 if __name__ == "__main__":
