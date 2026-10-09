@@ -1,7 +1,9 @@
 import Foundation
 
-/// Ordinary Send uses bounded lexical formulation plus an optional local
-/// semantic index. Every delivered excerpt is checked against original bytes.
+/// Bounded lexical formulation plus an optional local semantic index. Ordinary
+/// Send passes `SemanticRetrievalPolicy.ordinarySend`, which currently withholds
+/// the index (docs/P2-SEMANTIC-DECISION.md). Every delivered excerpt is checked
+/// against original bytes.
 enum ChatContextPreparation {
     static func prepare(
         store: MemoryStore,
@@ -12,9 +14,11 @@ enum ChatContextPreparation {
         excludingEventID: String,
         semanticIndex: SemanticIndex? = nil,
         retrievalStrategy: ContextRetrievalStrategy = .hybrid,
-        episodeLease: EpisodeLease? = nil
+        episodeLease: EpisodeLease? = nil,
+        semanticRetrieval: SemanticRetrievalPolicy = .enabled
     ) throws -> ContextSnapshot {
         _ = try episodeLease?.checkActive(projectID: projectID)
+        let admittedIndex = semanticRetrieval.admit(semanticIndex)
         return try MeteredRetrieval.operation(lease: episodeLease) {
             if retrievalStrategy == .recentOnly {
                 let recent = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
@@ -23,12 +27,18 @@ enum ChatContextPreparation {
                 return try recentOnlySnapshot(recent)
             }
             let lexical = historicalQuery(prompt)
-            guard let semanticIndex else {
+            guard let semanticIndex = admittedIndex else {
                 var snapshot = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
                     prompt: prompt, system: system, budgetBytes: 65_536, excludingEventID: excludingEventID,
                     historicalQuery: lexical, historicalMatching: .anyTerm, expandFollowingAssistant: true, episodeLease: episodeLease, operationIsNested: true)
-                try appendAudit(to: &snapshot, fields: ["mode": "lexical", "semantic_available": false])
-                if snapshot.retrievalNotice == nil { snapshot.retrievalNotice = "Archive recall used lexical search; semantic recall is unavailable." }
+                var fields: [String: Any] = ["mode": "lexical", "semantic_available": false]
+                if semanticRetrieval == .disabledByPolicy {
+                    // Lexical selection is the intended path, not a degraded one.
+                    fields[SemanticRetrievalPolicy.auditField] = SemanticRetrievalPolicy.disabledByPolicy.rawValue
+                } else if snapshot.retrievalNotice == nil {
+                    snapshot.retrievalNotice = "Archive recall used lexical search; semantic recall is unavailable."
+                }
+                try appendAudit(to: &snapshot, fields: fields)
                 return snapshot
             }
             let recent = try ContextAssembler.prepare(store: store, conversationID: conversationID, projectID: projectID,
@@ -111,8 +121,10 @@ enum ChatContextPreparation {
         episodeLease: EpisodeLease? = nil, lexicalQueryUTF8Range: Range<Int>? = nil,
         semanticQueryUTF8Range: Range<Int>? = nil, evidenceSourceIDs: [String]? = nil,
         componentPolicy: ContextComponentPolicy = .selectedQwen,
-        semanticSearch: SemanticSearchSelection = .shipped) throws -> ContextSnapshot {
+        semanticSearch: SemanticSearchSelection = .shipped,
+        semanticRetrieval: SemanticRetrievalPolicy = .enabled) throws -> ContextSnapshot {
         let active = try episodeLease?.checkActive(projectID: projectID)
+        let admittedIndex = semanticRetrieval.admit(semanticIndex)
         _ = try componentPolicy.validated()
         if let frozen = active?.limits.componentPolicy, frozen != componentPolicy { throw EpisodeBudgetError.invalid }
         return try MeteredRetrieval.operation(lease: episodeLease) {
@@ -171,6 +183,9 @@ enum ChatContextPreparation {
                 fields["primary_completion"] = completed.audit
                 fields["exchange_expansion"] = expanded.audit
                 if fallback { fields["failure"] = "semantic_search_failed" }
+                if semanticRetrieval == .disabledByPolicy {
+                    fields[SemanticRetrievalPolicy.auditField] = SemanticRetrievalPolicy.disabledByPolicy.rawValue
+                }
                 if let raw {
                     fields["raw_work_version"] = "raw_work_v1"; fields["source_frontier"] = raw.sourceFrontier
                     fields["raw_work_charged"] = raw.rawWorkCharged; fields["inspected_candidates"] = raw.inspectedCandidates
@@ -180,14 +195,17 @@ enum ChatContextPreparation {
                 try appendAudit(to: &result, fields: fields)
                 try appendQueryTrace(to: &result, formulation: formulation, prompt: prompt, input: lexicalInput, range: lexicalQueryUTF8Range,
                     semanticInput: semanticInput, semanticRange: semanticQueryUTF8Range)
+                // Under the ordinary Send policy lexical selection is intended,
+                // so only a bounded candidate window warrants a notice.
                 result.retrievalNotice = fallback ? "Semantic recall failed; archive recall used lexical search."
+                    : semanticRetrieval == .disabledByPolicy ? nil
                     : "Archive recall used lexical search; semantic recall is unavailable."
                 if let raw, !raw.candidateWindowComplete || raw.candidateWindowFull {
                     result.retrievalNotice = "Archive recall inspected a bounded lexical candidate window; additional evidence may remain."
                 }
                 return result
             }
-            guard let semanticIndex else { return try lexicalSnapshot(fallback: false) }
+            guard let semanticIndex = admittedIndex else { return try lexicalSnapshot(fallback: false) }
             let report: SemanticSearchReport
             var globalSemanticAudit: [String: Any]? // P2 step 4 evaluation option; nil on ordinary Send.
             do {

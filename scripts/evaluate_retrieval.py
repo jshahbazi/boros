@@ -29,7 +29,7 @@ CORE_FILES = ("Sources/Boros/MemoryStore.swift", "Sources/Boros/EventSourceTime.
 # Keep the registered v4 dependency set above unchanged. Current-source
 # diagnostics need the separately versioned neighborhood implementation.
 CURRENT_CORE_FILES = (*CORE_FILES, "Sources/Boros/BoundedNeighborhoodExpansion.swift",
-                      "Sources/Boros/GlobalSemanticSearch.swift")
+                      "Sources/Boros/GlobalSemanticSearch.swift", "Sources/Boros/SemanticRetrievalPolicy.swift")
 PYTHON_FILES = ("scripts/evaluate_retrieval.py", "scripts/evaluation_fixtures.py", "scripts/evaluation_statistics.py")
 PROTOCOLS = ("recent_only", "current_prompt_lexical", "targeted_lexical", "gui_lexical_anyterm", "raw_source_probe")
 

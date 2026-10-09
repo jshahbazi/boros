@@ -51,8 +51,13 @@ INGESTION_SOURCES = ("MemoryStore.swift", "SemanticIndex.swift", "BackgroundInde
 # P2 step 4 arms (docs/P2-SEMANTIC-DECISION.md): hybrid strategy with every
 # eligible chunk searched, under the shipped fusion or lexical-first fill.
 GLOBAL_ARMS = ("global_hybrid", "global_fill")
-ARMS = ("recent_only", "lexical", "hybrid", "exchange_lexical", "exchange_adjacent") + GLOBAL_ARMS
-PRIMARY_ARM = "hybrid"
+# `ordinary_send` constructs the GUI Send configuration literally: the history's
+# semantic index passed through SemanticRetrievalPolicy.ordinarySend, which
+# withholds it by user decision (docs/P2-SEMANTIC-DECISION.md, Decision). It
+# must select exactly what `lexical` selects.
+ORDINARY_SEND_ARM = "ordinary_send"
+ARMS = ("recent_only", "lexical", "hybrid", ORDINARY_SEND_ARM, "exchange_lexical", "exchange_adjacent") + GLOBAL_ARMS
+PRIMARY_ARM = ORDINARY_SEND_ARM
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
 DECLARED_CANDIDATE_DEPTH = 16
@@ -540,6 +545,25 @@ def diagnostic(attempt):
             "semantic": attempt.get("semantic_diagnostics")}
 
 
+def ordinary_send_equivalence(attempts):
+    """Content-free comparison of the ordinary Send arm with the lexical arm:
+    identical recent context, delivered byte ranges and traced candidates, and
+    a preparation that received no index and recorded the policy."""
+    ordinary, lexical = attempts.get(ORDINARY_SEND_ARM), attempts.get("lexical")
+    if not ordinary or not lexical or not ordinary.get("preparation_completed") or not lexical.get("preparation_completed"):
+        return None
+    def ranges(attempt):
+        return sorted((item["event_id"], item["offset"], item["bytes"]) for item in attempt.get("evidence", []))
+    def candidates(attempt):
+        return [(item.get("event_id"), item.get("rank"), item.get("offset"), item.get("bytes")) for item in attempt.get("candidates", [])]
+    return {"delivery": ordinary.get("recent_source_ids") == lexical.get("recent_source_ids") and ranges(ordinary) == ranges(lexical),
+            "candidates": candidates(ordinary) == candidates(lexical)
+                and bool(ordinary.get("trace_omitted")) == bool(lexical.get("trace_omitted")),
+            "policy_recorded": (ordinary.get("retrieval") or {}).get("semantic_retrieval") == "disabled_by_policy"
+                and (ordinary.get("retrieval") or {}).get("mode") == "lexical"
+                and ordinary.get("preparation_received_semantic_index") is False}
+
+
 def global_semantic_summary(rows):
     """Latency and population of the explicitly selected global search arms."""
     result = {}
@@ -618,7 +642,8 @@ def run(args):
                 "runner_started": any(item.get("runner_started") for item in attempts.values())
                     or any(item.get("runner_started") for item in ((control or {}).get("attempts") or [])),
                 "arms": {arm: score_attempt(attempts.get(arm), case) for arm in ARMS},
-                "diagnostics": {arm: diagnostic(attempts.get(arm)) for arm in ARMS if arm != "recent_only"}})
+                "diagnostics": {arm: diagnostic(attempts.get(arm)) for arm in ARMS if arm != "recent_only"},
+                "ordinary_send_equivalence": ordinary_send_equivalence(attempts)})
         parity = endpoint.parity(args.live_tokenizer)
     finally:
         endpoint.stop()
@@ -631,8 +656,10 @@ def run(args):
         "cohort": cohort, "configuration": {key: value for key, value in configuration.items() if key not in ("endpoint", "system")}
             | {"system_sha256": digest(configuration["system"].encode())},
         "component_policy": "ContextComponentPolicy.currentSelectedQwen (v1/16)",
-        "arms": {"recent_only": "recent_only strategy", "lexical": "hybrid strategy without a semantic index",
-                 "hybrid": "hybrid strategy with the history's semantic index, as ordinary Send",
+        "arms": {"recent_only": "recent_only strategy",
+                 "lexical": "hybrid strategy without a semantic index; the selection ordinary Send uses since October 8, 2026",
+                 "hybrid": "hybrid strategy with the history's semantic index (explicit fused retrieval; ordinary Send until October 8, 2026)",
+                 ORDINARY_SEND_ARM: "ordinary Send as the GUI constructs it: the history's semantic index passed through SemanticRetrievalPolicy.ordinarySend, which withholds it",
                  "exchange_lexical": "explicit P2 step 1 policy selected-model-context-components-v3-exchange; no semantic index",
                  "exchange_adjacent": "explicit P2 step 1+2 policy selected-model-context-components-v3-exchange-adjacent; no semantic index",
                  "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
@@ -647,6 +674,9 @@ def run(args):
         "implementation": implementation,
         "summary": summary, "known_misses": known_miss_rows(rows),
         "global_semantic": global_semantic_summary(rows),
+        "ordinary_send_equivalence": {key: sum(bool((row["ordinary_send_equivalence"] or {}).get(key)) for row in rows)
+            for key in ("delivery", "candidates", "policy_recorded")} | {"compared": sum(row["ordinary_send_equivalence"] is not None for row in rows),
+                                                                       "histories": len(rows)},
         "semantic_index": {"histories": len(semantic),
             "construction_failures": sum(bool(item.get("failure")) for item in semantic),
             "paused": sum(item.get("pause_reason") not in (None,) for item in semantic if "pause_reason" in item),
@@ -666,6 +696,7 @@ def run(args):
         values = summary["arms"][arm]
         print(json.dumps({"arm": arm, "r1": values["r1_candidate_recall"], "r2": values["r2_delivered_recall"],
                           "turns_whole": values["turn_delivered_whole"], "failures": values["failures"]}, sort_keys=True))
+    print(json.dumps({"ordinary_send_equivalence": report["ordinary_send_equivalence"]}, sort_keys=True))
     print(json.dumps({"feasibility": summary["feasibility"], "parity": parity, "endpoint": endpoint.counters}, sort_keys=True))
     print("Metadata-only report: " + str(output))
     return report
