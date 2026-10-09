@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""Answer presentation replay: V3 (current main) versus V4 (fixes A, D and G) framing.
+"""Answer presentation replay: V3 versus V4 (fixes A, D and G) framing.
 
-Replays, one generation per question and framing, the seven frozen LongMemEval
-question-arm cases whose saved Qwen answers opened with a copied envelope header
-(docs/ANSWER-PRESENTATION-DEFECTS.md). Both arms run the same verified binary through
-the existing ``--answer-evaluation`` path with the frozen runner input; only
-``--context-framing`` differs. ``--attempt`` restricts each run to the one declared
-attempt, so each run makes at most one answer generation.
+Replays, one generation per question and framing, a declared cohort of frozen
+LongMemEval question-arm cases (docs/ANSWER-PRESENTATION-DEFECTS.md):
+
+- ``echo-7``: the seven question-arm cases whose saved Qwen answers opened with a copied
+  envelope header. 14 generations.
+- ``recent-only-21``: the recent-only arm of all 21 distinct questions of the saved
+  native runs (7 frozen pilot questions from natural-v5, 14 independent questions from
+  independent-v1). 42 generations. It measures fix G: declines, AI or memory
+  disclaimers, and correct abstentions.
+
+Both arms run the same verified binary through the existing ``--answer-evaluation``
+path with the frozen runner input; only the context framing differs (V3 pinned with
+``--context-framing``; V4 pinned in ``echo-7`` and left to the default in
+``recent-only-21``, with the reported framing verified at measurement). ``--attempt``
+restricts each run to the one declared attempt, so each run makes at most one answer
+generation.
 
 Commands:
 
@@ -46,7 +56,6 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION = "answer-presentation-replay-v1"
 MODEL = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
 MODELS_URL = "http://127.0.0.1:11234/v1/models"
-GENERATION_LIMIT = 14
 EVALUATION_ROOT = Path("/Users/johnshahbazian/development/boros/.build/evaluation")
 RUN_REPORTS = {"natural-v4": "longmemeval-natural-v4-20261006.json", "natural-v5": "longmemeval-natural-v5-20261006.json",
                "independent-v1": "longmemeval-independent-v1-20261006.json",
@@ -54,17 +63,41 @@ RUN_REPORTS = {"natural-v4": "longmemeval-natural-v4-20261006.json", "natural-v5
 NEIGHBORHOOD_POLICY = "selected-model-context-components-v2"
 # (question ID, run whose saved answer copied the header, strategy, component policy pin).
 # Where several runs echoed, the most recent run under the current default policy is used.
-CASES = (("001be529", "natural-v4", "hybrid", None),
-         ("06878be2", "natural-v5", "recent_only", None),
-         ("0e5e2d1a", "natural-v5", "hybrid", None),
-         ("1192316e", "neighborhood-v1", "hybrid", NEIGHBORHOOD_POLICY),
-         ("1a1907b4", "independent-v1", "hybrid", None),
-         ("1faac195", "independent-v1", "hybrid", None),
-         ("54026fce", "neighborhood-v1", "hybrid", NEIGHBORHOOD_POLICY))
-ARMS = (("main-v3", "context-source-snapshot-v3"), ("fix-v4", "context-source-snapshot-v4"))
+ECHO_CASES = (("001be529", "natural-v4", "hybrid", None),
+              ("06878be2", "natural-v5", "recent_only", None),
+              ("0e5e2d1a", "natural-v5", "hybrid", None),
+              ("1192316e", "neighborhood-v1", "hybrid", NEIGHBORHOOD_POLICY),
+              ("1a1907b4", "independent-v1", "hybrid", None),
+              ("1faac195", "independent-v1", "hybrid", None),
+              ("54026fce", "neighborhood-v1", "hybrid", NEIGHBORHOOD_POLICY))
+# The recent-only arm of every distinct question in the saved native runs. The 7 frozen
+# pilot questions use natural-v5 (the latest runner document 5 run that has a recent-only
+# arm); the 14 independent questions use independent-v1 (the default component policy).
+PILOT_QUESTIONS = ("001be529", "00ca467f", "01493427", "031748ae_abs", "06878be2", "08f4fc43", "0e5e2d1a")
+INDEPENDENT_QUESTIONS = ("0862e8bf_abs", "1192316e", "1a1907b4", "1b9b7252", "1faac195", "3f1e9474", "4baee567",
+                         "51c32626", "54026fce", "7a87bd0c", "a1eacc2a", "f685340e_abs", "gpt4_2655b836",
+                         "gpt4_70e84552")
+RECENT_ONLY_CASES = tuple((question_id, "natural-v5", "recent_only", None) for question_id in PILOT_QUESTIONS) \
+    + tuple((question_id, "independent-v1", "recent_only", None) for question_id in INDEPENDENT_QUESTIONS)
+# Questions whose saved recent-only answers carried an AI or memory disclaimer.
+DISCLAIMER_QUESTIONS = ("031748ae_abs", "0862e8bf_abs", "1192316e")
+V3 = "context-source-snapshot-v3"
+V4 = "context-source-snapshot-v4"
+COHORTS = {
+    "echo-7": {"cases": ECHO_CASES, "generation_limit": 14,
+               "arms": (("main-v3", V3), ("fix-v4", V4)),
+               "authorization": "user, 2026-10-09: implement fix A and replay the 7 questions; "
+                                "fix arm extended to A+D+G by the coordinator"},
+    # A None framing leaves --context-framing off, so the run uses the binary's default (V4).
+    "recent-only-21": {"cases": RECENT_ONLY_CASES, "generation_limit": 42,
+                       "arms": (("v3-pinned", V3), ("v4-default", None)),
+                       "authorization": "user, 2026-10-09: up to 42 local generations, local server only; paired V3 "
+                                        "versus V4 (default) replay of the recent-only arm on the 21 distinct questions"},
+}
 DETECTOR = ("copied_header", "fabricated_event_ids", "repeated_question", "raw_event_ids", "ai_disclaimer",
             "plain_decline", "latex", "answer_bytes", "answer_words", "addresses_question", "contains_reference",
             "cited_labels", "unresolved_labels", "ends_with_question", "markdown_bold")
+DECLINE_OPENING_CHARACTERS = 200
 
 
 class ReplayError(Exception):
@@ -100,13 +133,13 @@ def git(*args) -> str:
     return process.stdout.strip()
 
 
-def histories(dataset: Path):
+def histories(dataset: Path, case_list):
     """Frozen runner documents per (question ID, run), verified against the recorded runner-input SHA-256."""
     import longmemeval_independent_cases as independent
     pilot = {history["id"]: history for history in cases.prepare(dataset)}
     fresh = {history["id"]: history for history in independent.prepare(dataset)}
     out = {}
-    for question_id, run, _, _ in CASES:
+    for question_id, run, _, _ in case_list:
         report = json.loads((EVALUATION_ROOT / RUN_REPORTS[run]).read_text())
         declared = {case["question_id"]: case for case in report["declaration"]["cases"]}[question_id]
         version = report["runner_document_version"]
@@ -143,43 +176,57 @@ def declare(args):
     require(not git("status", "--porcelain", "--", "Sources"), "sources_not_committed")
     models = live_models()
     require(MODEL in models, "pinned_model_not_listed")
-    frozen = histories(args.dataset)
+    cohort = COHORTS[args.cohort]
+    frozen = histories(args.dataset, cohort["cases"])
     private_directory(output)
     private_directory(output / "inputs")
     runs = []
-    for question_id, run, strategy, policy in CASES:
+    for question_id, run, strategy, policy in cohort["cases"]:
         history, document, report = frozen[(question_id, run)]
         ordinal = [attempt["strategy"] for attempt in document["attempts"]].index(strategy)
         encoded = canonical(document)
         input_path = output / "inputs" / f"{question_id}.json"
         private_write(input_path, encoded)
         recorded = recorded_attempt(report, question_id, strategy)
-        for arm, framing in ARMS:
+        for arm, framing in cohort["arms"]:
             runs.append({"question_id": question_id, "source_run": run, "strategy": strategy, "attempt": ordinal,
                          "component_policy": policy or "selected-model-context-components-v1", "arm": arm,
                          "context_framing": framing, "runner_document_version": document["version"],
                          "runner_input_sha256": digest(encoded),
                          "recorded_request_sha256": (recorded["metadata"].get("preparation") or {}).get("request_sha256"),
+                         "recorded_prompt_tokens": ((recorded["metadata"].get("preparation") or {}).get("admission")
+                                                    or {}).get("promptTokens"),
+                         "recorded_delivered_recent_sha256": digest(canonical(
+                             recorded["metadata"].get("delivered_recent_source_ids") or [])),
+                         "abstention": question_id.endswith("_abs"),
                          "recorded_binary_sha256": report["implementation"].get("binary_sha256")})
     configuration = {key: value for key, value in baseline.CONFIGURATION.items() if key != "system"}
     declaration = {
         "version": VERSION, "declared_at_utc": datetime.now(timezone.utc).isoformat(),
-        "authorization": "user, 2026-10-09: implement fix A and replay the 7 questions; fix arm extended to A+D+G by the coordinator",
+        "cohort": args.cohort, "authorization": cohort["authorization"],
+        "cases": [list(case) for case in cohort["cases"]],
         "model": MODEL, "live_models_listed": models, "endpoint": baseline.CONFIGURATION["endpoint"],
         "temperature": baseline.CONFIGURATION["temperature"], "thinking": baseline.CONFIGURATION["thinking"],
         "seed": baseline.CONFIGURATION["seed"], "maximum_output": {"runner_document_4_5": 512, "runner_document_7": 1024},
         "configuration_without_system": configuration,
         "system_sha256": digest(baseline.CONFIGURATION["system"].encode()),
-        "generation_limit": GENERATION_LIMIT, "generations_per_run": 1,
+        "generation_limit": cohort["generation_limit"], "generations_per_run": 1,
+        "retry_rule": "a run whose answer invocation never started may be retried at most twice and does not count "
+                      "toward the generation limit; any run that started an answer invocation counts",
+        "run_order": "question order as listed, V3 then V4 for each question",
         "non_answer_requests_per_run": "existing admission path: tokenizer counts and one 1-token calibration completion",
         "binary": {"path_name": binary.name, "sha256": digest(binary.read_bytes()), "build_commit": git("rev-parse", "HEAD"),
                    "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
                    "main_commit": git("rev-parse", "main"),
                    "framing_source_sha256": digest((ROOT / "Sources/Boros/ContextSourceFraming.swift").read_bytes()),
                    "assembler_source_sha256": digest((ROOT / "Sources/Boros/ContextAssembler.swift").read_bytes())},
-        "arms": {"main-v3": "context-source-snapshot-v3, pinned with --context-framing; the framing of main at "
-                            + git("rev-parse", "main")[:7],
-                 "fix-v4": "context-source-snapshot-v4 (fixes A, D, G), the new default"},
+        "arms": ({"main-v3": "context-source-snapshot-v3, pinned with --context-framing; the framing of main at "
+                             + git("rev-parse", "main")[:7],
+                  "fix-v4": "context-source-snapshot-v4 (fixes A, D, G), the new default"} if args.cohort == "echo-7" else
+                 {"v3-pinned": "context-source-snapshot-v3, pinned with --context-framing",
+                  "v4-default": "no --context-framing flag: the binary's default, context-source-snapshot-v4 (fixes A, "
+                                "D, G); the reported framing is verified at measurement"}),
+        "disclaimer_questions": list(DISCLAIMER_QUESTIONS),
         "both_arms_same_binary": True,
         "detector": {"module": "scripts/answer_presentation_defects.py", "tool_version": apd.TOOL_VERSION,
                      "module_sha256": digest((ROOT / "scripts/answer_presentation_defects.py").read_bytes()),
@@ -191,11 +238,17 @@ def declare(args):
                          "latex": "math_inline_dollar_pair + math_display_or_paren + math_latex_command",
                          "addresses_question": "non-empty, no host header at start, question not repeated verbatim",
                          "contains_reference": "normalized reference answer is a substring of the normalized answer",
-                         "unresolved_labels": "cited [E n] labels absent from the recorded citation label map"}},
+                         "unresolved_labels": "cited [E n] labels absent from the recorded citation label map",
+                         "decline_opening": "a plain_decline phrase starts within the first "
+                                            f"{DECLINE_OPENING_CHARACTERS} characters of the answer",
+                         "outcome": "decline (decline_opening), partial_decline (a plain_decline phrase later "
+                                    "in the answer only), or answer (no plain_decline phrase); lexical, not a judge",
+                         "delivered_gold_turns": "delivered recent sources whose benchmark turn is marked has_answer",
+                         "delivered_answer_session_sources": "delivered recent sources from a gold answer session"}},
         "runs": runs}
     private_write(output / "declaration.json", canonical(declaration) + b"\n")
     private_write(output / "ledger.jsonl", b"")
-    print(json.dumps({"declared_runs": len(runs), "generation_limit": GENERATION_LIMIT,
+    print(json.dumps({"cohort": args.cohort, "declared_runs": len(runs), "generation_limit": cohort["generation_limit"],
                       "binary_sha256": declaration["binary"]["sha256"], "build_commit": declaration["binary"]["build_commit"],
                       "model_listed": True, "declaration_sha256": digest((output / "declaration.json").read_bytes())}))
 
@@ -222,13 +275,19 @@ def run(args):
         require(all(any(other["run"] == row["run"] and other["state"] != "started" and other.get("try") == row.get("try")
                         for other in done) for row in done if row["state"] == "started"), "unfinished_run_in_ledger")
         require(tries < 3, "retry_limit_reached")
+        # A finished run whose report does not say whether the answer invocation started
+        # may have generated; stop for review rather than retry it or leave it uncounted.
+        require(all(row.get("invocation_started") is not None for row in done if row["state"] == "finished"),
+                "unknown_invocation_state_in_ledger")
         generations = sum(1 for row in done if row.get("invocation_started") is True)
         require(generations < declaration["generation_limit"], "generation_limit_reached")
         input_path = output / "inputs" / f"{entry['question_id']}.json"
         require(digest(input_path.read_bytes()) == entry["runner_input_sha256"], "frozen_input_changed")
         native = output / (f"run-{index:02d}-{entry['question_id']}-{entry['arm']}" + (f"-try{tries}" if tries else ""))
         command = [str(binary), "--answer-evaluation", str(input_path), "--output-directory", str(native),
-                   "--context-framing", entry["context_framing"], "--attempt", str(entry["attempt"])]
+                   "--attempt", str(entry["attempt"])]
+        if entry["context_framing"] is not None:
+            command += ["--context-framing", entry["context_framing"]]
         if entry["component_policy"] != "selected-model-context-components-v1":
             command += ["--component-policy", entry["component_policy"]]
         # Reserve the generation before starting so a crash cannot hide one.
@@ -262,13 +321,34 @@ def measure_answer(answer, question, reference, known_ids, label_map):
             "addresses_question": apd.addresses_question(answer, question, counts),
             "contains_reference": apd.contains_reference(answer, reference),
             "cited_labels": citations["cited_labels"], "unresolved_labels": citations["unresolved_labels"],
-            "ends_with_question": counts["ends_with_question"], "markdown_bold": counts["markdown_bold"]}
+            "ends_with_question": counts["ends_with_question"], "markdown_bold": counts["markdown_bold"],
+            **decline_outcome(answer)}
+
+
+def decline_outcome(answer):
+    """Lexical decline position, using the detector's plain-decline phrase list."""
+    lower = answer.lower().replace("’", "'")
+    positions = [lower.find(phrase) for phrase in apd.PLAIN_DECLINES if phrase in lower]
+    opening = bool(positions) and min(positions) < DECLINE_OPENING_CHARACTERS
+    return {"decline_opening": opening,
+            "outcome": "decline" if opening else ("partial_decline" if positions else "answer")}
+
+
+def delivered_evidence(history, delivered_ids):
+    """Content-free count of delivered recent sources that carry gold benchmark evidence."""
+    labels = {label["event_id"]: label for label in history.get("source_labels") or []}
+    gold_sessions = set(history["episodes"][0].get("answer_session_ids") or [])
+    delivered = [labels.get(event_id) or {} for event_id in delivered_ids or []]
+    return {"delivered_gold_turns": sum(1 for label in delivered if label.get("has_answer") is True),
+            "delivered_answer_session_sources": sum(1 for label in delivered if label.get("session_id") in gold_sessions)}
 
 
 def measure(args):
     output = args.output.absolute()
     declaration = json.loads((output / "declaration.json").read_text())
-    frozen = histories(args.dataset)
+    cohort_name = declaration.get("cohort", "echo-7")
+    cohort = COHORTS[cohort_name]
+    frozen = histories(args.dataset, [tuple(case) for case in declaration.get("cases") or cohort["cases"]])
     rows = []
     ledger_rows = ledger(output)
     attempts_made = {"answer_generations": sum(1 for row in ledger_rows if row.get("invocation_started") is True),
@@ -301,15 +381,42 @@ def measure(args):
                    delivered_ranges=len(item.get("delivered_ranges") or []),
                    label_map_size=len(item.get("citation_labels") or []),
                    request_matches_recorded=preparation.get("request_sha256") == entry["recorded_request_sha256"],
+                   framing_as_declared=report.get("context_framing") == (entry["context_framing"] or V4)
+                   and item.get("context_framing") in (None, entry["context_framing"] or V4),
+                   recorded_prompt_tokens=entry.get("recorded_prompt_tokens"),
+                   delivered_recent_matches_recorded=(digest(canonical(item.get("delivered_recent_source_ids") or []))
+                                                      == entry["recorded_delivered_recent_sha256"]
+                                                      if "recorded_delivered_recent_sha256" in entry else None),
+                   abstention=entry["question_id"].endswith("_abs"),
+                   **delivered_evidence(history, item.get("delivered_recent_source_ids")),
                    **measure_answer(answer, probe["prompt"], probe["answer"], known, item.get("citation_labels")))
         rows.append(row)
     totals = {}
-    for arm, _ in ARMS:
+    for arm, _ in cohort["arms"]:
         measured = [row for row in rows if row["arm"] == arm and row.get("status") == "measured"]
         totals[arm] = {"answers": len(measured),
                        **{name: sum(int(row[name]) for row in measured) for name in DETECTOR if name not in ("answer_bytes", "answer_words")},
                        "median_answer_words": sorted(row["answer_words"] for row in measured)[len(measured) // 2] if measured else None}
-    print(json.dumps({"version": VERSION, "ledger": attempts_made, "rows": rows, "totals": totals}, indent=1))
+    groups = {}
+    if cohort_name == "recent-only-21":
+        subsets = {"abstention": lambda row: row["abstention"], "answerable": lambda row: not row["abstention"],
+                   "disclaimer_questions": lambda row: row["question_id"] in DISCLAIMER_QUESTIONS,
+                   "answerable_without_delivered_gold": lambda row: not row["abstention"] and not row["delivered_gold_turns"],
+                   "answerable_with_delivered_gold": lambda row: not row["abstention"] and bool(row["delivered_gold_turns"])}
+        for arm, _ in cohort["arms"]:
+            measured = [row for row in rows if row["arm"] == arm and row.get("status") == "measured"]
+            groups[arm] = {name: {"answers": len(chosen),
+                                  "with_ai_disclaimer": sum(1 for row in chosen if row["ai_disclaimer"]),
+                                  "decline": sum(1 for row in chosen if row["outcome"] == "decline"),
+                                  "partial_decline": sum(1 for row in chosen if row["outcome"] == "partial_decline"),
+                                  "answer": sum(1 for row in chosen if row["outcome"] == "answer"),
+                                  "contains_reference": sum(1 for row in chosen if row["contains_reference"]),
+                                  "copied_header": sum(row["copied_header"] for row in chosen),
+                                  "with_raw_event_ids": sum(1 for row in chosen if row["raw_event_ids"]),
+                                  "incomplete_result": sum(1 for row in chosen if row["failure"] == "incomplete_result")}
+                           for name, test in subsets.items() for chosen in [[row for row in measured if test(row)]]}
+    print(json.dumps({"version": VERSION, "cohort": cohort_name, "ledger": attempts_made, "rows": rows, "totals": totals,
+                      "groups": groups}, indent=1))
 
 
 def main(argv=None):
@@ -322,6 +429,8 @@ def main(argv=None):
             command.add_argument("--dataset", type=Path, required=True)
         if name in ("declare", "run"):
             command.add_argument("--binary", type=Path, required=True)
+        if name == "declare":
+            command.add_argument("--cohort", choices=sorted(COHORTS), default="echo-7")
     args = parser.parse_args(argv)
     try:
         {"declare": declare, "run": run, "measure": measure}[args.command](args)

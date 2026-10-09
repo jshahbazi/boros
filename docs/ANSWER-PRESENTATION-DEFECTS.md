@@ -8,6 +8,7 @@ Status, October 9, 2026:
 - **Not implemented:** fixes B, C and F.
 - **Measured (diagnosis):** pattern counts over the seven flagged calibration answers and over all 192 saved Qwen and Sol answers with retained text. Also measured: a source comparison of the frozen run builds with `main` (`03f4196`).
 - **Measured (replay):** one local Qwen generation per question under V3 and under V4 for the 7 questions with copied headers, 14 generations in total. V3 copied the header in 3 of 7 answers; V4 did so in 0 of 7. See [Replay](#replay-v3-versus-v4-on-the-seven-echo-questions).
+- **Measured (fix G replay):** one local Qwen generation per question under V3 and under V4 on the recent-only arm of all 21 distinct questions, 42 generations in total. AI or memory disclaimers: V3 3 of 3 on the disclaimer questions (4 of 21 overall), V4 0 of 21. V4 declined on all 21; recent-only delivered no gold evidence for any question, so the declines match the evidence, but this cohort cannot detect a false decline. See [the recent-only replay](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions).
 
 The diagnosis sections below describe the V3 framing as it was. This document contains no answer, question, evidence or history text. It quotes only host-authored code strings and describes answers by structure.
 
@@ -191,6 +192,8 @@ Each delivered source gets a host label `E1`, `E2`, ... in delivery order: recen
 
 The V4 System framing adds: "If the quoted sources contain the answer, answer directly. If they do not contain the requested information, say plainly that the conversation history provided here does not show it, and mention any partially relevant information you found; do not guess, and do not say that you are an AI or that you lack memory or access." It keeps "A missing excerpt is not proof that the archive lacks a fact." The wording asks for a plain decline only when the sources lack the answer, and it forbids guessing.
 
+**Status of G (measured October 9, 2026, 42 local generations):** on the recent-only arm, V4 removed the AI or memory disclaimers (V3 4 of 21, including all 3 disclaimer questions; V4 0 of 21). It also turned every recent-only answer into a plain decline (21 of 21, including all 3 abstention questions). No recent-only delivery contained gold evidence, so those declines match the evidence. Whether G causes false declines when the evidence holds the answer is not established. See [the recent-only replay](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions).
+
 ### Why one version
 
 A, D and G all change the same fixed framing: the System literal, the recent prefix and the historical header. Each change already requires a new snapshot version, digests and validation. Three versions would create two intermediate framings that no default path uses, and the replay budget (7 + 7) allows only one fix arm. The cost is attribution: the replay measures A, D and G together and cannot separate their effects.
@@ -292,6 +295,8 @@ The disclaimers that motivated G occur in 9 saved recent-only answers on 3 disti
 
 This replay included no recent-only attempt on these questions; 1192316e was replayed on its hybrid arm only. A paired V3 against V4 replay of those three recent-only attempts would take 6 generations. Checking that G does not cause declines on answerable questions needs the recent-only arm of the other answerable questions too: up to 21 distinct questions, or 42 paired generations. Both need the user's authorization.
 
+**Update:** the user authorized the 42-generation recent-only replay, and it has run. See [Replay: V3 versus V4 on the recent-only arm of all 21 questions](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions). It also shows that recent-only delivered no gold evidence turn for 06878be2, so that question's V4 recent-only decline above matches the delivered evidence. The 54026fce decline was on the hybrid arm, which the recent-only replay does not cover.
+
 ### Reproduction
 
 ```sh
@@ -301,6 +306,90 @@ python3 scripts/answer_presentation_replay.py measure --output <same directory> 
 ```
 
 `measure` prints counts, identifiers and booleans only. Answers, inputs and native reports stay in the private directory.
+
+## Replay: V3 versus V4 on the recent-only arm of all 21 questions
+
+**Measured, October 9, 2026, with the user's authorization:** up to 42 local generations on the local model server only, as a paired V3 against V4 (default) replay of the recent-only arm on the 21 distinct questions. The replay used 42 answer generations: one per question and framing, with no retry and no run that failed before its answer invocation. No remote or paid call was made. Its purpose is fix G, the insufficient-evidence wording in the default `context-source-snapshot-v4` framing.
+
+### Declaration
+
+The declaration was written at 12:08 UTC, before any generation, to `.build/answer-presentation-recent-only-20261009/declaration.json` (private, 0600, SHA-256 `9817cd6d…`). The first generation started at 12:28 UTC, after the coordinator's offline retrieval harness had exited. The server's `max_safe_context` was about 193,000 when the run started, and no `check.py` or compile ran during the generations.
+
+- **Cohort** (`answer_presentation_replay.py declare --cohort recent-only-21`). The recent-only arm of all 21 distinct questions in the saved native runs. The 7 frozen pilot questions use the natural-v5 runner input (document 5, 512 output tokens): 001be529, 00ca467f, 01493427, 031748ae_abs, 06878be2, 08f4fc43 and 0e5e2d1a. The 14 independent questions use the independent-v1 runner input (document 7, 1,024 output tokens, default component policy v1): 0862e8bf_abs, 1192316e, 1a1907b4, 1b9b7252, 1faac195, 3f1e9474, 4baee567, 51c32626, 54026fce, 7a87bd0c, a1eacc2a, f685340e_abs, gpt4_2655b836 and gpt4_70e84552. All 21 inputs were rebuilt from the pinned dataset and match the runner-input SHA-256 recorded by their original run. Each run executes only the recent-only attempt (`--attempt 0`).
+- **Classes.** 3 abstention questions (`_abs`): 031748ae_abs, 0862e8bf_abs and f685340e_abs. 18 answerable questions. The 3 disclaimer questions are 031748ae_abs, 0862e8bf_abs and 1192316e.
+- **Arms.** `v3-pinned` passes `--context-framing context-source-snapshot-v3`. `v4-default` passes no framing flag, so it runs the binary's default; measurement verified that all 21 reports and selections record `context-source-snapshot-v4`. Run order: question order as listed, V3 then V4 for each question.
+- **Binary.** Both arms ran the same binary: SHA-256 `e60b6bbf…`, built from `main` at `f28584b`. The declaration records commit `f54ec7a`, which adds only the driver cohort and leaves `Sources/` unchanged. Its framing and assembler sources have the same SHA-256 as the binary of the seven-question replay.
+- **Model and settings.** These match the seven-question replay: model `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` (listed by the live server's `/v1/models`), temperature 0, thinking off, seed 104202601, the frozen 32,768 context limit, 256 safety tokens and the frozen output caps (512 for runner document 5, 1,024 for 7).
+- **Limit and retry rule.** Generation limit 42. A run whose answer invocation never started could be retried at most twice without counting. Any run that started an answer invocation counted. A finished run with an unknown invocation state stops the driver.
+- **Detector.** `answer_presentation_defects.py` (`answer-presentation-defects-v2`), the same measures as the seven-question replay, plus three additions:
+  - **Outcome:** `decline` if a plain-decline phrase from the detector's list starts within the first 200 characters, `partial_decline` if one appears only later, and `answer` otherwise.
+  - **Abstention flag.**
+  - **Delivered gold evidence:** the delivered recent sources whose benchmark turn is marked `has_answer`, or that come from a gold answer session. This is computed from labels and delivered IDs and reads no text.
+
+**Only the framing differs.** For all 42 runs, the delivered recent source IDs equal those recorded by the original run. Every V3 prompt token count equals the original run's. V4 prompts were 61 tokens shorter to 98 tokens longer.
+
+**Recent-only delivered no gold evidence.** For all 21 questions and both arms, no delivered recent source is a gold `has_answer` turn or comes from a gold answer session. A content-free check found the normalized reference string in the delivered recent text for 1 of 21 questions: 00ca467f, whose reference is a single token.
+
+### Results
+
+Outcome and Has reference are lexical string checks, not a judge. Header is a copied V3 or V4 host header at the start of the answer. Raw IDs are benchmark event IDs in the answer.
+
+| Question | Class | V3 outcome | V3 disclaimer | V3 header (raw IDs) | V4 outcome | V4 disclaimer | V4 header (raw IDs) | Has reference V3 / V4 | Words V3 / V4 |
+|---|---|---|---:|---|---|---:|---|---|---|
+| 001be529 | answerable | decline | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 67 / 35 |
+| 00ca467f | answerable | decline | 0 | 0 (6) | decline | 0 | 0 (0) | yes / no | 47 / 32 |
+| 01493427 | answerable | answer | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 43 / 30 |
+| 031748ae_abs | abstention, disclaimer question | answer | **1** | 0 (0) | decline | 0 | 0 (0) | no / no | 89 / 37 |
+| 06878be2 | answerable | answer | 0 | **1** (1, fabricated; question repeated) | decline | 0 | 0 (0) | no / no | 22 / 65 |
+| 08f4fc43 | answerable | decline | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 58 / 40 |
+| 0e5e2d1a | answerable | answer | 0 | 0 (1) | decline | 0 | 0 (0) | no / no | 169 / 49 |
+| 0862e8bf_abs | abstention, disclaimer question | answer | **1** | 0 (0) | decline | 0 | 0 (0) | no / no | 19 / 34 |
+| 1192316e | answerable, disclaimer question | answer | **1** | 0 (0) | decline | 0 | 0 (0) | no / no | 73 / 46 |
+| 1a1907b4 | answerable | answer | 0 | **1** (1, fabricated) | decline | 0 | 0 (0) | no / no | 426 / 357 |
+| 1b9b7252 | answerable | answer | 0 | 0 (1) | decline | 0 | 0 (0) | no / no | 134 / 44 |
+| 1faac195 | answerable | answer | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 38 / 37 |
+| 3f1e9474 | answerable | decline | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 51 / 39 |
+| 4baee567 | answerable | decline | 0 | 0 (2) | decline | 0 | 0 (0) | no / no | 60 / 31 |
+| 51c32626 | answerable | decline | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 31 / 30 |
+| 54026fce | answerable | answer | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 377 / 142 |
+| 7a87bd0c | answerable | answer | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 59 / 36 |
+| a1eacc2a | answerable | answer | 0 | 0 (3) | decline | 0 | 0 (0) | no / no | 51 / 40 |
+| f685340e_abs | abstention | answer | 0 | 0 (0) | decline | 0 | 0 (0) | no / no | 50 / 42 |
+| gpt4_2655b836 | answerable | answer | **1** | 0 (0) | decline | 0 | 0 (0) | no / no | 72 / 35 |
+| gpt4_70e84552 | answerable | decline | 0 | 0 (2) | decline | 0 | 0 (0) | no / no | 50 / 35 |
+
+| Arm | Answers | AI disclaimer | Disclaimer on the 3 disclaimer questions | Decline: answerable | Decline: abstention | Copied header (fabricated IDs) | Answers with raw IDs (IDs) | Repeated question | Has reference | Cited labels | Ends with a question | Markdown bold | Median words |
+|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|
+| V3 (pinned) | 21 | 4 | 3 of 3 | 7 of 18 | 0 of 3 | 2 (2) | 8 (17) | 1 | 1 | 0 | 2 | 46 | 58 |
+| V4 (default) | 21 | 0 | 0 of 3 | 18 of 18 | 3 of 3 | 0 (0) | 0 (0) | 0 | 0 | 0 | 1 | 15 | 37 |
+
+No answer in either arm hit its output cap, and none had a `partial_decline` outcome, LaTeX or an unresolved label.
+
+### Reading the results
+
+Measured:
+
+- **G removed the disclaimers on the disclaimer questions.** V3 reproduced an AI or memory disclaimer on all 3 (031748ae_abs, 0862e8bf_abs and 1192316e), plus 1 on gpt4_2655b836, which had none in the saved runs. V4 had 0 of 21. At temperature 0 with fixed inputs this is one paired sample per question, not a rate.
+- **V4 declined on every recent-only question:** 21 of 21, against 7 of 21 under V3. All 3 abstention questions got a lexical decline under V4, against 0 of 3 under V3. Under V3, 2 of those 3 carried a disclaimer, and the third (f685340e_abs) had no decline phrase.
+- **The 18 answerable declines are consistent with the delivered evidence.** Recent-only delivered no gold evidence turn and no gold-session source for any of the 18, so a decline is what G asks for here. This replay therefore cannot show a false decline: it contains no recent-only case where the evidence held the answer. The previous replay's V4 recent-only decline on 06878be2 falls in the same class.
+- **One string-check hit was lost.** The only reference-containing answer was V3 on 00ca467f. That answer also opened with a decline phrase. The reference is a single token that also appears in the delivered, non-gold recent text, so the hit is weak evidence of a correct answer. V4 declined that question.
+- **V4 again removed the header copies and raw IDs.** V3 opened 2 of 21 recent-only answers with a copied header, each with a fabricated event ID: 06878be2 and 1a1907b4. The 06878be2 answer also repeated the question verbatim, the human-role echo pattern that the seven-question replay did not reproduce. V3 also wrote 17 raw event IDs in 8 answers. V4 had 0 headers, 0 fabricated IDs and 0 raw IDs. V4 cited no labels, which is consistent with declining.
+- **V4 answers are shorter** (median 37 against 58 words) and carry less Markdown bold (15 against 46 spans). These were not targets of G.
+
+Inferred, not measured:
+
+- Uniform declines on evidence without gold turns show that G produces the requested wording. They do not show that the model judges evidence sufficiency correctly. A model that declines whenever the evidence is thin would give the same table. The test that matters is whether V4 still answers when the delivered evidence holds the answer. In the seven-question replay, V4 kept all 3 hybrid answers that contained the reference, and that is the only evidence on this question so far. The hybrid V4 decline on 54026fce is still unadjudicated against its delivered evidence.
+- The V3 "answer" outcomes on answerable questions had no gold evidence. Most are therefore guesses or answers from general knowledge. 0 of 11 contained the reference. G's "do not guess" wording removes them, which a user would see as a decline rather than a wrong answer. This is a reading of the counts; the answers were not judged.
+
+### Reproduction
+
+```sh
+python3 scripts/answer_presentation_replay.py declare --cohort recent-only-21 --output <new .build directory> --dataset <pinned longmemeval_s_cleaned.json> --binary <Boros binary>
+python3 scripts/answer_presentation_replay.py run --output <same directory> --binary <same binary>
+python3 scripts/answer_presentation_replay.py measure --output <same directory> --dataset <pinned dataset>
+```
+
+The `measure` output for this run is saved privately as `measure.json` in the run directory.
 
 ## Reproducing the measurements
 
