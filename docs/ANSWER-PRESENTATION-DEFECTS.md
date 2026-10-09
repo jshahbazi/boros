@@ -7,7 +7,7 @@ Status, October 9, 2026:
 - **Implemented (fix E):** rendered Markdown and inline math in the GUI answer display. Display only. See [Fix E](#fix-e-rendered-answer-display).
 - **Not implemented:** fixes B, C and F.
 - **Measured (diagnosis):** pattern counts over the seven flagged calibration answers and over all 192 saved Qwen and Sol answers with retained text. Also measured: a source comparison of the frozen run builds with `main` (`03f4196`).
-- **Replay:** declared next (7 questions, V3 versus V4, 14 local generations); results follow in a later commit.
+- **Measured (replay):** one local Qwen generation per question under V3 and under V4 for the 7 questions with copied headers, 14 generations in total. V3 copied the header in 3 of 7 answers; V4 did so in 0 of 7. See [Replay](#replay-v3-versus-v4-on-the-seven-echo-questions).
 
 The diagnosis sections below describe the V3 framing as it was. This document contains no answer, question, evidence or history text. It quotes only host-authored code strings and describes answers by structure.
 
@@ -210,6 +210,97 @@ A, D and G all change the same fixed framing: the System literal, the recent pre
 - `ComponentPreparationChecks` runs the coordinator end to end under both framings. `.pipeline` runs V3; the new `.quotedPipeline` and the default fixtures run V4. Each goes through admission, the original-input proof, journal validation, archive creation and verification, and restore. The journal corruption suite runs against both. A new `reboundCitationLabelMap` mutation is refused for v1, v2, v3 and v4.
 - `scripts/test_answer_presentation_defects.py` has 14 contracts. They cover the V4 rendering, V4 header detection, label resolution, fabricated IDs, plain decline versus disclaimer, and the reference and addressing checks.
 - `python3 scripts/answer_presentation_defects.py envelope` renders both framings from the Swift literals. It reports `assistant_turns_starting_with_host_text`: V3 1, V4 0.
+
+## Replay: V3 versus V4 on the seven echo questions
+
+**Measured, October 9, 2026, with the user's authorization ("implement fix A and replay the 7 questions"). The coordinator extended the fix arm to A+D+G.** One local generation per question and framing, 14 in total. No remote call was made.
+
+### Declaration
+
+Written before any generation, at `.build/answer-presentation-replay-20261009/declaration.json` (private, 0600):
+
+- **Inputs.** Each case uses the frozen runner input of the run whose saved answer copied the header. All 7 were rebuilt from the pinned dataset and match the runner-input SHA-256 recorded by that run. Each run executes only the declared attempt (`--attempt`).
+- **Binary.** Both arms ran the same binary: SHA-256 `39a5b25e…`, built from commit `87f70ea`. The only difference between arms is `--context-framing`: `context-source-snapshot-v3`, the framing of `main` (`0badf7e`, with no `Sources/` change since `088d92f`), against `context-source-snapshot-v4`.
+- **Model and settings.** Model `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, temperature 0, thinking off, seed 104202601, the frozen 32,768 context limit and the frozen output caps (512 for runner documents 4 and 5, 1,024 for 7). The live server's `/v1/models` listed the model.
+- **Limits and detector.** Generation limit 14. Detector: `answer_presentation_defects.py` (`answer-presentation-defects-v2`), with the measures defined below.
+
+| Question | Run where the header was copied | Arm | Component policy |
+|---|---|---|---|
+| 001be529 | natural-v4 | hybrid | v1 |
+| 06878be2 | natural-v5 | recent only | v1 |
+| 0e5e2d1a | natural-v5 | hybrid | v1 |
+| 1192316e | neighborhood-v1 | hybrid | v2, bounded neighborhood (pinned with `--component-policy`) |
+| 1a1907b4 | independent-v1 (it also echoed in neighborhood-v1) | hybrid | v1 |
+| 1faac195 | independent-v1 | hybrid | v1 |
+| 54026fce | neighborhood-v1 | hybrid | v2 (pinned) |
+
+**Operational record.** The first two attempts at the first case failed in admission before any answer invocation, so no answer was generated. The first failed with `provider_admission_unavailable`: the 1-token calibration request timed out while the server was loading the model. The second failed with `provider_adapter_unverified`: the server's `max_safe_context` was below 32,768 and drifting while `check.py` compiles loaded the host. Two further runs were stopped during setup, before any server request. After the host's memory recovered (`max_safe_context` about 120,000 and stable), all 14 declared runs completed. The ledger records 14 answer generations and 4 runs without an answer invocation. One V3 answer (06878be2) ended at the 512-token cap (`incomplete_result`).
+
+**Only the framing differs.** For every question, the two arms delivered identical source sets: the same recent IDs and the same historical event and range lists. For 5 of 7 questions, those sets also equal the ones the original run recorded. For 001be529 and 0e5e2d1a (natural-v4 and natural-v5), current retrieval delivers a different set than those older builds did. On the recent-only case, where no conversation UUID enters the prompt, the V3 prompt token count equals the original run's exactly (5,073). V4 prompts were 169 to 300 tokens shorter on the hybrid cases and 17 tokens longer on the recent-only case.
+
+### Results
+
+Definitions:
+
+- **Header:** the answer opens with a V3 or V4 host header or block marker.
+- **Fabricated:** distinct raw or JSON event IDs in the answer that are absent from the history.
+- **Repeated question:** the question appears verbatim.
+- **Raw IDs:** benchmark event IDs in the answer.
+- **LaTeX:** inline, display or command math.
+- **Addresses:** non-empty, no header at the start, question not repeated.
+- **Has reference:** the normalized reference answer is a substring of the normalized answer. This is a string check, not a judge.
+- **Labels:** cited `[E<n>]` labels, and how many resolve to a delivered source in the journaled map.
+
+| Question | Arm | Header | Fabricated IDs | Repeated question | Raw IDs | AI disclaimer | Plain decline | LaTeX | Words | Addresses | Has reference | Labels cited (resolved) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|
+| 001be529 | V3 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 48 | yes | yes | 0 |
+| 001be529 | V4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 20 | yes | yes | 1 (1) |
+| 06878be2 | V3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 348 (cap) | yes | no | 0 |
+| 06878be2 | V4 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 66 | yes | no | 0 |
+| 0e5e2d1a | V3 | **1** | 1 | 0 | 2 | 0 | 0 | 0 | 35 | no | yes | 0 |
+| 0e5e2d1a | V4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 31 | yes | yes | 1 (1) |
+| 1192316e | V3 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 61 | yes | no | 0 |
+| 1192316e | V4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 55 | yes | no | 2 (2) |
+| 1a1907b4 | V3 | **1** | 1 | 0 | 1 | 0 | 0 | 0 | 233 | no | no | 0 |
+| 1a1907b4 | V4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 196 | yes | no | 6 (6) |
+| 1faac195 | V3 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 12 | yes | yes | 0 |
+| 1faac195 | V4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 12 | yes | yes | 1 (1) |
+| 54026fce | V3 | **1** | 1 | 0 | 1 | 0 | 0 | 0 | 162 | no | no | 0 |
+| 54026fce | V4 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 179 | yes | no | 0 |
+
+| Arm | Answers | Header | Fabricated IDs | Repeated question | Raw IDs | AI disclaimer | Plain decline | LaTeX | Addresses | Has reference | Labels cited (unresolved) | Ends with a question | Markdown bold | Median words |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| V3 (main) | 7 | 3 | 3 | 0 | 8 | 0 | 0 | 0 | 4 | 3 | 0 (0) | 1 | 38 | 61 |
+| V4 (A+D+G) | 7 | 0 | 0 | 0 | 0 | 0 | 2 | 0 | 7 | 3 | 11 (0) | 0 | 20 | 55 |
+
+Reading the results:
+
+- **Current main still copies the header.** V3 opened 3 of 7 answers with a copied header, each with a fabricated event ID (0e5e2d1a, 1a1907b4 and 54026fce). The original runs had 16 echoes in 126 envelope answers, all 16 on these 7 questions. At temperature 0 with fixed inputs, 3 of 7 is a reproduction on a small sample, not a rate.
+- **V4 removed the header copy on every question:** 0 of 7, with no fabricated IDs and no raw event IDs. It cited 11 labels, and all 11 resolve to delivered sources.
+- **Accuracy did not change on the string check.** The reference string appears in the same 3 answers under both arms. V4 did not lose the three answers V3 had right, and the string check found no new correct answer.
+- **The question was not repeated verbatim in either arm.** The human-role echo with a repeated question did not recur under V3 in this replay, so this replay does not test that pattern.
+- **G needs review.** V4 opened 2 answers with a plain decline (06878be2 recent only, 54026fce hybrid). Both questions are answerable, not abstention items. Under V3, the first hit the output cap and the second copied the header; neither contained the reference under either arm. Whether these declines are faithful (the delivered evidence lacks the answer) or wrong (a decline on answerable evidence) needs adjudication against the delivered evidence. This replay does not settle it, and it is the main risk to check before relying on G.
+- **The V4 answers carry less Markdown bold** (20 against 38 spans), and none ends with a question. These were not targets of A, D or G, and n = 7.
+
+### What G would need
+
+The disclaimers that motivated G occur in 9 saved recent-only answers on 3 distinct questions:
+
+- 031748ae_abs: natural-v2 to v5 and adjacent-v1 (item-032)
+- 0862e8bf_abs: independent-v1 and neighborhood-v1 (item-030)
+- 1192316e: independent-v1 and neighborhood-v1; answerable
+
+This replay included no recent-only attempt on these questions; 1192316e was replayed on its hybrid arm only. A paired V3 against V4 replay of those three recent-only attempts would take 6 generations. Checking that G does not cause declines on answerable questions needs the recent-only arm of the other answerable questions too: up to 21 distinct questions, or 42 paired generations. Both need the user's authorization.
+
+### Reproduction
+
+```sh
+python3 scripts/answer_presentation_replay.py declare --output <new .build directory> --dataset <pinned longmemeval_s_cleaned.json> --binary <Boros binary>
+python3 scripts/answer_presentation_replay.py run --output <same directory> --binary <same binary>
+python3 scripts/answer_presentation_replay.py measure --output <same directory> --dataset <pinned dataset>
+```
+
+`measure` prints counts, identifiers and booleans only. Answers, inputs and native reports stay in the private directory.
 
 ## Reproducing the measurements
 
