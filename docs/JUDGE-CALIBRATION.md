@@ -356,6 +356,55 @@ Proposed measurement, as a P4 extension once P5 or another authorized run produc
 3. Score Opus and Sonnet on it. Compare false-accept rates on own-model, same-family and other-family answers: Opus on Opus, Sonnet on Opus and Sonnet, and both on Qwen and Sol.
 4. Until that comparison shows no material same-family excess, grade P5's Opus reader answers with the best calibrated non-Anthropic judge, and report the Sonnet-on-Opus result separately with its same-family caveat. Human adjudication of a sample of P5 Opus answers is the fallback when no non-Anthropic judge has acceptable error rates.
 
+## Human adjudication (measured, October 9, 2026)
+
+The user adjudicated all 50 items of set `jc-9adfaeeb572b8380` in one pass with the local form, applying the [category tolerances](#category-tolerances-user-decision-october-8-2026). The export's `adjudicator` field is blank; the adjudicator is the user. The export is private at `.build/judge-calibration/adjudications-jc-9adfaeeb572b8380.json` (SHA-256 `503e814290e5ee1f64567cc053280a3b7ea67c377e016cbe174da1fbd11f35ce`); the score report is `.build/judge-calibration/score-human-v1-20261009.json` (SHA-256 `51ff25b3e41a0fabbb43dcc14eec16a5dbb5e7d4404d19fe7d2faf7c4e75fed4`). Free-text notes stay private.
+
+### Totals
+
+| Measure | Count |
+|---|---:|
+| Accepted | 43 |
+| Rejected | 7 |
+| Pack sufficient / insufficient | 28 / 22 |
+| Unsupported claims flagged | 0 |
+| Sufficiency changed after reveal | 0 |
+
+- **By answerer:** all 15 Sol answers accepted; Qwen 28 of 35. All seven rejects are Qwen answers: three temporal reasoning, two preference, two assistant recall.
+- **Adjudication rules observed beyond the protocol:** an answer that first gives a wrong value and then corrects itself was rejected (2 items), and an answer that gives no answer or restates the question was rejected. The upstream judge prompt accepts a response that "contains" the correct answer, so upstream-prompt judges are expected to disagree with these two self-correction items.
+- **Correct-plus-unsupported stratum:** both items were accepted without the unsupported flag, against their prior source-aware labels.
+
+### Sufficiency against the annotation proxy
+
+For the 37 answerable items, human sufficiency agrees with "every annotated positive turn delivered" on 33 (89 percent): 23 sufficient with all delivered, 10 insufficient without. Three were sufficient without every annotated turn and one insufficient with all of them. This supports R2's annotation proxy as a measure of sufficient evidence, on this sample. Eleven of 13 abstention items were marked insufficient, reading "insufficient" as "the evidence lacks the information"; abstention sufficiency labels therefore do not follow the protocol's definition and are excluded from sufficiency agreement.
+
+Ten of the 11 answerable items with insufficient evidence still have accepted answers. Answer acceptance therefore overstates memory quality on its own; A1 has to be measured on adjudicated sufficient packs, as the plan defines it.
+
+### Earlier judges against the adjudication
+
+These are the historical labels already attached to the items, from the runs that produced them. Each judge saw a different subset, so they are not a head-to-head comparison. All use the upstream reference-only prompt except where noted.
+
+| Judge | Items compared | False reject (95% interval) | False accept (95% interval) |
+|---|---:|---|---|
+| Qwen local, upstream QA prompt | 27 | 12/23, 52% (33-71%) | 0/4 (0-49%) |
+| JevK5 local, upstream QA prompt | 18 | 2/17, 12% (3-34%) | 0/1 (0-79%) |
+| Sol, upstream QA prompt | 13 | 1/13, 8% (1-33%) | none adjudicated reject |
+| Qwen and Sol, four-field source-aware rubric | 2 each | 1/1 each | 0/1 each |
+| Sol, source-only sufficiency | 8 | sufficiency agreement 8/8, kappa 1.0 | |
+
+- **Qwen as judge rejects about half of correct answers.** Its disagreements concentrate in the neighborhood run (7 of 9 labels) and the independent cohort (3 of 9). Accepted-answer counts in records judged by Qwen are therefore likely undercounts, by an amount that may differ between arms; they should not be compared across arms without re-judging.
+- **False accept is effectively unmeasured.** The set has only 7 adjudicated rejects, and the earlier judges saw at most 4 of them. Measuring false-accept rates needs more wrong answers; see the next steps below.
+
+### Answer presentation defects
+
+Seven accepted or rejected Qwen answers carry notes about visible metadata, envelope text such as "Original message text", stray dollar signs or poor prose. They come from the natural-v5, independent-v1, neighborhood-v1 and source-controls-v1 runs. Whether the current build still produces them is unverified. This is a product defect separate from correctness.
+
+### Next steps (proposed)
+
+1. Extend the set with at least 25 likely-wrong answers (recent-only, insufficient-pack and earlier rejected attempts), adjudicated the same way, so false-accept intervals can separate judges.
+2. Run the four built judge runners over the 50 items under filled declarations, after authorization.
+3. Re-judge the Qwen-labelled records that inform current claims with the best-calibrated judge.
+
 ## What the user must do and authorize
 
 To start P4 adjudication now (no model calls):
