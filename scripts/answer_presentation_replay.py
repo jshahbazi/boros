@@ -11,9 +11,12 @@ LongMemEval question-arm cases (docs/ANSWER-PRESENTATION-DEFECTS.md):
   independent-v1). 42 generations. It measures fix G: declines, AI or memory
   disclaimers, and correct abstentions.
 - ``retrieval-on-21``: the same 21 questions and runner inputs with past-conversation retrieval
-  on. The runner can select only the recorded ``hybrid`` attempt (explicit fused retrieval with
-  the history's semantic index), not the ``lexical`` selection of ordinary Send. 42 generations.
-  It measures whether fix G declines when the delivered evidence holds the gold turns.
+  on: the recorded ``hybrid`` attempt. By default the runner runs it as explicit fused retrieval
+  with the history's semantic index. Declared with ``--retrieval-arm ordinary_send``, each run
+  passes ``--retrieval-arm ordinary_send`` to the runner, which runs the attempt in the ordinary
+  Send configuration instead: lexical selection, no semantic index built or passed, semantic
+  retrieval disabled by policy. 42 generations. It measures whether fix G declines when the
+  delivered evidence holds the gold turns.
 
 Both arms run the same verified binary through the existing ``--answer-evaluation``
 path with the frozen runner input; only the context framing differs (V3 pinned with
@@ -88,11 +91,12 @@ INDEPENDENT_QUESTIONS = ("0862e8bf_abs", "1192316e", "1a1907b4", "1b9b7252", "1f
                          "gpt4_70e84552")
 RECENT_ONLY_CASES = tuple((question_id, "natural-v5", "recent_only", None) for question_id in PILOT_QUESTIONS) \
     + tuple((question_id, "independent-v1", "recent_only", None) for question_id in INDEPENDENT_QUESTIONS)
-# The same 21 questions and frozen runner inputs with past-conversation retrieval on. The
-# answer-evaluation runner can select only the recorded ``hybrid`` attempt: for it, the runner
-# builds the history's semantic index and passes it to the coordinator (explicit fused retrieval,
-# the harness ``hybrid`` arm). It has no option for the ``lexical`` selection that ordinary Send
-# uses since October 8, 2026 (docs/P2-SEMANTIC-DECISION.md).
+# The same 21 questions and frozen runner inputs with past-conversation retrieval on: the recorded
+# ``hybrid`` attempt. Without a retrieval arm, the runner builds the history's semantic index and
+# passes it to the coordinator (explicit fused retrieval, the harness ``hybrid`` arm). Declared with
+# ``--retrieval-arm ordinary_send``, the runner instead runs the ordinary Send configuration that
+# the GUI uses since October 8, 2026 (docs/P2-SEMANTIC-DECISION.md): the harness ``ordinary_send``
+# arm, whose selection equals the harness ``lexical`` arm.
 RETRIEVAL_ON_CASES = tuple((question_id, run, "hybrid", policy) for question_id, run, _, policy in RECENT_ONLY_CASES)
 # Questions whose saved recent-only answers carried an AI or memory disclaimer.
 DISCLAIMER_QUESTIONS = ("031748ae_abs", "0862e8bf_abs", "1192316e")
@@ -128,8 +132,18 @@ RETRIEVAL_SELECTION = {
     "echo-7": "the declared attempt's recorded strategy",
     "recent-only-21": "recent_only attempt: no past-conversation retrieval",
     "retrieval-on-21": "hybrid attempt: the runner constructs the history's semantic index and passes it to the "
-                       "coordinator (explicit fused retrieval, the retrieval harness hybrid arm). The runner has no "
-                       "option for the lexical selection that ordinary Send uses since 2026-10-08.",
+                       "coordinator (explicit fused retrieval, the retrieval harness hybrid arm). Not the lexical "
+                       "selection that ordinary Send uses since 2026-10-08; declare with --retrieval-arm "
+                       "ordinary_send for that.",
+}
+# Runner retrieval arms a declaration may request (``--answer-evaluation --retrieval-arm``). The arm
+# replaces declared hybrid attempts only, so it is accepted only for cohorts of hybrid cases.
+RETRIEVAL_ARMS = {
+    "ordinary_send": "hybrid attempt run in the ordinary Send configuration (--retrieval-arm ordinary_send): "
+                     "lexical selection, no semantic index built or passed, semantic retrieval disabled by policy "
+                     "and recorded as disabled_by_policy in the retrieval audit; the retrieval harness ordinary_send "
+                     "arm, whose selection equals its lexical arm. The runner report records the arm per attempt "
+                     "and it is verified at measurement.",
 }
 DETECTOR = ("copied_header", "fabricated_event_ids", "repeated_question", "raw_event_ids", "ai_disclaimer",
             "plain_decline", "latex", "answer_bytes", "answer_words", "addresses_question", "contains_reference",
@@ -192,6 +206,46 @@ def histories(dataset: Path, case_list):
     return out
 
 
+def declared_retrieval_arm(cohort_name, arm):
+    """The runner retrieval arm a declaration requests, or None. Refused unless every case of the
+    cohort is a hybrid attempt, since the runner applies the arm to declared hybrid attempts only."""
+    if arm is None:
+        return None
+    require(arm in RETRIEVAL_ARMS, "unknown_retrieval_arm")
+    require(all(strategy == "hybrid" for _, _, strategy, _ in COHORTS[cohort_name]["cases"]),
+            "retrieval_arm_requires_hybrid_cohort")
+    return arm
+
+
+def runner_command(binary: Path, input_path: Path, native: Path, entry):
+    """The ``--answer-evaluation`` command of one declared run. Runs declared before retrieval arms
+    existed have no ``retrieval_arm`` field and keep their exact command."""
+    command = [str(binary), "--answer-evaluation", str(input_path), "--output-directory", str(native),
+               "--attempt", str(entry["attempt"])]
+    if entry["context_framing"] is not None:
+        command += ["--context-framing", entry["context_framing"]]
+    if entry["component_policy"] != "selected-model-context-components-v1":
+        command += ["--component-policy", entry["component_policy"]]
+    if entry.get("retrieval_arm") is not None:
+        command += ["--retrieval-arm", entry["retrieval_arm"]]
+    return command
+
+
+def retrieval_arm_as_declared(entry, report, item):
+    """Whether the runner report shows the declared retrieval arm. Without one, the report must carry
+    no arm fields; with ``ordinary_send``, the attempt must record the arm, the disabled policy, no
+    semantic index received, no sidecar and a validated lexical receipt."""
+    arm = entry.get("retrieval_arm")
+    if arm is None:
+        return "retrieval_arm_override" not in report and "retrieval_arm" not in item
+    return (report.get("retrieval_arm_override") == arm and item.get("retrieval_arm") == arm
+            and item.get("semantic_retrieval_policy") == "disabled_by_policy"
+            and item.get("preparation_received_semantic_index") is False
+            and item.get("semantic_sidecar_present") is False
+            and item.get("retrieval_arm_receipt_validated") is True
+            and (item.get("background") or {}).get("performed") is False)
+
+
 def recorded_attempt(report, question_id, strategy):
     for history in report["histories"]:
         for attempt in history["attempts"]:
@@ -214,6 +268,7 @@ def declare(args):
     models = live_models()
     require(MODEL in models, "pinned_model_not_listed")
     cohort = COHORTS[args.cohort]
+    retrieval_arm = declared_retrieval_arm(args.cohort, getattr(args, "retrieval_arm", None))
     frozen = histories(args.dataset, cohort["cases"])
     private_directory(output)
     private_directory(output / "inputs")
@@ -238,6 +293,8 @@ def declare(args):
                          "recorded_delivered_ranges_sha256": ranges_digest(recorded["metadata"].get("delivered_ranges")),
                          "abstention": question_id.endswith("_abs"),
                          "recorded_binary_sha256": report["implementation"].get("binary_sha256")})
+            if retrieval_arm is not None:
+                runs[-1]["retrieval_arm"] = retrieval_arm
     configuration = {key: value for key, value in baseline.CONFIGURATION.items() if key != "system"}
     declaration = {
         "version": VERSION, "declared_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -262,7 +319,7 @@ def declare(args):
                              + git("rev-parse", "main")[:7],
                   "fix-v4": "context-source-snapshot-v4 (fixes A, D, G), the new default"} if args.cohort == "echo-7" else
                  dict(ARM_DESCRIPTIONS[args.cohort])),
-        "retrieval_selection": RETRIEVAL_SELECTION[args.cohort],
+        "retrieval_selection": RETRIEVAL_ARMS[retrieval_arm] if retrieval_arm else RETRIEVAL_SELECTION[args.cohort],
         "disclaimer_questions": list(DISCLAIMER_QUESTIONS),
         "both_arms_same_binary": True,
         "detector": {"module": "scripts/answer_presentation_defects.py", "tool_version": apd.TOOL_VERSION,
@@ -290,9 +347,12 @@ def declare(args):
                                           "decline_partial_gold when partial; abstention_decline on abstention "
                                           "questions"}},
         "runs": runs}
+    if retrieval_arm is not None:
+        declaration["retrieval_arm"] = retrieval_arm
     private_write(output / "declaration.json", canonical(declaration) + b"\n")
     private_write(output / "ledger.jsonl", b"")
-    print(json.dumps({"cohort": args.cohort, "declared_runs": len(runs), "generation_limit": cohort["generation_limit"],
+    print(json.dumps({"cohort": args.cohort, "retrieval_arm": retrieval_arm, "declared_runs": len(runs),
+                      "generation_limit": cohort["generation_limit"],
                       "binary_sha256": declaration["binary"]["sha256"], "build_commit": declaration["binary"]["build_commit"],
                       "model_listed": True, "declaration_sha256": digest((output / "declaration.json").read_bytes())}))
 
@@ -328,12 +388,7 @@ def run(args):
         input_path = output / "inputs" / f"{entry['question_id']}.json"
         require(digest(input_path.read_bytes()) == entry["runner_input_sha256"], "frozen_input_changed")
         native = output / (f"run-{index:02d}-{entry['question_id']}-{entry['arm']}" + (f"-try{tries}" if tries else ""))
-        command = [str(binary), "--answer-evaluation", str(input_path), "--output-directory", str(native),
-                   "--attempt", str(entry["attempt"])]
-        if entry["context_framing"] is not None:
-            command += ["--context-framing", entry["context_framing"]]
-        if entry["component_policy"] != "selected-model-context-components-v1":
-            command += ["--component-policy", entry["component_policy"]]
+        command = runner_command(binary, input_path, native, entry)
         # Reserve the generation before starting so a crash cannot hide one.
         with open(output / "ledger.jsonl", "a") as handle:
             handle.write(json.dumps({"run": index, "state": "started", "try": tries or None}) + "\n")
@@ -482,6 +537,8 @@ def measurement(output: Path, dataset: Path):
         report_path = native / "report.json"
         row = {"question_id": entry["question_id"], "source_run": entry["source_run"], "strategy": entry["strategy"],
                "arm": entry["arm"]}
+        if entry.get("retrieval_arm") is not None:
+            row["retrieval_arm"] = entry["retrieval_arm"]
         if not report_path.exists():
             rows.append({**row, "status": "not_run"})
             continue
@@ -501,6 +558,7 @@ def measurement(output: Path, dataset: Path):
                    request_matches_recorded=preparation.get("request_sha256") == entry["recorded_request_sha256"],
                    framing_as_declared=report.get("context_framing") == (entry["context_framing"] or V4)
                    and item.get("context_framing") in (None, entry["context_framing"] or V4),
+                   retrieval_arm_as_declared=retrieval_arm_as_declared(entry, report, item),
                    recorded_prompt_tokens=entry.get("recorded_prompt_tokens"),
                    delivered_recent_matches_recorded=(digest(canonical(item.get("delivered_recent_source_ids") or []))
                                                       == entry["recorded_delivered_recent_sha256"]
@@ -701,6 +759,8 @@ def main(argv=None):
             command.add_argument("--binary", type=Path, required=True)
         if name == "declare":
             command.add_argument("--cohort", choices=sorted(COHORTS), default="echo-7")
+            command.add_argument("--retrieval-arm", choices=sorted(RETRIEVAL_ARMS), default=None,
+                                 help="runner retrieval arm for every run; hybrid-only cohorts (retrieval-on-21)")
         if name == "judge-summary":
             command.add_argument("--labels", type=Path, required=True)
     args = parser.parse_args(argv)
