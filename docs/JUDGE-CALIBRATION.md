@@ -628,6 +628,7 @@ One line per authorized run. Every run uses the configuration above, verdict tas
 
 - October 9, 2026, [hybrid retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions): 42 Qwen answers, set `jr-d978990efd3d8096`, 126 of 126 parsed, 31 of 42 accepted, $0.128274 observed under a $1.00 cap.
 - October 9, 2026, [lexical (ordinary Send) retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions): 42 Qwen answers, set `jr-ffadbd1ee098c5a5`. The first session halted on one transport failure at 48 of 126 ($0.048666, labels unused); a full second session parsed 126 of 126 (labels SHA-256 `baf8cc71…9c16`, $0.125522). 31 of 42 accepted. Total $0.174188 observed, kept within the $1.00 authorization by capping the second session at $0.94.
+- October 9, 2026, [framing V5 replay](FRAMING-V5.md): 207 Qwen answers (V4, V5 and V4 without G over three cohorts), set `jr-6d3b1c7ae4df92e6`, one session, 621 of 621 parsed (labels SHA-256 `aaf783c5…358e`), 103 of 207 accepted, $0.851556 observed under a $2.00 cap. The output cap was 64 tokens instead of 512 so that the reservation fit the cap; replies averaged 11.5 tokens, all `end_turn`.
 
 ## What the user must do and authorize
 
