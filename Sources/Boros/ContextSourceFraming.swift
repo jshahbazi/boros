@@ -21,13 +21,22 @@ enum ContextSourceFraming {
     /// G from fix A. Only `--answer-evaluation --context-framing` may select
     /// it; the coordinator refuses it otherwise (`permits`).
     static let insufficientEvidenceAblationSelectionVersion = "context-source-snapshot-v4-no-g"
+    /// V4 plus only V5's advice clause (docs/FRAMING-V4-VARIANTS.md): advice
+    /// and suggestions are tailored to user details from any quoted source.
+    /// V4's fix G sentences are unchanged. Selectable for evaluation; not the default.
+    static let adviceSelectionVersion = "context-source-snapshot-v4-advice"
+    /// V4 plus one instruction to state the supporting facts and any date or
+    /// count arithmetic before the conclusion, and never revise a stated
+    /// conclusion (docs/FRAMING-V4-VARIANTS.md). Selectable for evaluation; not the default.
+    static let orderedConclusionSelectionVersion = "context-source-snapshot-v4-ordered"
     /// New episodes, ordinary Send and unpinned evaluation runs use this.
     static let defaultSelectionVersion = quotedSelectionVersion
     /// Versions with the V4 quoted presentation: host-quoted recent sources,
     /// citation labels, the label map and V4's recent and historical bytes.
     /// They differ only in the fixed System framing.
     static let quotedSelectionVersions: Set<String> = [quotedSelectionVersion, scopedDeclineSelectionVersion,
-                                                         insufficientEvidenceAblationSelectionVersion]
+                                                         insufficientEvidenceAblationSelectionVersion,
+                                                         adviceSelectionVersion, orderedConclusionSelectionVersion]
     /// Framings that exist for measurement only and are never used by Send.
     static let evaluationOnlySelectionVersions: Set<String> = [insufficientEvidenceAblationSelectionVersion]
     static let citationLabelVersion = "context-citation-labels-v1"
