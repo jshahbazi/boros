@@ -81,6 +81,7 @@ enum DeliveryHarness {
         switch arm {
         case "exchange_lexical": limits.componentPolicy = .selectedQwenExchange
         case "exchange_adjacent": limits.componentPolicy = .selectedQwenExchangeAdjacent
+        case "exchange_packed": limits.componentPolicy = .selectedQwenExchangePacked
         default: return nil
         }
         return limits
@@ -312,6 +313,7 @@ enum DeliveryHarness {
                       into item: inout [String: Any]) throws {
             guard let audit = try JSONSerialization.jsonObject(with: preparation.contextAudit) as? [String: Any] else { throw Failure.invalid }
             item["prompt_tokens"] = preparation.admission.promptTokens
+            item["context_audit_bytes"] = preparation.contextAudit.count
             item["evidence"] = try (audit["historical_sources"] as? [[String: Any]] ?? []).map { source -> [String: Any] in
                 guard let id = source["event_id"], let offset = source["excerpt_offset"], let length = source["excerpt_bytes"],
                       let total = source["source_bytes"] else { throw Failure.invalid }

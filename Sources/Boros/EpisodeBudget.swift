@@ -148,14 +148,26 @@ struct ContextComponentPolicy: Codable, Equatable {
         value.version = "selected-model-context-components-v3-exchange-adjacent"
         return value
     }()
+    /// Explicit experimental P2 step 3 policy: the step 1 and 2 ranking and
+    /// neighbors, but a declared candidate window packed by relevance per
+    /// estimated cost with quoted-anchor blocks protected and an omission
+    /// receipt for every candidate unit. Not a default.
+    static let selectedQwenExchangePacked: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-packed"
+        return value
+    }()
     static let exchangeSelectionAuditVersion = "context-exchange-v1"
     // The wider candidate frontier remains experimental pending answer-quality
     // evidence that justifies changing ordinary Send and public evaluation.
     static let currentSelectedQwen = selectedQwen
 
     var usesBoundedNeighborhood: Bool { self == Self.selectedQwenNeighborhood }
-    var usesExchangeQuery: Bool { self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent }
-    var packsAdjacentExchanges: Bool { self == Self.selectedQwenExchangeAdjacent }
+    var usesExchangeQuery: Bool {
+        self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent || self == Self.selectedQwenExchangePacked
+    }
+    var packsAdjacentExchanges: Bool { self == Self.selectedQwenExchangeAdjacent || self == Self.selectedQwenExchangePacked }
+    var packsExchangeValueDensity: Bool { self == Self.selectedQwenExchangePacked }
     var selectionAuditVersion: String {
         usesBoundedNeighborhood ? "context-neighborhood-v2"
             : usesExchangeQuery ? Self.exchangeSelectionAuditVersion : "context-geometric-v1"
@@ -186,7 +198,8 @@ struct ContextComponentPolicy: Codable, Equatable {
 
     func validated() throws -> ContextComponentPolicy {
         guard self == Self.selectedQwen || self == Self.selectedQwenNeighborhood
-            || self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent else { throw EpisodeBudgetError.invalid }
+            || self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent
+            || self == Self.selectedQwenExchangePacked else { throw EpisodeBudgetError.invalid }
         return self
     }
 

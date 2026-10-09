@@ -331,6 +331,19 @@ struct ContextSnapshot {
         }
         else if envelope { result.selectionAudit?.evidenceEnvelopeExcludedCount += removed }
         else { result.selectionAudit?.evidenceTokenExcludedCount += removed }
+        // The P2 value-density packer records each counted removal as an
+        // explicit receipt: hashed event ID prefix, page offset and reason.
+        if singleSpan, let removedSpan = evidence.last, let audit = retrievalAuditJSON,
+           var retrieval = try JSONSerialization.jsonObject(with: audit) as? [String: Any],
+           var exchange = retrieval["exchange_query"] as? [String: Any],
+           exchange["packing_version"] as? String == "exchange-value-density-v1" {
+            var receipts = exchange["reduction_receipts"] as? [[Any]] ?? []
+            receipts.append([String(Self.digest(Data(removedSpan.eventID.utf8)).prefix(12)), removedSpan.excerptOffset,
+                auditSize ? "audit" : envelope ? "envelope" : "token"])
+            exchange["reduction_receipts"] = receipts
+            retrieval["exchange_query"] = exchange
+            result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: retrieval, options: [.sortedKeys])
+        }
         result.componentAuditJSON = nil
         return result
     }
