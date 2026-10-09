@@ -31,6 +31,7 @@ TEMPLATES = jc.ROOT / "scripts" / "judge_calibration_declarations"
 PROMPT_SET_SHA256 = "1cce15660c8a730df03f5654926356715842e5c5bdbb64709a4a1c6cd1990221"
 VERDICT_SHA256 = "85fa445ad2cda3f103a89828f126834795beffafce991bf676b90531ffc2b40c"
 SUFFICIENCY_SHA256 = "c604485853f65670fa54599aceb06f5d152a8798b03dc518cca6de73ec76b857"
+REPLY_SCHEMA_SHA256 = "089f6abbd4ee62321396ed07e5929cfe30394cfe04f6c44e9512f60bc3fca549"
 KEY_SENTINELS = ("RUNSENTINEL", "ARMSENTINEL", "qwen-local-qa", "sol-qa", "gpt-6.1-sol", jc.QWEN_MODEL,
                  "q00000a1", "q00000a2_abs", "accepted", "abstention_stratum")
 EXECUTABLE_SHA = "e" * 64
@@ -68,8 +69,8 @@ def synthetic_candidates():
     return out
 
 
-def fill(judge, manifest, *, replicates=3, **overrides):
-    document = json.loads((TEMPLATES / f"{judge}.template.json").read_text())
+def fill(judge, manifest, *, replicates=3, template=None, **overrides):
+    document = json.loads((TEMPLATES / (template or f"{judge}.template.json")).read_text())
     document["authorization"].update(authorized_by="Synthetic Tester", authorized_on="2026-10-08")
     document["calibration_set"] = {"set_id": manifest["set_id"], "items_sha256": manifest["items_sha256"],
                                    "item_count": manifest["item_count"]}
@@ -94,16 +95,23 @@ def fill(judge, manifest, *, replicates=3, **overrides):
     return document
 
 
-def vertex_reply(text, model="claude-opus-5-5", input_tokens=100, output_tokens=2):
+def vertex_reply(text, model="claude-opus-5-5", input_tokens=100, output_tokens=2, stop_reason="end_turn",
+                 content=None, thinking_tokens=None):
+    usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    if thinking_tokens is not None:
+        usage["output_tokens_details"] = {"thinking_tokens": thinking_tokens}
     return vertex.canonical({"id": "msg_synthetic", "type": "message", "role": "assistant", "model": model,
-                             "content": [{"type": "text", "text": text}], "stop_reason": "end_turn",
-                             "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}})
+                             "content": content if content is not None else [{"type": "text", "text": text}],
+                             "stop_reason": stop_reason, "usage": usage})
 
 
 class FakeVertex:
-    def __init__(self, model="claude-opus-5-5", verdict="Yes.", sufficiency='{"sufficiency": "sufficient"}',
-                 fail_at=None, count=100, echo_model=None):
+    """Replies with bare text to v1 bodies and with schema-shaped JSON to bodies carrying output_config.format."""
+
+    def __init__(self, model="claude-opus-5-5", verdict=None, sufficiency='{"sufficiency": "sufficient"}',
+                 fail_at=None, count=100, echo_model=None, structured_verdict='{"answer": "yes"}'):
         self.model, self.verdict, self.sufficiency = model, verdict, sufficiency
+        self.structured_verdict = structured_verdict
         self.fail_at, self.count_value, self.echo_model = fail_at, count, echo_model or model
         self.bodies, self.urls, self.generations, self.generation_bodies = [], [], 0, []
 
@@ -120,8 +128,13 @@ class FakeVertex:
         self.generation_bodies.append(copy.deepcopy(body))
         if self.fail_at is not None and self.generations == self.fail_at:
             raise vertex.VertexError("http_status_429")
-        text = self.sufficiency if "system" in body else self.verdict
-        return vertex_reply(text, self.echo_model)
+        if "system" in body:
+            text = self.sufficiency
+        elif self.verdict is not None:
+            text = self.verdict
+        else:
+            text = self.structured_verdict if "output_config" in body else "Yes."
+        return vertex_reply(text, self.echo_model, thinking_tokens=0 if "output_config" in body else None)
 
 
 class FakeQwen:
@@ -256,8 +269,10 @@ class Contracts(unittest.TestCase):
             self.assertNotIn("ANSWERTOKEN", json.dumps(sufficiency), judge)
             self.assertIn("ANSWERTOKEN", sent)
             for body in bodies:
-                self.assertTrue({"temperature", "top_p", "top_k", "thinking", "seed"}.isdisjoint(body)
+                self.assertTrue({"temperature", "top_p", "top_k", "seed"}.isdisjoint(body)
                                 or judge == "qwen-local", judge)
+                if judge == "vertex-opus" or judge == "jevk5":
+                    self.assertNotIn("thinking", body, judge)
 
     def test_sufficiency_rendering_omits_answer_and_verdict_uses_upstream_prompt(self):
         item = json.loads((self.set_dir / "items.json").read_text())["items"][0]
@@ -340,7 +355,8 @@ class Contracts(unittest.TestCase):
     def test_vertex_cost_cap_refuses_before_any_generation(self):
         for judge in run.VERTEX_JUDGES:
             transport, fake = self.transport(judge)
-            # 18 generations at 100 counted input tokens and 256 reserved output tokens: 18 x 6,900 micro-USD.
+            # 18 generations at 100 counted input tokens and the declared output cap (512 or 2,048 tokens)
+            # reserved: at least 18 x 13,300 micro-USD, above the 0.1 USD cap.
             report = self.execute(judge, self.declaration(judge, **{"budget.spending_cap_usd": "0.1"}),
                                   output=f"cap-{judge}", transport=transport)
             self.assertEqual(report["halt_reason"], "projected_cost_exceeds_cap")
@@ -396,7 +412,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(second["generation_requests_total"], 19)
         self.assertEqual(second["by_status"], {"completed": 18})
         self.assertTrue(labels_path.exists())
-        self.assertEqual(Decimal(second["cost"]["reserved_usd_total"]) * 1000000, 19 * 6900)
+        # 100 counted input tokens at 5 USD and the declared 512-token output cap at 25 USD per million.
+        self.assertEqual(Decimal(second["cost"]["reserved_usd_total"]) * 1000000, 19 * (100 * 5 + 512 * 25))
 
     def test_resume_refuses_tampered_captures_and_other_declarations(self):
         declaration = self.declaration("qwen-local")
@@ -543,6 +560,197 @@ class Contracts(unittest.TestCase):
         self.assertIn("count_limit_below_plan", jc.check_declaration(vertex_filled, self.set_dir))
         vertex_filled["execution"]["automatic_retries"] = 1
         self.assertIn("execution_contract", jc.check_declaration(vertex_filled, self.set_dir))
+
+    # ------------------------------------------------------------------ structured replies (declaration v2)
+
+    def test_reply_schema_hash_is_pinned_and_separate_from_prompts(self):
+        self.assertEqual(jc.reply_schema_sha256(), REPLY_SCHEMA_SHA256)
+        self.assertEqual(jc.judge_prompt_sha256(), PROMPT_SET_SHA256)  # prompts unchanged by the schemas
+        for judge in run.VERTEX_JUDGES:
+            template = json.loads((TEMPLATES / f"{judge}.template.json").read_text())
+            self.assertEqual(template["format"], jc.DECLARATION_FORMAT_V2)
+            self.assertEqual(template["reply_schemas"], {"version": "boros-judge-calibration-reply-schemas-v1",
+                                                         "sha256": REPLY_SCHEMA_SHA256,
+                                                         "transport": "output_config.format, type json_schema"})
+            old = json.loads((TEMPLATES / f"{judge}.v1.template.json").read_text())
+            self.assertEqual(old["format"], jc.DECLARATION_FORMAT)
+            self.assertNotIn("reply_schemas", old)
+        filled = fill("vertex-sonnet", self.manifest)
+        self.assertEqual(jc.check_declaration(filled, self.set_dir), [])
+        with patch.dict(jc.REPLY_SCHEMAS["verdict"], field="verdict"):
+            self.assertIn("reply_schema_hash", jc.check_declaration(filled, self.set_dir))
+            self.assertEqual(jc.check_declaration(filled, self.set_dir), ["reply_schema_hash"])
+
+    def test_vertex_request_bodies_per_model(self):
+        items = run.load_set(self.set_dir)[1]
+        expected = {"vertex-sonnet": ({"type": "between_tools"}, ["format"], 512),
+                    "vertex-opus": (None, ["effort", "format"], 2048)}
+        for judge, (thinking, config_keys, cap) in expected.items():
+            plan = run.build_plan(items, fill(judge, self.manifest, replicates=1), fake_prompt)
+            for entry in plan:
+                body, count = entry["body"], entry["count_body"]
+                schema = jc.REPLY_SCHEMAS[entry["stage"]]["schema"]
+                keys = {"anthropic_version", "messages", "max_tokens", "output_config"}
+                keys |= {"system"} if entry["stage"] == "sufficiency" else set()
+                keys |= {"thinking"} if thinking else set()
+                self.assertEqual(set(body), keys, judge)
+                self.assertEqual(sorted(body["output_config"]), config_keys, judge)
+                self.assertEqual(body["output_config"]["format"], {"type": "json_schema", "schema": schema})
+                self.assertEqual(body.get("thinking"), thinking, judge)
+                self.assertEqual(body["max_tokens"], cap)
+                if judge == "vertex-opus":
+                    self.assertEqual(body["output_config"]["effort"], "low")
+                self.assertNotIn("output_format", body)
+                self.assertTrue({"temperature", "top_p", "top_k", "seed"}.isdisjoint(body))
+                self.assertTrue({"temperature", "top_p", "top_k", "thinking"}.isdisjoint(body["output_config"]))
+                # Counting includes the format (it adds input tokens) and nothing else beyond the input.
+                self.assertEqual(set(count), (keys - {"max_tokens", "thinking"}) | {"model"})
+                self.assertEqual(count["output_config"], {"format": body["output_config"]["format"]})
+                self.assertEqual(count["model"], run.VERTEX_JUDGES[judge])
+            dry = run.dry_run(self.set_dir, self.declaration(judge), self.root / ".build/judge-calibration/d",
+                              fake_prompt, root=self.root, git_ignore=False)
+            self.assertEqual(dry["reply_schemas"]["sha256"], REPLY_SCHEMA_SHA256)
+            self.assertEqual(dry["request_fields"]["verdict"]["output_config"], config_keys)
+            self.assertEqual(dry["request_fields"]["verdict"]["thinking"], thinking)
+            # Version 1 declarations keep the earlier body: no thinking field and no output_config.
+            old = run.build_plan(items, fill(judge, self.manifest, replicates=1, template=f"{judge}.v1.template.json"),
+                                 fake_prompt)
+            for entry in old:
+                self.assertEqual(set(entry["body"]) - {"system"}, {"anthropic_version", "messages", "max_tokens"})
+                self.assertEqual(set(entry["count_body"]) - {"system"}, {"anthropic_version", "model", "messages"})
+                self.assertEqual(entry["body"]["max_tokens"], 256)
+
+    def test_structured_replies_parse_strictly_with_fixed_failure_codes(self):
+        self.assertEqual([jc.parse_structured_reply(text, "verdict") for text in (
+            '{"answer": "yes"}', ' {"answer":"no"}\n', '{"answer": "Yes"}', '{"answer": "yes", "x": 1}',
+            '{"answer": "yes", "answer": "no"}', '{"verdict": "yes"}', "yes", '```json\n{"answer": "yes"}\n```',
+            '{"answer": true}', None)],
+            ["accept", "reject", None, None, None, None, None, None, None, None])
+        self.assertEqual([jc.parse_structured_reply(text, "sufficiency") for text in (
+            '{"sufficiency": "insufficient"}', '{"sufficiency": "unsure"}', "sufficient")],
+            ["insufficient", None, None])
+        sonnet = "claude-sonnet-5-5"
+        transport = run.VertexTransport(sonnet, structured=True, token_fn=lambda: "t")
+        cases = (
+            (vertex_reply('{"answer": "no"}', sonnet), ("completed", "reject", None)),
+            (vertex_reply("The answer is yes.", sonnet), ("parse_failed", None, "output_off_schema")),
+            (vertex_reply('{"answer": "maybe"}', sonnet), ("parse_failed", None, "output_off_schema")),
+            (vertex_reply("", sonnet, stop_reason="max_tokens", thinking_tokens=512,
+                          content=[{"type": "thinking", "thinking": "", "signature": "s"}]),
+             ("response_invalid", None, "response_incomplete")),
+            (vertex_reply('{"answer": "y', sonnet, stop_reason="max_tokens"),
+             ("response_invalid", None, "response_incomplete")),
+            (vertex_reply("", sonnet, stop_reason="refusal", content=[]), ("response_invalid", None, "refusal")),
+            (vertex_reply('{"answer": "yes"}', "claude-opus-5-5"),
+             ("response_invalid", None, "model_identity_mismatch")),
+            (vertex_reply('{"answer": "yes"}', sonnet, content=[
+                {"type": "thinking", "thinking": "", "signature": "s"}, {"type": "text", "text": '{"answer": "yes"}'}]),
+             ("completed", "accept", None)))
+        for raw, expected in cases:
+            self.assertEqual(run.label_from(transport, raw, "verdict"), expected)
+        self.assertEqual(vertex.response_metadata(cases[3][0]), {"stop_reason": "max_tokens", "thinking_tokens": 512})
+        # A full run: off-schema and truncated replies are recorded as failures, never labels.
+        replies = iter([vertex_reply('{"sufficiency": "sufficient"}', sonnet, thinking_tokens=0),
+                        vertex_reply("Yes", sonnet, thinking_tokens=0),
+                        vertex_reply("", sonnet, stop_reason="max_tokens", thinking_tokens=512,
+                                     content=[{"type": "thinking", "thinking": "", "signature": "s"}]),
+                        vertex_reply("", sonnet, stop_reason="refusal", content=[], thinking_tokens=0),
+                        vertex_reply('{"sufficiency": "insufficient"}', sonnet, thinking_tokens=3),
+                        vertex_reply('{"answer": "no"}', sonnet, thinking_tokens=0)])
+
+        def fake(url, body, token):
+            if url == vertex.count_url():
+                return vertex.canonical({"input_tokens": 100})
+            if body == {}:  # the access probe
+                raise vertex.VertexError("http_status_400")
+            return next(replies)
+        declaration = self.declaration("vertex-sonnet", replicates=1)
+        report = self.execute("vertex-sonnet", declaration, output="strict",
+                              transport=run.VertexTransport(sonnet, fake, lambda: "synthetic-token"))
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["by_status"], {"completed": 3, "parse_failed": 1, "response_invalid": 2})
+        self.assertEqual(report["failure_codes"], {"output_off_schema": 1, "response_incomplete": 1, "refusal": 1})
+        self.assertEqual(report["replies_session"], {"stop_reasons": {"end_turn": 4, "max_tokens": 1, "refusal": 1},
+                                                     "thinking_tokens": 515})
+        self.assertEqual(report["reply_schemas"]["sha256"], REPLY_SCHEMA_SHA256)
+        out = self.root / ".build/judge-calibration/strict"
+        self.assertEqual(json.loads((out / "run.json").read_text())["reply_schemas"]["sha256"], REPLY_SCHEMA_SHA256)
+        receipt = json.loads((out / "captures/item-002-sufficiency-r1-a1-receipt.json").read_text())
+        self.assertEqual((receipt["status"], receipt["label"], receipt["failure"], receipt["stop_reason"],
+                          receipt["thinking_tokens"]), ("response_invalid", None, "response_incomplete", "max_tokens", 512))
+        labels = json.loads((self.root / ".build/judge-calibration/labels-vertex-sonnet.json").read_text())
+        self.assertEqual(labels["labels"], {"item-001": [{"sufficiency": "sufficient", "verdict": None}],
+                                            "item-003": [{"sufficiency": "insufficient", "verdict": "reject"}]})
+        self.assertEqual(labels["reply_schemas"]["sha256"], REPLY_SCHEMA_SHA256)
+        # The resume re-derives every label through the same strict structured parser.
+        plan = run.prepare(self.set_dir, declaration, fake_prompt)[-1]
+        captures = run.Captures(out / "captures")
+        state = run.prior_state(captures, run.VertexTransport(sonnet, structured=True, token_fn=lambda: "t"), plan)
+        self.assertEqual((state["prior_attempts"], len(state["latest"])), (6, 6))
+        with self.assertRaisesRegex(jc.CalibrationError, "resume_capture_mismatch"):  # bare-text parsing differs
+            run.prior_state(captures, run.VertexTransport(sonnet, structured=False, token_fn=lambda: "t"), plan)
+
+    def test_version_1_declarations_keep_unconstrained_parsing_and_resume(self):
+        for judge in run.VERTEX_JUDGES:
+            model = run.VERTEX_JUDGES[judge]
+            declaration = self.declaration(judge, template=f"{judge}.v1.template.json", replicates=1,
+                                           **{"budget.max_generation_requests": 10})
+            self.assertEqual(jc.check_declaration(json.loads(declaration.read_text()), self.set_dir), [])
+            fake = FakeVertex(model=model, fail_at=3)
+            first = self.execute(judge, declaration, output=f"v1-{judge}",
+                                 transport=run.VertexTransport(model, fake, lambda: "synthetic-token", structured=True))
+            self.assertEqual(first["halt_reason"], "http_status_429")
+            self.assertIsNone(first["reply_schemas"])
+            self.assertTrue(all("output_config" not in body and "thinking" not in body for body in fake.generation_bodies))
+            out = self.root / f".build/judge-calibration/v1-{judge}"
+            self.assertNotIn("reply_schemas", json.loads((out / "run.json").read_text()))
+            second = self.execute(judge, declaration, output=f"v1-{judge}", resume=True,
+                                  transport=run.VertexTransport(model, FakeVertex(model=model), lambda: "synthetic-token"))
+            self.assertTrue(second["complete"])
+            self.assertEqual(second["by_status"], {"completed": 6})  # bare "Yes." still parses under v1
+
+    def test_vertex_v2_declaration_refuses_forbidden_thinking_and_effort(self):
+        sonnet, opus = fill("vertex-sonnet", self.manifest), fill("vertex-opus", self.manifest)
+        self.assertEqual(jc.check_declaration(sonnet, self.set_dir), [])
+        self.assertEqual(jc.check_declaration(opus, self.set_dir), [])
+        cases = (
+            (sonnet, lambda d: d["execution"].update(thinking={"type": "disabled"}), "thinking_forbidden"),
+            (sonnet, lambda d: d["execution"].update(thinking={"type": "enabled", "budget_tokens": 1024}),
+             "forbidden_field:execution.thinking.budget_tokens"),
+            (sonnet, lambda d: d["execution"].update(thinking={"type": "between_tools", "display": "omitted"}),
+             "thinking_contract"),
+            (sonnet, lambda d: d["execution"].update(thinking="omitted-adaptive"), "thinking_contract"),
+            (sonnet, lambda d: d["execution"].update(effort="xhigh"), "effort_above_high_with_between_tools"),
+            (sonnet, lambda d: d["execution"].update(effort="max"), "effort_above_high_with_between_tools"),
+            (sonnet, lambda d: d["execution"].update(max_output_tokens_per_request=8192), "output_limit"),
+            (sonnet, lambda d: d["execution"].update(extended_thinking=False), "stale_field:execution.extended_thinking"),
+            (sonnet, lambda d: d.pop("reply_schemas"), "reply_schema_hash"),
+            (sonnet, lambda d: d["execution"].update(temperature=0), "forbidden_field:execution.temperature"),
+            (opus, lambda d: d["execution"].update(thinking={"type": "disabled"}), "thinking_forbidden"),
+            (opus, lambda d: d["execution"].update(thinking={"type": "between_tools"}), "thinking_contract"),
+            (opus, lambda d: d["execution"].update(budget_tokens=2048), "forbidden_field:execution.budget_tokens"),
+            (opus, lambda d: d["execution"].update(effort="provider-default"), "effort"),
+            (opus, lambda d: d["execution"].update(max_output_tokens_per_request=256), "output_limit"),
+            (opus, lambda d: d["execution"].update(max_output_tokens_per_request=16384), "output_limit"),
+            (opus, lambda d: d.update(format="boros-judge-calibration-vertex-declaration-v3"), "format"))
+        for base, mutate, code in cases:
+            bad = copy.deepcopy(base)
+            mutate(bad)
+            self.assertIn(code, jc.check_declaration(bad, self.set_dir), code)
+        for effort in ("low", "medium", "high", "provider-default"):
+            ok = copy.deepcopy(sonnet)
+            ok["execution"]["effort"] = effort
+            self.assertEqual(jc.check_declaration(ok, self.set_dir), [], effort)
+        # The adapter refuses the same combinations when a body is rendered.
+        messages = [{"role": "user", "content": "x"}]
+        for model, thinking, effort, code in (
+                ("claude-sonnet-5-5", {"type": "disabled"}, None, "thinking_invalid"),
+                ("claude-sonnet-5-5", {"type": "enabled", "budget_tokens": 1024}, None, "thinking_invalid"),
+                ("claude-sonnet-5-5", {"type": "between_tools"}, "xhigh", "effort_invalid_with_between_tools"),
+                ("claude-opus-5-5", {"type": "between_tools"}, "low", "thinking_unsupported_for_model"),
+                ("claude-opus-5-5", None, "extreme", "effort_invalid")):
+            with self.assertRaisesRegex(vertex.VertexError, code):
+                vertex.payload(messages, 64, model=model, thinking=thinking, effort=effort)
 
 
 if __name__ == "__main__":

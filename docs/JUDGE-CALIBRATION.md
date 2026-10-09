@@ -2,8 +2,8 @@
 
 Prepared October 8, 2026 for work package P4 of the [design repair plan](DESIGN-REPAIR-PLAN.md#p4-judge-calibration). This record separates three kinds of statement:
 
-- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form with the faithful field, form regeneration, v1 and v2 adjudication loading with revision checks, scoring, declaration check, frozen judge prompts), `scripts/test_judge_calibration.py` (21 synthetic contracts), the [judge runner](#judge-runner-implemented-not-run) `scripts/judge_calibration_run.py` with `scripts/test_judge_calibration_run.py` (17 synthetic contracts), `scripts/vertex_anthropic.py` parameterized by model (13 synthetic contracts), and four declaration templates under `scripts/judge_calibration_declarations/`.
-- **Measured:** the inventory counts below, the composition of the assembled set, and the runner's dry-run counts over that set. They are metadata counts. Since October 9, 2026 also: the user's [human adjudication](#human-adjudication-measured-october-9-2026) of all 50 items, its [revision](#revision-of-october-9-2026), and the earlier judges' error rates against the revised file. No candidate judge has a calibrated rate yet.
+- **Implemented:** `scripts/judge_calibration.py` (inventory, blinded assembly, local adjudication form with the faithful field, form regeneration, v1 and v2 adjudication loading with revision checks, scoring, declaration check, frozen judge prompts, Vertex reply schemas), `scripts/test_judge_calibration.py` (21 synthetic contracts), the [judge runner](#judge-runner-implemented-not-run) `scripts/judge_calibration_run.py` with `scripts/test_judge_calibration_run.py` (22 synthetic contracts), `scripts/vertex_anthropic.py` parameterized by model with opt-in structured outputs and thinking controls (15 synthetic contracts), and six declaration templates under `scripts/judge_calibration_declarations/` (version 2 for the two Vertex judges, version 1 kept for runs made under it).
+- **Measured:** the inventory counts below, the composition of the assembled set, and the runner's dry-run counts over that set. They are metadata counts. Since October 9, 2026 also: the user's [human adjudication](#human-adjudication-measured-october-9-2026) of all 50 items, its [revision](#revision-of-october-9-2026), the earlier judges' error rates against the revised file, and one live version 1 Vertex Sonnet pass. No candidate judge has a calibrated rate from a complete run yet.
 - **Proposed:** the adjudication protocol, the self-preference handling and the filled run declarations. The runner and its prompts have been exercised only against fake transports, never against a model.
 
 No generation, judge, token-count, access-probe, MCP or local model server call was made, including during the dry runs. No question, reference, evidence, answer or note text appears in this document, in test fixtures or in command output. The tools print counts, identifiers and hashes only.
@@ -230,8 +230,8 @@ At 50 items, a rate near 50 percent has a Wilson half-width of about 13 to 14 po
 |---|---|---|
 | `jevk5-mcp` | Local `JevK5-4B-v0.3-Q8_0` through the supplied mcpme slot ([record](JEVK5-SAVED-QA.md)) | Runner judge `jevk5`, template `jevk5.template.json`. Built and tested with a fake MCP client; not run. |
 | `qwen-local` | Selected Qwen model on the loopback mlx-serve endpoint | Runner judge `qwen-local`, template `qwen-local.template.json`. Built and tested with a fake endpoint; not run. |
-| `vertex-opus` | Vertex AI, `llm-train-482420`, `global`, `claude-opus-5-5` | Runner judge `vertex-opus`, template `vertex-opus.template.json`. Built and tested with a fake transport; not run. |
-| `vertex-sonnet` | Vertex AI, `llm-train-482420`, `global`, `claude-sonnet-5-5` (enabled per the user; not verified here) | Runner judge `vertex-sonnet`, template `vertex-sonnet.template.json`. The adapter now takes the model per run. Sonnet access, its model echo and its handling of an omitted temperature are unverified without a live call. |
+| `vertex-opus` | Vertex AI, `llm-train-482420`, `global`, `claude-opus-5-5` | Runner judge `vertex-opus`, template `vertex-opus.template.json` (version 2: structured replies, effort `low`, 2,048 output tokens). Built and tested with a fake transport; not run. |
+| `vertex-sonnet` | Vertex AI, `llm-train-482420`, `global`, `claude-sonnet-5-5` | Runner judge `vertex-sonnet`, template `vertex-sonnet.template.json` (version 2: structured replies, thinking `between_tools`, 512 output tokens). One live pass ran under the version 1 template ([first Sonnet pass](#first-sonnet-pass-measured-october-9-2026)); version 2 has not run. |
 | `jev-hosted` | Hosted Jev from typesafe.ai | Not usable yet and out of the runner's scope; see below. |
 
 ### Hosted Jev
@@ -265,13 +265,26 @@ Consequences of these choices:
 - **Parsing is strict and failures are recorded, never coerced.** A verdict reply is normalized only by trimming whitespace, lowercasing and removing one trailing period, then must be exactly `yes` or `no`. A sufficiency reply must be exactly the JSON object above; a code fence, an extra key or `unsure` is a parse failure. JevK5 answers through its structured choice tool with options `yes` and `no` for both tasks; the verdict request is byte-for-byte the earlier JevK5 saved-answer request shape.
 - **Replaced proposal.** The earlier proposed prompt set `boros-judge-calibration-prompts-v1` (SHA-256 `cc41c72e…080f`), which had an evidence-aware verdict prompt, is superseded. The assembled set's manifest still records that earlier hash as a non-binding field; nothing checks it.
 
+### Vertex reply schemas (implemented October 9, 2026, not run)
+
+Version 2 Vertex declarations constrain both replies with structured outputs: the request field `output_config.format` of type `json_schema`. The deprecated `output_format` field is never sent. The schemas are a transport constraint, defined in `REPLY_SCHEMAS` in `scripts/judge_calibration.py` (version `boros-judge-calibration-reply-schemas-v1`), and are separate from the prompts: the prompt texts and the three prompt hashes above are unchanged.
+
+| Stage | Schema | Label mapping |
+|---|---|---|
+| Verdict | An object with one required string field `answer`, enum `yes` or `no`, `additionalProperties: false` | `yes` to accept, `no` to reject |
+| Sufficiency | An object with one required string field `sufficiency`, enum `sufficient` or `insufficient`, `additionalProperties: false`; exactly the object the sufficiency prompt asks for | unchanged |
+
+Reply schema set SHA-256: `089f6abbd4ee62321396ed07e5929cfe30394cfe04f6c44e9512f60bc3fca549`. Version 2 declarations pin it in a `reply_schemas` block, `check-declaration` refuses a mismatch (`reply_schema_hash`), and the run record, the labels file, the dry run and every session report carry it.
+
+The upstream verdict prompt still asks for a bare yes or no; the schema wraps that answer in one JSON field. Whether this changes Sonnet's or Opus's verdicts relative to a bare reply is unmeasured. Parsing of constrained replies stays strict: surrounding whitespace is allowed, and anything else (another key, another value, a duplicate key, a code fence, prose) is the recorded failure `output_off_schema`, never coerced. Version 1 declarations keep the bare-text parsing described above.
+
 ## Judge runner (implemented, not run)
 
 `scripts/judge_calibration_run.py` runs one judge per invocation over the frozen set. Hosted Jev is out of scope.
 
 | Judge | Route | Transport |
 |---|---|---|
-| `vertex-opus`, `vertex-sonnet` | `vertex_anthropic.py` with the model chosen per run | Application Default Credentials through gcloud; pinned endpoint, no proxy, no redirect |
+| `vertex-opus`, `vertex-sonnet` | `vertex_anthropic.py` with the model chosen per run; version 2 declarations add structured outputs and per-model thinking controls (below) | Application Default Credentials through gcloud; pinned endpoint, no proxy, no redirect |
 | `jevk5` | `StdioMCP` from `jevk5_saved_qa.py`: the supplied `mcpme connect --slot` command, `jevk5_decide` tool | Model identity (ID, SHA-256, profile, context) checked on connect and in every decision; the mcpme executable hash must equal the declared one before connecting |
 | `qwen-local` | `http://127.0.0.1:11234/v1/chat/completions`, model `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` | Loopback only, no proxy, no redirect; temperature 0, thinking off, model echo checked. Model-instance identity is unobservable through mlx-serve, as recorded in [provider admission](PROVIDER-ADMISSION.md). |
 
@@ -282,9 +295,41 @@ Contract:
 - **Order and replicates.** Deterministic order: replicate, then item ID, then sufficiency before verdict. Each replicate re-sends the identical request. Vertex replicates sample at the provider default; Qwen replicates at temperature 0 are close to deterministic; JevK5 reports a cache for identical requests, so its replicates can be cache hits, and the report counts them.
 - **Vertex cost fence.** Per session: one unbilled access probe (an empty generation body must be refused with HTTP 400; 404 halts as no access), then a free counting pass over every pending request, then a refusal of the whole session if the earlier reservations plus counted input and maximum output for every pending request, at the declared prices, exceed the cap. Before each generation the counted cost is reserved again and the request is refused if the cumulative reservation would exceed the cap. Reservations never decrease, including for failed and interrupted requests, and they carry across resumed sessions.
 - **Limits and stops.** Declared request limits are cumulative across sessions. A request whose model-visible prompt exceeds a local judge's declared `max_prompt_characters` is recorded as not dispatched. Infrastructure failures (any HTTP status, transport failure, MCP failure) stop the session when `stop_on_first_infrastructure_failure` is true, which every template sets; otherwise they are recorded. Automatic retries happen only up to the declared `automatic_retries`, which is 0 in every template and must be 0 for Vertex. A model identity mismatch always stops the session.
-- **Failures are labels of nothing.** A parse failure, refusal, truncated reply or tool error is recorded per request with a fixed code, and the label stays empty. It is never mapped to accept or reject.
+- **Failures are labels of nothing.** A parse failure, refusal, truncated reply or tool error is recorded per request with a fixed code, and the label stays empty. It is never mapped to accept or reject. Vertex codes under a version 2 declaration: `output_off_schema` (status `parse_failed`), `response_incomplete` (stop reason `max_tokens`, including a reply that is only a thinking block), `refusal` (stop reason `refusal`) and the adapter's other shape codes (status `response_invalid`). A model identity mismatch is checked before the stop reason and halts the session.
+- **Vertex reply metadata.** Every Vertex generation receipt records `stop_reason` (a known value, or `other`) and `thinking_tokens` (from `usage.output_tokens_details.thinking_tokens` when the provider reports it, else null). Each session report adds `replies_session` (stop reason counts and summed thinking tokens), `reply_schemas` (null for version 1) and `request_fields` (the field names of the generation and count bodies).
 - **Captures and resume.** Each attempt writes `request`, `intent`, `response` and `receipt` files (0600, in 0700 directories) under the run directory. A destination must be fresh unless `--resume` is given, and a resume requires the same declaration hash, set, prompts and request plan. On resume, every earlier attempt is re-authenticated by hash and by re-deriving its label from the captured response; any mismatch refuses the resume. Completed, unparseable and not-dispatched requests are reused, never re-sent. Requests that failed on infrastructure or were interrupted after dispatch are sent again as a new attempt, which counts against the limits and the cap. Declare request limits with headroom above the plan if resumed failures should be possible.
 - **Outputs.** Per session: `labels-session-NN.json` and `report-session-NN.json` in the run directory. When every request is terminal, the labels are also written to the declared `outputs.labels_path`, which must be under `.build` and must not exist. Labels use format `boros-judge-calibration-labels-v1` with one `{verdict, sufficiency}` entry per replicate and `judge` set to the score column name (`jevk5-mcp` for the `jevk5` runner judge). Items with no definite label are omitted. The report holds counts by status and stage, fixed failure codes, call counts, token and cost totals, the probe result and hashes; no text. Requests run sequentially, within every template's concurrency limit.
+
+### Vertex request bodies
+
+Field names only. `system` is present for sufficiency requests only. No body carries `temperature`, `top_p`, `top_k`, `output_format` or `budget_tokens`.
+
+| Declaration | Generation body | Count body |
+|---|---|---|
+| Version 2, `vertex-sonnet` | `anthropic_version`, `messages`, `system`, `max_tokens` (512), `thinking: {"type": "between_tools"}`, `output_config: {format}` | `anthropic_version`, `model`, `messages`, `system`, `output_config: {format}` |
+| Version 2, `vertex-opus` | `anthropic_version`, `messages`, `system`, `max_tokens` (2,048), `output_config: {effort: "low", format}`; no `thinking` field | the same as Sonnet |
+| Version 1, both | `anthropic_version`, `messages`, `system`, `max_tokens` (256) | `anthropic_version`, `model`, `messages`, `system` |
+
+- **Sonnet 5.5:** omitting `thinking` runs adaptive thinking, and `{"type": "disabled"}` returns HTTP 400. `{"type": "between_tools"}` turns thinking off; it takes no other field and is accepted only at effort `high` or below. The template sends no effort, so Sonnet's default effort, `high`, applies.
+- **Opus 5.5:** thinking cannot be disabled (`disabled` and `budget_tokens` both return HTTP 400). The template bounds it with `output_config.effort: "low"` and leaves room for thinking plus the reply in a 2,048-token cap. That cap is a judgment, not a measurement; a reply that still hits it is recorded as `response_incomplete`.
+- **Counting:** the count body includes the same `output_config.format`, because structured outputs add input tokens. Thinking and effort do not change the input and are not sent to the count endpoint.
+- **Cost fence:** unchanged. Each generation reserves counted input plus the declared maximum output, so the larger caps raise the reservations (see [first Sonnet pass](#first-sonnet-pass-measured-october-9-2026) for an estimate).
+- **Adapter defaults:** `vertex_anthropic.payload` and `count_payload` add these fields only when called with the new keyword options (`schema`, `thinking`, `effort`), and validate them per model (`thinking_invalid`, `thinking_unsupported_for_model`, `effort_invalid`, `effort_invalid_with_between_tools`, `output_schema_invalid`). Without them, bodies are byte for byte unchanged, so `evaluate_answerer_controls.py`, `run_memory_investigation.py` and `evaluate_orientation_zoom.py` keep their behavior. `parse_usage` still reports reasoning tokens as zero for those callers; the runner reads thinking tokens through the new `response_metadata`.
+
+### First Sonnet pass (measured October 9, 2026)
+
+One live pass of `vertex-sonnet` under a filled version 1 declaration: 1 replicate, 100 generation requests, 96 count requests, one access probe, observed cost $1.24 (reserved $1.42 against a $4 cap). The run is private under the coordinator worktree's `.build/judge-calibration/runs/vertex-sonnet-r1/`. Metadata only:
+
+| Outcome | Sufficiency | Verdict | Total |
+|---|---:|---:|---:|
+| Completed | 29 | 42 | 71 |
+| `output_unparseable` (stop reason `end_turn`) | 13 | 8 | 21 |
+| `response_incomplete` (stop reason `max_tokens`) | 8 | 0 | 8 |
+
+- **Cause.** The version 1 adapter sent no `thinking` field, so Sonnet 5.5 ran adaptive thinking, whose tokens count against `max_tokens`. 20 of 100 replies carried a thinking block; all 8 truncated replies did, with 242 to 256 of their 256 output tokens spent thinking (5 were a thinking block alone, 3 thinking plus partial JSON). Separately, nothing constrained the reply shape: the 21 unparseable replies were prose of roughly 200 to 600 characters rather than a bare `yes`, `no` or JSON object, and 3 of the 8 verdict ones ended in `yes` or `no`. Strict parsing recorded all 29 as failures, as designed.
+- **Verified by that pass:** Sonnet access in `llm-train-482420`, its model echo, that omitting `temperature` is accepted, and that responses carry `usage.output_tokens_details.thinking_tokens`.
+- **Fix.** Version 2 declarations send `thinking: between_tools` to Sonnet, constrain both replies with the reply schemas, and raise Sonnet's output cap to 512.
+- **Reservation estimate (not measured).** That pass counted about 584,000 input tokens over 100 requests. At the prices it declared ($2 input and $10 output per million), version 2 Sonnet reserves about $1.17 of input plus $0.51 of output per replicate, about $5.04 for 3 replicates, before the schema's added input tokens. For Opus at $4 and $20 per million, with a similar token count (its tokenizer may differ), about $2.34 plus $4.10 per replicate, about $19.30 for 3. Vertex prices must be declared from the Vertex price list; these figures only size the cap.
 
 `git check-ignore` confirms that `.build/` is ignored (`.gitignore:2`), so run directories, labels and filled declarations stay out of Git.
 
@@ -321,7 +366,7 @@ python3 scripts/judge_calibration.py score --set .build/judge-calibration/set-v1
 
 ### Dry-run counts over the private set (measured)
 
-Run October 8, 2026 against set `jc-9adfaeeb572b8380` (items SHA-256 `44c998ea…f833`), with each unfilled template as the declaration, from a copy of the set without its key file. Every dry run reported zero network calls and zero files written. Characters are the model-visible prompt characters per request; for JevK5 they include the choice instructions.
+Run October 8, 2026 against set `jc-9adfaeeb572b8380` (items SHA-256 `44c998ea…f833`), with each unfilled template as the declaration (version 1 for the Vertex judges), from a copy of the set without its key file. Every dry run reported zero network calls and zero files written. Characters are the model-visible prompt characters per request; for JevK5 they include the choice instructions.
 
 | Judge | Items | Replicates | Requests | Distinct requests | Sufficiency chars p50 / max | Verdict chars p50 / max | Largest body (bytes) | Over declared character bound |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
@@ -332,24 +377,38 @@ Run October 8, 2026 against set `jc-9adfaeeb572b8380` (items SHA-256 `44c998ea�
 
 Each Vertex run also needs 100 free count requests, one per distinct request. The templates were reported incomplete, as expected: they lack the fields listed below, and their empty `calibration_set` does not match the manifest.
 
+Version 2 Vertex dry runs, October 9, 2026, same set from a fresh key-less copy, with each version 2 template filled only in `calibration_set`: zero network calls and zero files written. Both report 300 requests (100 distinct), 100 count requests needed, the same prompt characters as above, and reply schema hash `089f6abb…a549`.
+
+| Declaration | Output cap | Largest body (bytes) | Plan SHA-256 | Request fields (verdict) |
+|---|---:|---:|---|---|
+| `vertex-sonnet` v2 | 512 | 60,835 | `7fa24c7c…bd7` | `thinking` `between_tools`; `output_config` `format` |
+| `vertex-opus` v2 | 2,048 | 60,815 | `d652b301…cd99` | no `thinking`; `output_config` `effort`, `format` |
+
+Each still reports only the user-filled fields as problems (authorization, prices and source, cap, request limits, labels path). With the current code, the version 1 Sonnet pass's declaration still passes `check-declaration`, its stored run record matches, and all 100 attempts and 96 counts re-authenticate from its captures (checked read-only), so it remains resumable and verifiable.
+
 JevK5 finding: its context is 8,192 tokens, and the template bound of 24,000 characters is an estimate of about three characters per token, not a measured tokenizer ratio. Under that bound, 31 of the 50 sufficiency requests would be recorded as not dispatched, so JevK5 could produce sufficiency labels for at most 19 items. All 50 verdict requests fit. The real token counts are unverified; JevK5 reports input tokens only after a call.
 
 ## Run declarations (templates)
 
-Four templates under `scripts/judge_calibration_declarations/` contain no private data. Copy a template to `.build/judge-calibration/declarations/` before filling it, because a filled declaration holds the user's authorization record.
+Templates under `scripts/judge_calibration_declarations/` contain no private data. Copy a template to `.build/judge-calibration/declarations/` before filling it, because a filled declaration holds the user's authorization record. New Vertex runs use `vertex-opus.template.json` and `vertex-sonnet.template.json`, format `boros-judge-calibration-vertex-declaration-v2`. The version 1 templates are kept as `vertex-opus.v1.template.json` and `vertex-sonnet.v1.template.json`; `check-declaration` and the runner still accept version 1, with its unconstrained bodies and bare-text parsing, so runs made under it (the first Sonnet pass) can be resumed and verified unchanged. Version 1 has no thinking control and should not be used for new runs.
 
-Fixed in the Vertex templates (`vertex-opus`, `vertex-sonnet`):
+Fixed in the version 2 Vertex templates:
 
 | Area | Value |
 |---|---|
 | Route | Project `llm-train-482420`, location `global`, the model ID, `anthropic_version vertex-2023-10-16` |
 | Authentication | Application Default Credentials, no API key |
-| Sampling | Provider default: no temperature or other sampling parameter, no extended thinking |
+| Sampling | Provider default: no temperature or other sampling parameter |
+| Thinking | `execution.thinking`: Sonnet `{"type": "between_tools"}` (thinking off); Opus `"omitted-adaptive"` (no `thinking` field; Opus thinking cannot be disabled) |
+| Effort | `execution.effort`: Sonnet `"provider-default"` (not sent; the default is `high`); Opus `"low"` (sent as `output_config.effort`) |
+| Reply constraint | `reply_schemas` block: version, SHA-256 and transport of the reply schemas above |
 | Counting and cost gate | Count tokens before generation; refuse if counted input and maximum output at the declared prices exceed the cap |
 | Access probe | One unbilled access probe per session before the first generation |
 | Retries and stops | No automatic retries; stop on the first infrastructure failure |
-| Requests | Two stages per item (sufficiency without the answer, then verdict); 3 replicates; at most 256 output tokens per request |
+| Requests | Two stages per item (sufficiency without the answer, then verdict); 3 replicates; at most 512 (Sonnet) or 2,048 (Opus) output tokens per request |
 | Prompts | Prompt set `boros-judge-calibration-prompts-v2`, hashes as above |
+
+For version 2, `check-declaration` also refuses: a `thinking` of type `disabled` or `enabled` (`thinking_forbidden`); any `budget_tokens` key anywhere (`forbidden_field`); a thinking value other than the model's fixed one, including `between_tools` with an extra field or on Opus (`thinking_contract`); for Sonnet, effort `xhigh` or `max` with `between_tools` (`effort_above_high_with_between_tools`) and any value outside `provider-default`, `low`, `medium`, `high`; for Opus, an effort that is not explicit (`effort`); an output cap outside 16 to 4,096 for Sonnet or 1,024 to 8,192 for Opus (`output_limit`); the stale version 1 field `extended_thinking` (`stale_field`); and a `reply_schemas` block that differs from the code (`reply_schema_hash`).
 
 Fixed in the local templates (`jevk5`, `qwen-local`): the pinned provider block (JevK5 command, tool and model identity from `jevk5_saved_qa.py`; the Qwen endpoint, model, temperature 0 and thinking off), no automatic retries, stop on the first infrastructure failure, 3 replicates, the prompt hashes, and a `max_prompt_characters` bound (24,000 for JevK5, 96,000 for Qwen, both estimates). Qwen also fixes 16 output tokens per request.
 
@@ -471,8 +530,8 @@ To start P4 adjudication now (no model calls):
 
 To run judges, each run needs its own authorization. The runners are built; none has run. For every judge: copy its template to `.build/judge-calibration/declarations/`, fill the fields in the table above, run the dry run, run `check-declaration` until it reports `"complete": true`, then authorize and run the execute command.
 
-1. **Vertex Opus.** Declare current Vertex AI prices for `claude-opus-5-5` with their source and date, a spending cap, and request limits of at least 300 generations and 100 counts. Authorizing the run authorizes one unbilled access probe per session, the free counting pass of 100 count requests, and up to the declared number of billed generations.
-2. **Vertex Sonnet.** The same, with prices for `claude-sonnet-5-5`. Sonnet access in `llm-train-482420` is reported by the user and not verified here; the access probe checks it before any billed call.
+1. **Vertex Opus.** Use the version 2 template. Declare current Vertex AI prices for `claude-opus-5-5` with their source and date, a spending cap, and request limits of at least 300 generations and 100 counts. The cap must cover the reservation of counted input plus 2,048 output tokens per request (roughly $19 for 3 replicates at $4 and $20 per million; see the estimate above). Authorizing the run authorizes one unbilled access probe per session, the free counting pass of 100 count requests, and up to the declared number of billed generations.
+2. **Vertex Sonnet.** The same with the version 2 template and prices for `claude-sonnet-5-5` (roughly $5 reserved for 3 replicates at $2 and $10 per million). Sonnet access was verified by the first pass. Use a new output directory and labels path; the first pass's run directory belongs to its version 1 declaration.
 3. **JevK5 MCP.** Fill the mcpme executable SHA-256 (`shasum -a 256` of the command's first element) and a request limit of at least 300. Decide whether the 24,000-character estimate bound is acceptable, knowing it leaves at most 19 items with JevK5 sufficiency labels, or authorize a different bound. Authorizing the run authorizes starting the mcpme slot process and up to the declared number of local decisions.
 4. **Qwen local.** Fill a request limit of at least 300, and make sure the selected Qwen model is the one loaded in mlx-serve on port 11234. Authorizing the run authorizes up to the declared number of local generation requests.
 5. **Hosted Jev.** Out of the runner's scope. Move the key into the Keychain. Approve a plan amendment admitting the provider. Authorize the adapter, its contract and tests, and the data-terms review. Then authorize a declared, capped run.
@@ -481,8 +540,13 @@ After labels exist, `score` produces the rates. P4 step 3 then selects the judge
 
 ### Unverified without a live call
 
-- Whether Opus and Sonnet reply to the upstream prompt with a bare `yes` or `no` and to the sufficiency prompt with bare JSON. Any other shape is recorded as a parse failure, so a high parse-failure rate is possible and would show in the report.
-- Sonnet access, its response model echo (`claude-sonnet-5-5`, optionally with a version or date suffix), and whether Sonnet would reject `temperature` as Opus does. The adapter never sends it.
+- Under version 1, neither model reliably replies with a bare `yes`, `no` or JSON object: the first Sonnet pass left 21 of 100 replies unparseable. Version 2 is built to remove that failure, and none of the following has been exercised against the provider:
+  - that Vertex accepts `output_config.format` with these schemas on both models and on the count endpoint (structured outputs are documented as available on Vertex AI and compatible with token counting);
+  - that Sonnet accepts `thinking: {"type": "between_tools"}` with structured outputs and no effort field, and actually emits no thinking tokens with it;
+  - that Opus accepts `output_config.effort: "low"` together with `format`, and how many thinking tokens it spends at low effort on the long sufficiency prompts, so whether 2,048 output tokens is enough;
+  - whether the constrained verdict field changes verdicts compared with a bare reply to the same upstream prompt;
+  - the input tokens the schemas add, and so the exact reservations.
+- Opus access and model echo in `llm-train-482420` for these requests. Sonnet access, echo and the accepted omission of `temperature` were verified by the first pass.
 - Token counts and therefore cost. Prices are not assumed anywhere in code.
 - JevK5 token counts for long sufficiency requests, its behavior on requests near its context limit, and whether its cache makes replicates identical.
 - That the running mlx-serve still serves the pinned Qwen model, and Qwen's adherence to the bare-JSON sufficiency reply.
@@ -507,7 +571,7 @@ After labels exist, `score` produces the rates. P4 step 3 then selects the judge
   - revision consistency against the original export: hash, unlisted changes (verdict, faithful, note text, reveal record), listed changes that did not happen, source and target mismatches, malformed, unknown and duplicate entries, and the CLI's fixed error code;
   - faithful counts, breakdowns and cross-tab, identical judge rates when only faithful changes, a revision's sufficiency change not counted as a change after reveal, and no note or rubric text in the score output;
   - the form's faithful field inside the post-reveal block, the decline rule text, v2 export, v1 and v2 import, and the `form` regeneration command (private modes, no overwrite, items hash check).
-- `python3 scripts/test_judge_calibration_run.py`: 17 synthetic contracts with fake transports for all four judges, all passing. They cover:
+- `python3 scripts/test_judge_calibration_run.py`: 22 synthetic contracts with fake transports for all four judges, all passing. Five were added on October 9, 2026 for version 2: the reply schema hash pinned in code and templates and separate from the prompt hashes; request and count bodies per model (`thinking` and `output_config` fields, no sampling keys, version 1 bodies unchanged) and the dry run's reported fields; strict structured parsing with the fixed codes `output_off_schema`, `response_incomplete` (including a thinking-only truncated reply), `refusal` and `model_identity_mismatch`, receipts carrying stop reason and thinking tokens, and re-authentication of those captures; version 1 declarations keeping bare-text parsing and resume; and `check-declaration` refusing disabled or budgeted thinking, `between_tools` above effort `high` or on Opus, an implicit Opus effort, out-of-range output caps and a schema hash mismatch, with the adapter refusing the same combinations. The earlier 17 cover:
   - prompt hash pinning in code and in all four templates, and refusal of a changed prompt;
   - refusal of an upstream protocol file that does not match its pin;
   - blinding: with the key file deleted, no key-only string (run, arm, answerer model, question ID, prior judge names) and no item ID reaches any request, and sufficiency requests never contain the answer;
@@ -521,7 +585,7 @@ After labels exist, `score` produces the rates. P4 step 3 then selects the judge
   - replicate counts and order, labels accepted by `score` for JevK5, Qwen and Vertex, and JevK5 cache-hit counting;
   - local request limits, character bounds, private file modes, and reports free of item text;
   - local and Vertex declaration checks.
-- `python3 scripts/test_vertex_anthropic.py`: 13 synthetic contracts, all passing, including Opus as the unchanged default, Sonnet selected per run with the same no-sampling contract and its own model-echo check, and refusal of unsupported models before any connection. The adapter's existing callers (`evaluate_answerer_controls.py`, `run_memory_investigation.py`, `evaluate_orientation_zoom.py`) default to Opus and their synthetic suites pass unchanged. Runs that capture `vertex_anthropic.py` as a pinned dependency will record the new file hash.
+- `python3 scripts/test_vertex_anthropic.py`: 15 synthetic contracts, all passing, including Opus as the unchanged default, Sonnet selected per run with the same no-sampling contract and its own model-echo check, refusal of unsupported models before any connection, opt-in structured outputs and thinking controls validated per model with default bodies unchanged, and `response_metadata` reporting only the stop reason and thinking tokens while `parse_usage` keeps reasoning at zero. The adapter's existing callers (`evaluate_answerer_controls.py`, `run_memory_investigation.py`, `evaluate_orientation_zoom.py`) default to Opus and their synthetic suites pass unchanged. Runs that capture `vertex_anthropic.py` as a pinned dependency will record the new file hash.
 - `python3 scripts/check.py` runs both calibration suites and the adapter suite.
 - The form's reveal gate, change-after-reveal record, navigation, autosave and export format were exercised in a browser against a synthetic set, which was then deleted. The private set was not opened in a browser by this preparation.
 - October 9, 2026: the faithful field was exercised in a browser against a new synthetic three-item set, then deleted: it appears only after the reveal, an item counts complete only with faithful, the progress line reports items that need faithful, the export is v2 with `faithful`, a v1 import arrives with faithful unset and re-exports as v2, an invalid imported faithful value becomes null, and an unknown format is refused. The form's Content-Security-Policy blocked a test `fetch`. A v2 export of that shape scores. The private form was regenerated for the real set into a worktree's `.build/` and checked structurally (50 items, set ID and items hash, no unreplaced placeholder), not opened in a browser.
