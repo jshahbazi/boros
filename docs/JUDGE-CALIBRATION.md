@@ -262,7 +262,7 @@ Faithful rejects on insufficient packs: 20 of the 23 insufficient packs. These a
 
 **Re-grade subset (built, not used).** Before the user's decision, subset `js-d6e4fafd1df7aa90` was built at `.build/judge-calibration/set-x1r-20261009/` in the coordinator worktree, with a form. It holds the 8 items under new opaque IDs, and its key maps them back to the extension's items through `source_item_id`. Nothing was exported from it, and it did not contribute to the final file. The `merge-regrade` helper ([below](#merging-a-re-graded-subset-merge-regrade-implemented-not-used)) would apply such an export if a re-grade is ever wanted.
 
-**Still open.** Extension items 024 and 029 are declines that both prompt sets accept. The final file rejects them as declines. Whether either answer also contains the reference value, which would make it an accept under reference agreement, has not been checked.
+**Items 024 and 029 (checked by the coordinator, October 9, 2026).** Both prompt sets accept them; the final file keeps both as rejects. The coordinator read both answers against their references, and both are judgment calls under the existing rules, not clear accepts. Item-024 declines, then lists three candidate sites, one of which is the reference. It never identifies which site it was, so it is a hedged guess, rejected like the hedged counts 006 and 047. Item-029 first says the history has no information about the setup, then cites an excerpt that does and gives suggestions matching the reference. That is a self-contradiction, rejected under the self-correction rule. The user can overturn either.
 
 ### Decline-rule change (user decision, October 9, 2026, later the same day)
 
@@ -1005,7 +1005,7 @@ What changed from the first reference target:
 - **The six classified items.** Both prompt sets rejected items 003, 005, 013, 014, 019 and 025, so the six flips remove six false rejects from each. False reject falls from 9/41 to 3/35 for v3 and from 12/41 to 6/35 for v4.
 - **False accepts.** The counts are unchanged, over 44 adjudicated rejects instead of 38.
 - **Remaining extension false rejects.** These are jx-007, which both prompt sets reject and the reference classification accepts, and jx-022. v4 adds jx-010 and jx-012.
-- **The two unchecked declines.** jx-024 and jx-029 remain false accepts for both prompt sets. Their flip is unchecked. Excluding them, false accept is 4/42 for v3 and 0/42 for v4.
+- **Items 024 and 029.** jx-024 and jx-029 are false accepts for both prompt sets. The coordinator checked both: a hedged list containing the reference, and a self-contradiction. Both are rejects under the existing rules, but they are judgment calls. Excluding them, false accept is 4/42 for v3 and 0/42 for v4.
 
 ### All 79 items against the first targets (history)
 
@@ -1141,7 +1141,7 @@ To start P4 adjudication now (no model calls):
 2. Open `.build/judge-calibration/set-v1-20261008/adjudication-form.html` locally, adjudicate the 50 items, and export the decisions into `.build/judge-calibration/`. A designated reviewer may do this instead; the export records the adjudicator name. Done October 9, 2026, then revised the same day.
 3. Optional: record faithful on the 40 items where it is not adjudicated. The set's original form predates the field; regenerate the form with the `form` command (see [Adjudication format](#adjudication-format)), import the revised file, record faithful, and export. A new export carries no revision block, so keep the revised file as the record of the October 9 changes.
 4. Open items after the [decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest):
-   - say whether extension items 024 and 029 are reference-wrong, as the final reference file assumes;
+   - items 024 and 029 are classified as rejects by the coordinator (see above); the user may overturn either;
    - decide whether prompt set v4 becomes the default judge.
 
    Settled October 9, 2026:
