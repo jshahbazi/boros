@@ -592,6 +592,26 @@ One authorized run of `claude-sonnet-5-5` over all 50 items with three replicate
 - **The two disagreements were both predicted.** item-011 is a self-correction (wrong value, then right), which the adjudication rejects and the upstream prompt's "contains the correct answer" accepts; Sonnet split 2-1 toward accept. item-048 is the borderline preference answer; Sonnet rejected it in all three replicates.
 - **Sufficiency failures have one shape.** 104 of the 105 off-schema replies give a short explanation and end with the requested JSON object. The strict parser refuses them by design. Re-parsing the saved replies with a declared "final JSON object" rule would need no new calls, but the rule would be chosen after seeing the replies.
 - **Comparability.** These labels come from prompt set v3; the upstream-only judges did not see the added format line.
+- **Cost by task.** Summed from the generation receipts: the 150 verdict requests used 64,245 input and 1,738 output tokens ($0.15 at the declared $2 and $10 per million). The 150 sufficiency requests, which carry the delivered evidence, used 1,701,258 and 21,370 ($3.62).
+
+## Default judge (user decision, October 9, 2026)
+
+The user selected Vertex Sonnet 5.5 as the default evaluation judge. Plan P4 step 3 asks for the judge with the lowest error. Sonnet is the only candidate run over all 50 items. The earlier judges were scored only on the historical labels they already had, on 13 to 27 items each (Qwen 2/27, JevK5 1/18, Sol 0/13). Sol's 0/13 has an interval of 0-23 percent, too wide to separate it from Sonnet, and Sonnet costs less. This is a selection by the user on that evidence, not a measured win over every candidate.
+
+- **Scope: answer verdicts only.** Use it for accept or reject against the reference, with the upstream LongMemEval verdict prompt and the [category tolerances](#category-tolerances-user-decision-october-8-2026). Its sufficiency labels are not used: 105 of 150 replies failed the strict parser, so A1 packs keep the human sufficiency labels. Whether to re-parse the saved replies with a declared final-JSON rule is still open.
+- **Configuration.** Use declaration version 3 (`scripts/judge_calibration_declarations/vertex-sonnet.v3.template.json`) with prompt set `boros-judge-calibration-prompts-v3`, thinking `between_tools`, an instructed JSON reply, no temperature, and the provider default effort. Run three replicates per item. A majority vote decides; a tie or an unparseable majority is `unknown` and is reported, never counted as accept. A run that changes the prompt, the reply format, the model or the replicate count is a different judge and needs its own calibration against this set.
+- **Rates attached to every later acceptance.**
+
+  | Measure | Rate (95% Wilson interval) |
+  |---|---|
+  | Error | 2/50, 4% (1-13%) |
+  | False reject | 1/30, 3% (1-17%) |
+  | False accept | 1/20, 5% (1-24%) |
+
+  An accepted-answer count is reported with these rates and the run's capture hash. A count produced without this configuration is a model opinion, as before.
+- **Known disagreements.** item-011, a self-correction, is rejected by the adjudication, and Sonnet leans toward accepting it. item-048 is a borderline preference answer, accepted by the adjudication and rejected by Sonnet. Whether self-corrections should be accepted is still open.
+- **Limits.** The false-accept interval reaches 24 percent. 10 of the 20 adjudicated rejects are declines, which are easy to reject. The set has no Claude-authored answers, so self-preference is untested; see [Self-preference](#self-preference). Each run still needs its own authorization, frozen declaration and spending cap.
+- **Revisit when** the likely-wrong extension (at least 25 items) narrows the false-accept interval, before Sonnet judges any answer written by Opus or Sonnet, or if the organization policy is changed to allow structured outputs and the judge configuration changes as a result.
 
 ## What the user must do and authorize
 
