@@ -9,6 +9,7 @@ Status, October 9, 2026:
 - **Measured (diagnosis):** pattern counts over the seven flagged calibration answers and over all 192 saved Qwen and Sol answers with retained text. Also measured: a source comparison of the frozen run builds with `main` (`03f4196`).
 - **Measured (replay):** one local Qwen generation per question under V3 and under V4 for the 7 questions with copied headers, 14 generations in total. V3 copied the header in 3 of 7 answers; V4 did so in 0 of 7. See [Replay](#replay-v3-versus-v4-on-the-seven-echo-questions).
 - **Measured (fix G replay):** one local Qwen generation per question under V3 and under V4 on the recent-only arm of all 21 distinct questions, 42 generations in total. AI or memory disclaimers: V3 3 of 3 on the disclaimer questions (4 of 21 overall), V4 0 of 21. V4 declined on all 21; recent-only delivered no gold evidence for any question, so the declines match the evidence, but this cohort cannot detect a false decline. See [the recent-only replay](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions).
+- **Measured (fix G with retrieval on):** the 54026fce V4 decline in the seven-question replay is a false decline; its gold turn was delivered whole ([finding](#the-54026fce-decline-in-the-seven-question-replay)). A paired V3 against V4 replay of the same 21 questions on the recorded hybrid arm (not ordinary Send's lexical selection, which the runner cannot select): 42 local generations, judged by the default judge (126 Vertex verdict requests, $0.13). V4 declined 1 of 12 answerable questions whose gold turns were delivered whole (54026fce again). Judge accepts: V3 15 of 21, V4 16 of 21; 11 of 12 under each arm where gold was delivered whole. See [the retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions).
 
 The diagnosis sections below describe the V3 framing as it was. This document contains no answer, question, evidence or history text. It quotes only host-authored code strings and describes answers by structure.
 
@@ -192,7 +193,9 @@ Each delivered source gets a host label `E1`, `E2`, ... in delivery order: recen
 
 The V4 System framing adds: "If the quoted sources contain the answer, answer directly. If they do not contain the requested information, say plainly that the conversation history provided here does not show it, and mention any partially relevant information you found; do not guess, and do not say that you are an AI or that you lack memory or access." It keeps "A missing excerpt is not proof that the archive lacks a fact." The wording asks for a plain decline only when the sources lack the answer, and it forbids guessing.
 
-**Status of G (measured October 9, 2026, 42 local generations):** on the recent-only arm, V4 removed the AI or memory disclaimers (V3 4 of 21, including all 3 disclaimer questions; V4 0 of 21). It also turned every recent-only answer into a plain decline (21 of 21, including all 3 abstention questions). No recent-only delivery contained gold evidence, so those declines match the evidence. Whether G causes false declines when the evidence holds the answer is not established. See [the recent-only replay](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions).
+**Status of G (measured October 9, 2026, 42 local generations):** on the recent-only arm, V4 removed the AI or memory disclaimers (V3 4 of 21, including all 3 disclaimer questions; V4 0 of 21). It also turned every recent-only answer into a plain decline (21 of 21, including all 3 abstention questions). No recent-only delivery contained gold evidence, so those declines match the evidence. See [the recent-only replay](#replay-v3-versus-v4-on-the-recent-only-arm-of-all-21-questions).
+
+**Status of G with retrieval on (measured October 9, 2026, 42 local generations plus default-judge verdicts):** on the hybrid arm, V4 declined 1 of 12 answerable questions whose gold turns were delivered whole (54026fce, also the false decline of the seven-question replay), and answered the other 11, all accepted by the judge. Judged accuracy on answerable questions was the same under V3 and V4 (13 of 18). All 3 abstention answers became accepted declines (V3: 2 of 3 accepted). G therefore does not decline wholesale when evidence is present, but it produced one reproducible false decline. Its cause is unexamined, and answers under ordinary Send's lexical selection are unmeasured. See [the retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions).
 
 ### Why one version
 
@@ -282,7 +285,7 @@ Reading the results:
 - **V4 removed the header copy on every question:** 0 of 7, with no fabricated IDs and no raw event IDs. It cited 11 labels, and all 11 resolve to delivered sources.
 - **Accuracy did not change on the string check.** The reference string appears in the same 3 answers under both arms. V4 did not lose the three answers V3 had right, and the string check found no new correct answer.
 - **The question was not repeated verbatim in either arm.** The human-role echo with a repeated question did not recur under V3 in this replay, so this replay does not test that pattern.
-- **G needs review.** V4 opened 2 answers with a plain decline (06878be2 recent only, 54026fce hybrid). Both questions are answerable, not abstention items. Under V3, the first hit the output cap and the second copied the header; neither contained the reference under either arm. Whether these declines are faithful (the delivered evidence lacks the answer) or wrong (a decline on answerable evidence) needs adjudication against the delivered evidence. This replay does not settle it, and it is the main risk to check before relying on G.
+- **G needs review.** V4 opened 2 answers with a plain decline (06878be2 recent only, 54026fce hybrid). Both questions are answerable, not abstention items. Under V3, the first hit the output cap and the second copied the header; neither contained the reference under either arm. Whether these declines are faithful (the delivered evidence lacks the answer) or wrong (a decline on answerable evidence) needs adjudication against the delivered evidence. This replay does not settle it, and it is the main risk to check before relying on G. **Settled later:** 06878be2 had no gold delivered (justified), and 54026fce had its gold turn delivered whole (a false decline); see [the 54026fce finding](#the-54026fce-decline-in-the-seven-question-replay).
 - **The V4 answers carry less Markdown bold** (20 against 38 spans), and none ends with a question. These were not targets of A, D or G, and n = 7.
 
 ### What G would need
@@ -378,7 +381,7 @@ Measured:
 
 Inferred, not measured:
 
-- Uniform declines on evidence without gold turns show that G produces the requested wording. They do not show that the model judges evidence sufficiency correctly. A model that declines whenever the evidence is thin would give the same table. The test that matters is whether V4 still answers when the delivered evidence holds the answer. In the seven-question replay, V4 kept all 3 hybrid answers that contained the reference, and that is the only evidence on this question so far. The hybrid V4 decline on 54026fce is still unadjudicated against its delivered evidence.
+- Uniform declines on evidence without gold turns show that G produces the requested wording. They do not show that the model judges evidence sufficiency correctly. A model that declines whenever the evidence is thin would give the same table. The test that matters is whether V4 still answers when the delivered evidence holds the answer. In the seven-question replay, V4 kept all 3 hybrid answers that contained the reference, and that is the only evidence on this question so far. The hybrid V4 decline on 54026fce is still unadjudicated against its delivered evidence. **Update:** it was a false decline (gold delivered whole), and [the retrieval-on replay](#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions) tests this question directly.
 - The V3 "answer" outcomes on answerable questions had no gold evidence. Most are therefore guesses or answers from general knowledge. 0 of 11 contained the reference. G's "do not guess" wording removes them, which a user would see as a decline rather than a wrong answer. This is a reading of the counts; the answers were not judged.
 
 ### Reproduction
@@ -390,6 +393,144 @@ python3 scripts/answer_presentation_replay.py measure --output <same directory> 
 ```
 
 The `measure` output for this run is saved privately as `measure.json` in the run directory.
+
+## The 54026fce decline in the seven-question replay
+
+**Measured offline, October 9, 2026, with no model call.** The seven-question replay's V4 answer on 54026fce (hybrid arm, neighborhood-v1 runner input, component policy v2) opened with a plain decline. The question is answerable and has one annotated gold turn (`has_answer`) in one gold session.
+
+Method: the attempt's own `delivered_ranges` from the runner report (historical excerpts by byte offset and length, plus whole recent sources), scored with `retrieval_harness.coverage`, the function behind the harness's R2. The new `gold_delivery` in `answer_presentation_replay.py` does exactly this. Only IDs, counts and labels were read.
+
+| Attempt | Delivered recent | Delivered ranges | Gold turn | Gold delivery | Lexical outcome | Labels cited |
+|---|---:|---:|---|---|---|---:|
+| V3 (`main-v3`) | 12 | 34 | historical excerpt, not recent | whole | answer (opened with a copied header) | 0 |
+| V4 (`fix-v4`) | 12 | 34 | historical excerpt, label `E14` of 34 | whole | decline | 0 |
+
+- **The V4 decline is a false decline** by the annotation proxy: the single gold turn was delivered whole, as source `E14`. The answer cited no label.
+- **V3 received the same evidence.** Both arms delivered the identical range set (same order-independent digest), which is also the set recorded by the original neighborhood-v1 run. The independent-v1 run, under component policy v1, delivered a different set of 28 ranges, also with the gold turn whole. V3's answer had no decline phrase, but it opened with a copied header, and neither answer contained the reference string.
+- **The annotation is a proxy.** LongMemEval's gold turns approximate sufficient evidence; the human adjudication agreed with this proxy on 34 of 37 answerable calibration items. Whether the delivered turn states the answer plainly was not checked, because that needs the text.
+- Over the whole seven-question replay, gold delivery was whole on 5 of 7 questions and none on 2 (06878be2, recent only, and 1a1907b4, hybrid). The V4 06878be2 decline is justified by this measure.
+
+## Replay: V3 versus V4 with past-conversation retrieval on, all 21 questions
+
+**Measured, October 9, 2026, with the user's authorization:** up to 42 local generations on the local model server only, as a paired V3 against V4 replay of the same 21 questions as the recent-only replay, with past-conversation retrieval on; then verdicts on all 42 answers from the default judge (Vertex Sonnet 5.5), paid, capped at $1.00. The replay used 42 answer generations, one per question and framing, with no retry and no run that failed before its answer invocation.
+
+### Arm used: hybrid, not lexical
+
+Ordinary Send has used the `lexical` selection since October 8, 2026 ([P2-SEMANTIC-DECISION.md](P2-SEMANTIC-DECISION.md#decision)). **The answer-evaluation runner cannot select it.** For a recorded `hybrid` attempt it always builds the history's semantic index and passes it to the coordinator with the default `.enabled` policy (`AnswerEvaluationCommand.swift`, `PreparationMode.constructsSemanticIndex`), and it has no flag that withholds the index. This replay therefore ran the recorded **`hybrid` attempt**: explicit fused lexical and semantic retrieval, the retrieval harness's `hybrid` arm. All 42 reports record retrieval mode `hybrid` with the index built and no construction failure. Selection differs from ordinary Send. On the harness regression cohort, which holds the 14 independent questions here, hybrid delivers every gold turn on 8 of 12 answerable cases and lexical on 9 of 12. The difference is 51c32626, which lexical delivers whole and hybrid only partly; it is one of this replay's partial-gold questions. Answers under lexical selection were not measured.
+
+### Declaration
+
+Written at 13:29 UTC, before any generation, to `.build/answer-presentation-retrieval-on-20261009/declaration.json` in this worktree (private, 0600, SHA-256 `e0eeb892…933b`). Generations ran from 13:30 to 13:50 UTC. No `check.py` or compile ran during them.
+
+- **Cohort** (`answer_presentation_replay.py declare --cohort retrieval-on-21`). The same 21 questions, runner inputs and component policy (v1) as `recent-only-21`, with `--attempt 1`, the recorded hybrid attempt. The 7 pilot questions use the natural-v5 runner input (document 5, 512 output tokens), and the 14 independent questions use independent-v1 (document 7, 1,024 output tokens). All 21 inputs were rebuilt from the pinned dataset and matched their recorded runner-input SHA-256.
+- **Arms.** `v3-pinned` passes `--context-framing context-source-snapshot-v3`. `v4-default` passes no framing flag; all 21 V4 reports and selections record `context-source-snapshot-v4`. Run order: question order, V3 then V4.
+- **Binary.** The same binary as the recent-only replay, SHA-256 `e60b6bbf…2a95`, built at `f54ec7a`. Its `Sources/` equal those of `05f1f55` and of the declaration commit `96392ab`, which adds only the driver cohort and scoring. The declaration's `build_commit` field records the checkout commit at declaration time (`96392ab`), not the binary's build commit.
+- **Model and settings.** Unchanged from the earlier replays: model `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, listed by the live server's `/v1/models`; temperature 0; thinking off; seed 104202601; the frozen 32,768 context limit with 256 safety tokens; and the frozen output caps.
+- **Limit and retry rule.** Generation limit 42. A run that never started an answer invocation could be retried twice without counting, but none needed a retry.
+- **Detector.** The recent-only replay's measures, plus **gold delivery**. The annotated gold turns (`has_answer`) are scored against the attempt's own `delivered_ranges` with `retrieval_harness.coverage`, as the harness scores R2. `whole` means every gold turn was covered, `partial` means some gold bytes were delivered but not every turn whole, and `none` means no gold byte was delivered. A decline (or partial decline) on an answerable question is a **false decline** when gold delivery is whole, a **justified decline** when it is none, and a **decline with partial gold** otherwise.
+
+**Only the framing differs.** For all 21 questions the two arms delivered the identical recent sources and historical ranges. 18 of 21 delivered range sets equal those of the recorded run. The 3 that differ are 001be529, 06878be2 and 0e5e2d1a, all natural-v5 inputs; the seven-question replay saw the same drift for 001be529 and 0e5e2d1a. V3 prompt token counts differ slightly from the recorded runs' (by 2 to 40 tokens where delivery matches). The probable cause, not checked here, is that historical excerpts carry conversation IDs, which are new with each ingestion. V4 prompts were 64 to 317 tokens shorter than V3.
+
+### Results
+
+Gold delivery was the same under both arms. Answerable questions: whole on 12 (001be529, 00ca467f, 01493427, 0e5e2d1a, 1192316e, 1faac195, 3f1e9474, 54026fce, 7a87bd0c, a1eacc2a, gpt4_2655b836, gpt4_70e84552), partial on 3 (06878be2, 08f4fc43, 51c32626) and none on 3 (1a1907b4, 1b9b7252, 4baee567). The 3 abstention questions have no annotated gold turns.
+
+Outcome and Has reference are lexical string checks. Verdict is the default judge's majority of three. All 42 items were unanimous, 3 to 0.
+
+| Question | Class | Gold | V3 outcome | V3 verdict | V4 outcome | V4 verdict | Has reference V3 / V4 |
+|---|---|---|---|---|---|---|---|
+| 001be529 | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 00ca467f | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 01493427 | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 031748ae_abs | abstention | none annotated | answer | reject | decline | accept | no / no |
+| 06878be2 | answerable | partial | answer (512-token cap) | accept | decline | accept | no / no |
+| 08f4fc43 | answerable | partial | decline | reject | answer | reject | no / no |
+| 0e5e2d1a | answerable | whole | answer (copied header, question repeated) | reject | answer | accept | no / yes |
+| 0862e8bf_abs | abstention | none annotated | partial decline (AI disclaimer) | accept | decline | accept | no / no |
+| 1192316e | answerable | whole | answer | accept | answer | accept | no / no |
+| 1a1907b4 | answerable | none | answer | accept | answer | accept | no / no |
+| 1b9b7252 | answerable | none | answer | reject | decline (justified) | reject | no / no |
+| 1faac195 | answerable | whole | answer (copied header) | accept | answer | accept | yes / yes |
+| 3f1e9474 | answerable | whole | answer | accept | answer | accept | yes / yes |
+| 4baee567 | answerable | none | decline (justified) | reject | decline (justified) | reject | no / no |
+| 51c32626 | answerable | partial | partial decline | reject | decline | reject | no / no |
+| **54026fce** | answerable | **whole** | answer (copied header) | accept | **decline (false)** | **reject** | no / no |
+| 7a87bd0c | answerable | whole | answer | accept | answer | accept | yes / yes |
+| a1eacc2a | answerable | whole | answer | accept | answer | accept | no / no |
+| f685340e_abs | abstention | none annotated | answer | accept | decline | accept | no / no |
+| gpt4_2655b836 | answerable | whole | answer | accept | answer | accept | no / no |
+| gpt4_70e84552 | answerable | whole | answer | accept | answer | accept | yes / yes |
+
+Lexical measures:
+
+| Arm | Answers | Decline (plus partial) | False decline | Justified decline | Decline with partial gold | Abstention decline | AI disclaimer | Copied header (fabricated IDs) | Answers with raw IDs (IDs) | Repeated question | Has reference | Cited labels (unresolved) | Markdown bold | Median words |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|---:|---:|
+| V3 (pinned) | 21 | 2 (+2) | 0 | 1 | 2 | 1 | 1 | 3 (3) | 20 (43) | 1 | 7 | 0 (0) | 83 | 66 |
+| V4 (default) | 21 | 8 (+0) | 1 | 2 | 2 | 3 | 0 | 0 (0) | 0 (0) | 0 | 8 | 34 (0) | 59 | 52 |
+
+One V3 answer (06878be2) stopped at the 512-token cap (`incomplete_result`). No V4 answer did. Neither arm contained LaTeX. Each arm had 1 answer ending with a question.
+
+### Judged results (default judge)
+
+Default judge exactly as configured in [JUDGE-CALIBRATION.md](JUDGE-CALIBRATION.md#default-judge-user-decision-october-9-2026). The configuration is Vertex `claude-sonnet-5-5` in `llm-train-482420`, location `global`, with declaration version 3, prompt set `boros-judge-calibration-prompts-v3`, thinking `between_tools`, instructed JSON replies, the verdict task only and three replicates. A majority of three decides, and a tie or unparseable majority is `unknown`. The answers are Qwen-authored, so self-preference does not apply.
+
+- **Items.** `judge-set` built 42 blinded items (set `jr-d978990efd3d8096`, items SHA-256 `9262cfea…7c51`) with the calibration item builder: dataset question, date, type, reference and abstention flag, no evidence, and the same identifier scrub (46 substitutions, all in V3 answers). The judge saw no arm, run or question ID, and the item order interleaves the arms by a seeded hash.
+- **Declaration.** It was frozen before the first Vertex call (`judge-declaration-vertex-sonnet-v3.json`, file SHA-256 `bb0bbd43…03ed`, canonical `e0b0041d…401f`). It is the version 3 template with `stages_per_item` set to `["verdict"]`. It declares $2 and $10 per million tokens, a $1.00 cap, 126 generations and 42 counts, and `check-declaration` reported no problem.
+- **Access.** One standalone empty-body probe before the run, then the runner's own probe: both `reachable` (HTTP 400).
+- **Run.** 126 of 126 replies parsed: all `end_turn`, all bare JSON, 0 thinking tokens. Labels SHA-256 `2c83aba7…de78`.
+- **Cost.** Observed $0.128274 (56,742 input and 1,479 output tokens), reserved $0.758856 against the $1.00 cap. The briefing's $0.04 estimate was low: a verdict request here averages about 450 input tokens, like the calibration run's verdict requests ($0.15 for 150).
+
+Accepted answers, with the judge's calibrated rates against the revised 50-item adjudication: error 2/50, 4% (1-13%); false reject 1/30, 3% (1-17%); false accept 1/20, 5% (1-24%).
+
+| Subset | Answers per arm | V3 accept | V4 accept | Unknown |
+|---|---:|---:|---:|---:|
+| Answerable, gold delivered whole | 12 | 11 | 11 | 0 |
+| Answerable, gold not whole (3 partial, 3 none) | 6 | 2 | 2 | 0 |
+| Abstention | 3 | 2 | 3 | 0 |
+| All | 21 | 15 | 16 | 0 |
+
+The questions that changed verdict between arms: 0e5e2d1a (V3 reject with a copied header, V4 accept), 031748ae_abs (V3 reject, V4 accept on a decline) and 54026fce (V3 accept, V4 reject on a false decline). The other 18 questions got the same verdict under both arms. The two accepts without whole gold are 06878be2 (partial gold, both arms) and 1a1907b4 (no gold, both arms; the harness notes it was accepted without its annotated turn before).
+
+### Reading the results
+
+Measured:
+
+- **G declined once when the gold evidence was delivered.** V4 declined 1 of 12 answerable questions with every gold turn delivered whole: 54026fce, which the judge rejected. It is the same question as the seven-question replay's false decline, now under component policy v1 with 28 delivered ranges instead of v2 with 34. On the other 11, V4 answered and the judge accepted all 11.
+- **Judged correctness did not change on answerable questions:** 13 of 18 accepted under each arm, 11 of 12 where gold was delivered whole. V4 gained one gold-whole question (0e5e2d1a, where V3 copied the header and repeated the question) and lost one (54026fce).
+- **G turned the abstention answers into declines, and the judge accepted all 3** (V3: 2 of 3, rejecting 031748ae_abs, which V3 answered).
+- **V4 declined more with retrieval on than V3, but far less than without retrieval:** 8 of 21 lexical declines against 4 of 21 for V3, compared with 21 of 21 in the recent-only replay. Of V4's 5 answerable declines, 2 are justified (no gold), 2 had partial gold and 1 is false.
+- **A lexical decline is not a reject.** The judge accepted 4 of V4's 8 declines: the 3 abstention questions and 06878be2, a decline phrase within the first 200 characters on a question with partial gold. The lexical outcome flags wording, not correctness.
+- **Presentation fixes held with retrieval on.** V4 had 0 copied headers, 0 fabricated IDs, 0 raw IDs and 0 disclaimers, against 3, 3, 43 (in 20 answers) and 1 under V3. All 34 V4 labels resolve to delivered sources.
+
+Inferred, not measured:
+
+- One false decline in 12 gold-whole cases is not a rate. At temperature 0 with fixed inputs, the two 54026fce declines are the same case under two component policies, not independent samples. Why V4 declines there was not examined, because that needs the answer and evidence text. The cause could be the G wording, the quoted framing, or how the gold turn states the fact.
+- The judge is reference-only and calibrated on 50 items. With a false-accept interval reaching 24 percent, some of the 16 or 15 accepts may be wrong. The arm difference (16 against 15) rests on three questions and is within that uncertainty.
+- Ordinary Send's lexical selection would change delivery on at least 51c32626, which has partial gold here. Whether V4 answers it with gold delivered whole is unmeasured.
+
+### Reproduction
+
+```sh
+python3 scripts/answer_presentation_replay.py declare --cohort retrieval-on-21 --output <new .build directory> --dataset <pinned longmemeval_s_cleaned.json> --binary <Boros binary>
+python3 scripts/answer_presentation_replay.py run --output <same directory> --binary <same binary>
+python3 scripts/answer_presentation_replay.py measure --output <same directory> --dataset <pinned dataset>
+python3 scripts/answer_presentation_replay.py judge-set --output <same directory> --dataset <pinned dataset>
+# fill a copy of vertex-sonnet.v3.template.json with stages_per_item ["verdict"], then:
+python3 scripts/judge_calibration_run.py --set <dir>/judge-set --declaration <filled> --output <dir>/<run> --protocol <evaluate_qa.py> [--execute]
+python3 scripts/answer_presentation_replay.py judge-summary --output <same directory> --dataset <pinned dataset> --labels <labels path>
+```
+
+`measure.json` and `judge-summary.json` are saved privately in the run directory. Both carry IDs, classes and counts only.
+
+`scripts/test_answer_presentation_replay.py` holds 8 synthetic contracts, run by `scripts/check.py`. They cover:
+
+- the cohort definition;
+- gold delivery against the harness coverage, including overlapping excerpts, gaps, empty ranges and UTF-8 sizes;
+- the decline classes and the range digest;
+- the majority of three, where ties and unparseable votes are `unknown`;
+- blinded judge items: no evidence, no arm, run or question ID, the calibration scrub, and deterministic order;
+- a judge set written privately, loaded by the unchanged runner and planned as verdict-only requests;
+- the label join by run index, with refusal of a mismatched set or row order.
 
 ## Reproducing the measurements
 
