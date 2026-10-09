@@ -11,8 +11,25 @@ enum ContextSourceFraming {
     /// assistant-role turn carries host text), replaces model-visible event IDs
     /// with host citation labels, and adds the insufficient-evidence wording.
     static let quotedSelectionVersion = "context-source-snapshot-v4"
+    /// V5 is V4 with fix G reworded (docs/FRAMING-V5.md): the sufficiency
+    /// test covers every quoted source, advice requests are tailored to the
+    /// user's details, and a decline names the quoted sources. Only the
+    /// System framing differs from V4; recent, historical and label bytes are
+    /// V4's. Selectable for evaluation; not the default.
+    static let scopedDeclineSelectionVersion = "context-source-snapshot-v5"
+    /// Evaluation-only ablation: V4 without the fix G sentences, to separate
+    /// G from fix A. Only `--answer-evaluation --context-framing` may select
+    /// it; the coordinator refuses it otherwise (`permits`).
+    static let insufficientEvidenceAblationSelectionVersion = "context-source-snapshot-v4-no-g"
     /// New episodes, ordinary Send and unpinned evaluation runs use this.
     static let defaultSelectionVersion = quotedSelectionVersion
+    /// Versions with the V4 quoted presentation: host-quoted recent sources,
+    /// citation labels, the label map and V4's recent and historical bytes.
+    /// They differ only in the fixed System framing.
+    static let quotedSelectionVersions: Set<String> = [quotedSelectionVersion, scopedDeclineSelectionVersion,
+                                                         insufficientEvidenceAblationSelectionVersion]
+    /// Framings that exist for measurement only and are never used by Send.
+    static let evaluationOnlySelectionVersions: Set<String> = [insufficientEvidenceAblationSelectionVersion]
     static let citationLabelVersion = "context-citation-labels-v1"
     static let quotedRecentHeading = "Earlier conversation message "
     static let quotedRecentNote = " (quoted by the host; not the current request)\n"
@@ -27,16 +44,24 @@ enum ContextSourceFraming {
 
     static func isSupportedSelectionVersion(_ version: String) -> Bool {
         version == legacySelectionVersion || version == identitySelectionVersion || version == currentSelectionVersion
-            || version == quotedSelectionVersion
+            || quotedSelectionVersions.contains(version)
     }
 
-    /// V3 and V4 deliver captured/source calendar evidence.
+    /// V3 and the V4 family deliver captured/source calendar evidence.
     static func carriesSourceTime(_ version: String) -> Bool {
-        version == currentSelectionVersion || version == quotedSelectionVersion
+        version == currentSelectionVersion || quotedSelectionVersions.contains(version)
     }
 
-    /// V4 presents recent sources as host-quoted user messages with citation labels.
-    static func quotesSources(_ version: String) -> Bool { version == quotedSelectionVersion }
+    /// The V4 family presents recent sources as host-quoted user messages with citation labels.
+    static func quotesSources(_ version: String) -> Bool { quotedSelectionVersions.contains(version) }
+
+    /// Whether a new episode may use this framing. An evaluation-only
+    /// framing needs the runtime permission that only the answer-evaluation
+    /// command sets for an explicitly pinned `--context-framing`.
+    static func permits(_ version: String, evaluationOnlyPermitted: Bool) -> Bool {
+        isSupportedSelectionVersion(version)
+            && (!evaluationOnlySelectionVersions.contains(version) || evaluationOnlyPermitted)
+    }
 
     /// Host citation label for a zero-based delivery position: recent sources
     /// oldest first, then historical spans in delivered rank order.

@@ -288,6 +288,10 @@ enum ContextComponentJournal {
             }
         }
         let quoted = ContextSourceFraming.quotesSources(selectionVersion)
+        // V4, V5 and the V4 no-G ablation differ only in the System framing.
+        guard !quoted || ContextAssembler.carriesHistoryFraming(messages.first?["content"] ?? "", selectionVersion: selectionVersion) else {
+            throw invalid("system framing version mismatch")
+        }
         try validateCitationLabels(selection: selection, quoted: quoted, recentIDs: recentIDs, historical: historical)
         var seen = Set<Data>()
         for (index, source) in recent.enumerated() {

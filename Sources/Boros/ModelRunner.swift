@@ -33,6 +33,10 @@ struct GenerationSettings {
     // Context source framing for selected-model episodes. New turns use the
     // V4 quoted framing; evaluation can pin an older version to reproduce it.
     var contextFraming = ContextSourceFraming.defaultSelectionVersion
+    // Runtime-only permission for an evaluation-only framing (the V4 no-G
+    // ablation). Only `--answer-evaluation --context-framing` sets it; the
+    // GUI never does, so Send refuses such a framing at acceptance.
+    var evaluationOnlyFramingPermitted = false
     var endpointAdmission: EndpointAdmissionReceipt?
     var preparedNativeBody: Data?
     // One durable allowance spans preparation, calibration and answering.

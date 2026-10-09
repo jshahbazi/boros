@@ -204,6 +204,39 @@ enum AnswerEvaluationCommand {
         "c9797e1a1f06ff193d31f29f7cb887ac47eb4de02ccb6a09b440c3e4408ec989"
     ]
     static let hundredLongMemoryConfigurationSHA256 = independentLongMemoryConfigurationSHA256
+    /// Framing V5 replay: the 27 other single-session-preference questions
+    /// as opaque version-9 projections (scripts/framing_v5_preference_cases.py).
+    /// One hybrid attempt each, answered by the ordinary path only.
+    static let preferenceLongMemoryCorpusProjectionSHA256: Set<String> = [
+        "4db7ec6dd1f957e6e70f0fa34a9f2c30d4cf1d9816291b1cc6b55b69e5501f76",
+        "ad5352f5a9472ceacd7db4d4dbc0a6561c915c2bc23779c9cc1e4019635a93a8",
+        "eda5d01bd55d921c350d32b8ae7c5a2a316f9afb48b531bed3ef5c4919345a59",
+        "86e7797334dde10e23ff624f9acb95cfd1e18cb385e9a2ac96a02cbcd820285d",
+        "458d931d55407be4e1770ce1c09ae9b6fc02050720a846217bfdecf8ae4df9f8",
+        "b1b01960100ed3149cd74596d606fe64e0646c61fcd128ed4fb3ec051b04f4f0",
+        "c19abced05a3970c97be170c069ab8b2868d2e76cf6c8ea83d2184f32af29a6f",
+        "47aad81b39e0d1e4b9a51c1c07aa346050469a7ce6f45fd586bf6623c058980d",
+        "5aae2636209f810a87e1bcc47ad9b5cb55f1d6af20866d756d4d9cc8ae967652",
+        "c2913de168a4a1e0407cf10f1ae3c032f7eee3fa54128755c51c66603fedbfae",
+        "36bb99ae409d791e7e6a4edeb9e1b2a40e8c80c7021cad0e911ce6f05ddc94d7",
+        "e23198333269800bb9d495c450f3f4e51f444b35e8ee4dc8f2597200f4a542be",
+        "81e3a4ffc4030f248e17e4c9a4556866d36870f5b39efc1c4260a4636e145e12",
+        "592e12dd268619867db67ef9713d2d9cc62f0ccb00dd07b7dcc52940c7d27469",
+        "f04516cdd3426ef1b2a050cd063ca9dece70bc106e3a90224b9e435934406976",
+        "3ddf149ec9e3fe288b709343f207f841f23119279c7f20ab0897211d0a9777fd",
+        "35160d2e6af48d719043dc601677b755339c23e129963d6bb280d815836a6886",
+        "5202586e713393d762ca2f28cb6dd459150a04afdc5cd4da02522ff0f77a241e",
+        "582e208a1e777dd6542e9de7763ef516b0c3e10919b4a3898bc834a46dbf2974",
+        "4ec62ff83eff03c6c026b81c98fe8e98ca0b66646d62081e245b1e5c723f9860",
+        "f65c9975e44859920e80530daab2e194e4b08d7915e72c5a760911ffcf766143",
+        "5ce7a9879db2850e81a525b314e8f2ee9436e96a3c245a3ba64d0b5753f2a94a",
+        "df68fa7df1d40f708fc7ed4979f4daec98da69217d2b057b8ab0426ad3d231ea",
+        "574ee8e99b15921207e95e6d0f86805aba903c64a82c464177909dd6c35c68f2",
+        "418ed248876edd00b2345c9831a051893434700607b801ae503a63adce48d13a",
+        "41868926df9f412c60259df94f873ebcd95ae7e884bc8886c8c1a4d12c58eff9",
+        "b9edef0a8401054a86a5694cb1b2ec49fc9875dcf499290a7fe6234f5375e7a2"
+    ]
+    static let preferenceLongMemoryConfigurationSHA256 = independentLongMemoryConfigurationSHA256
     static let witnessMode = "sufficient-exchange-pack-v1"
     private enum Failure: Error { case arguments, invalid, io }
     /// A command-level amendment keeps the exact v7 source/configuration pins
@@ -212,6 +245,7 @@ enum AnswerEvaluationCommand {
         case ordinary = "ordinary-v1"
         case investigation = "native-investigation-paired-v1"
         func validate(_ document: Document) throws {
+            // Version 9 (framing V5 preference cohort) is answered by the ordinary path only.
             guard (self == .ordinary ? document.version != 8 : [7, 8].contains(document.version)) else { throw Failure.invalid }
         }
         func investigates(_ attempt: Attempt) -> Bool {
@@ -246,7 +280,11 @@ enum AnswerEvaluationCommand {
         /// declared strategy exactly as before.
         var retrievalArm: AnswerEvaluationRetrievalArm? = nil
     }
-    static let pinnableFramings = [ContextSourceFraming.currentSelectionVersion, ContextSourceFraming.quotedSelectionVersion]
+    /// `--context-framing` values. The V4 no-G ablation is evaluation-only:
+    /// this option is the only path that grants its runtime permission.
+    static let pinnableFramings = [ContextSourceFraming.currentSelectionVersion, ContextSourceFraming.quotedSelectionVersion,
+                                   ContextSourceFraming.scopedDeclineSelectionVersion,
+                                   ContextSourceFraming.insufficientEvidenceAblationSelectionVersion]
     private static func invocationOptions(_ args: [String]) throws -> InvocationOptions {
         guard args.count >= 4, args[0] == "--answer-evaluation", args[2] == "--output-directory" else { throw Failure.arguments }
         if args.count == 5 {
@@ -390,6 +428,8 @@ enum AnswerEvaluationCommand {
         var independentLongMemoryConfiguration: String? = nil
         var hundredLongMemory: Set<String> = []
         var hundredLongMemoryConfiguration: String? = nil
+        var preferenceLongMemory: Set<String> = []
+        var preferenceLongMemoryConfiguration: String? = nil
         static var production: InputPins {
             InputPins(ordinary: developerCorpusProjectionSHA256.union([publicCorpusProjectionSHA256]),
                 witness: witnessCorpusProjectionSHA256, witnessConfiguration: witnessConfigurationSHA256,
@@ -401,7 +441,9 @@ enum AnswerEvaluationCommand {
                 independentLongMemory: independentLongMemoryCorpusProjectionSHA256,
                 independentLongMemoryConfiguration: independentLongMemoryConfigurationSHA256,
                 hundredLongMemory: hundredLongMemoryCorpusProjectionSHA256,
-                hundredLongMemoryConfiguration: hundredLongMemoryConfigurationSHA256)
+                hundredLongMemoryConfiguration: hundredLongMemoryConfigurationSHA256,
+                preferenceLongMemory: preferenceLongMemoryCorpusProjectionSHA256,
+                preferenceLongMemoryConfiguration: preferenceLongMemoryConfigurationSHA256)
         }
     }
     private static func decode(_ bytes: Data, pins: InputPins = .production) throws -> Document {
@@ -416,7 +458,7 @@ enum AnswerEvaluationCommand {
         let projectionDigest = digest(try JSONSerialization.data(withJSONObject: publicProjection,
             options: [.sortedKeys, .withoutEscapingSlashes]))
         guard let mode = root["version"] as? NSNumber, CFGetTypeID(mode) != CFBooleanGetTypeID(),
-              mode.doubleValue == Double(mode.intValue), (1...8).contains(mode.intValue) else { throw Failure.invalid }
+              mode.doubleValue == Double(mode.intValue), (1...9).contains(mode.intValue) else { throw Failure.invalid }
         let eventKeys: Set<String> = ["id", "project_id", "conversation_key", "role", "status", "text"]
         let attemptKeys: Set<String> = ["probe_id", "project_id", "conversation_key", "prompt", "strategy", "replicate"]
         guard events.allSatisfy({ Set($0.keys) == (mode.intValue >= 4 ? eventKeys.union(["source_time"]) : eventKeys) }),
@@ -441,6 +483,10 @@ enum AnswerEvaluationCommand {
             guard pins.hundredLongMemory.contains(projectionDigest),
                   digest(try JSONSerialization.data(withJSONObject: configuration,
                     options: [.sortedKeys, .withoutEscapingSlashes])) == pins.hundredLongMemoryConfiguration else { throw Failure.invalid }
+        } else if mode.intValue == 9 {
+            guard pins.preferenceLongMemory.contains(projectionDigest),
+                  digest(try JSONSerialization.data(withJSONObject: configuration,
+                    options: [.sortedKeys, .withoutEscapingSlashes])) == pins.preferenceLongMemoryConfiguration else { throw Failure.invalid }
         } else if mode.intValue == 7 {
             guard pins.independentLongMemory.contains(projectionDigest),
                   digest(try JSONSerialization.data(withJSONObject: configuration,
@@ -475,8 +521,8 @@ enum AnswerEvaluationCommand {
                   attemptsSeen.insert("\(attempt.probe_id)|\(attempt.strategy.rawValue)|\(attempt.replicate)").inserted else { throw Failure.invalid }
         }
         if value.version >= 4 {
-            guard value.attempts.count == ([6, 8].contains(value.version) ? 1 : 2),
-                  value.attempts.map(\.strategy) == ([6, 8].contains(value.version) ? [.hybrid] : [.recentOnly, .hybrid]),
+            guard value.attempts.count == ([6, 8, 9].contains(value.version) ? 1 : 2),
+                  value.attempts.map(\.strategy) == ([6, 8, 9].contains(value.version) ? [.hybrid] : [.recentOnly, .hybrid]),
                   value.attempts.allSatisfy({ $0.replicate == 0 && $0.question_time != nil }),
                   value.events.allSatisfy({ $0.status == .complete }),
                   Set(value.events.map(\.project_id)).count == 1 else { throw Failure.invalid }
@@ -656,6 +702,9 @@ enum AnswerEvaluationCommand {
                             construction: [String: Any], restored: URL, started: UInt64?) {
             var settings = preparationMode.settings(document.configuration, attempt: attempt)
             settings.contextFraming = framing
+            // Only an explicitly pinned evaluation-only framing gets the permission.
+            settings.evaluationOnlyFramingPermitted = options?.framingPinned == true
+                && ContextSourceFraming.evaluationOnlySelectionVersions.contains(framing)
             var limits: EpisodeLimits?
             if let policy = options?.componentPolicy { var value = EpisodeLimits(); value.componentPolicy = policy; limits = value }
             let arm = retrievalArm(attempt)
@@ -1603,6 +1652,42 @@ extension AnswerEvaluationCommand {
                 repinned.hundredLongMemory = [try projectionSHA256(witnessFixtureBytes(changed))]
                 checks["longmem_v8_repin_\(kind)_refused"] = refused(changed, using: repinned)
             }
+            // Version 9: the v8 shape answered by the ordinary path, with its
+            // own pins (framing V5 preference cohort).
+            var preferenceRoot = hundredRoot
+            preferenceRoot["version"] = 9
+            var preferencePins = pins
+            preferencePins.preferenceLongMemory = [try projectionSHA256(witnessFixtureBytes(preferenceRoot))]
+            preferencePins.preferenceLongMemoryConfiguration = pins.independentLongMemoryConfiguration
+            let preferenceDocument = try decode(witnessFixtureBytes(preferenceRoot), pins: preferencePins)
+            try PreparationMode.ordinary.validate(preferenceDocument)
+            checks["longmem_v9_single_hybrid_ordinary_accepted"] = preferenceDocument.attempts.count == 1
+                && preferenceDocument.attempts[0].strategy == .hybrid && preferenceDocument.version == 9
+                && !PreparationMode.ordinary.settings(preferenceDocument.configuration, attempt: preferenceDocument.attempts[0]).investigateMemory
+            do { try PreparationMode.investigation.validate(preferenceDocument); checks["longmem_v9_investigation_mode_refused"] = false }
+            catch { checks["longmem_v9_investigation_mode_refused"] = true }
+            checks["longmem_v9_hundred_pins_cannot_enable_v9"] = refused(preferenceRoot, using: hundredPins)
+            var preferenceOnly = InputPins(ordinary: [], witness: [], witnessConfiguration: "")
+            preferenceOnly.preferenceLongMemory = [try projectionSHA256(witnessFixtureBytes(hundredRoot))]
+            preferenceOnly.preferenceLongMemoryConfiguration = pins.independentLongMemoryConfiguration
+            checks["longmem_v9_preference_pins_cannot_enable_v8"] = refused(hundredRoot, using: preferenceOnly)
+            checks["longmem_v9_production_has_exact_27_separate_pins"] = preferenceLongMemoryCorpusProjectionSHA256.count == 27
+                && preferenceLongMemoryCorpusProjectionSHA256.isDisjoint(with: hundredLongMemoryCorpusProjectionSHA256)
+                && preferenceLongMemoryCorpusProjectionSHA256.isDisjoint(with: independentLongMemoryCorpusProjectionSHA256)
+                && preferenceLongMemoryCorpusProjectionSHA256.isDisjoint(with: longMemoryCorpusProjectionSHA256)
+                && preferenceLongMemoryConfigurationSHA256 == independentLongMemoryConfigurationSHA256
+                && InputPins.production.preferenceLongMemory == preferenceLongMemoryCorpusProjectionSHA256
+            for kind in ["paired", "recent_only", "configuration"] {
+                var changed = preferenceRoot
+                switch kind {
+                case "paired": changed["attempts"] = [attempt, hybrid]
+                case "recent_only": changed["attempts"] = [attempt]
+                default: var c = root["configuration"] as! [String: Any]; c["maximum_output"] = 512; changed["configuration"] = c
+                }
+                var repinned = preferencePins
+                repinned.preferenceLongMemory = [try projectionSHA256(witnessFixtureBytes(changed))]
+                checks["longmem_v9_repin_\(kind)_refused"] = refused(changed, using: repinned)
+            }
         }
         for kind in ["event_date_null", "question_date_null", "oracle", "changed_source", "changed_question", "legacy", "other_longmem_version", "unsupported_version", "configuration"] {
             var changed = root
@@ -1796,7 +1881,7 @@ extension AnswerEvaluationCommand {
     /// ordinary Send host index. Selection equivalence with the retrieval
     /// harness is checked across binaries by scripts/test_ordinary_send_arm.py.
     private static func retrievalArmChecks(baseURL: String) throws -> [String: Bool] {
-        var checks: [String: Bool] = [:]
+        var checks = try framingOptionChecks()
         let base = ["--answer-evaluation", "/synthetic/input.json", "--output-directory", "/synthetic/output"]
         let plain = try invocationOptions(base)
         let selected = try invocationOptions(base + ["--retrieval-arm", "ordinary_send"])
@@ -1879,6 +1964,64 @@ extension AnswerEvaluationCommand {
         checks["retrieval_arm_refused_for_declared_source_control"] = !accepts(controlDocument, selected)
         checks["retrieval_arm_absent_flag_accepts_every_input"] = accepts(pairedDocument, plain) && accepts(witnessDocument, plain)
             && accepts(controlDocument, plain)
+        return checks
+    }
+
+    /// `--context-framing` contracts for V5 and the evaluation-only V4 no-G
+    /// ablation: both are pinnable here, only the ablation needs (and only
+    /// this command grants) the runtime permission, and the default stays V4.
+    private static func framingOptionChecks() throws -> [String: Bool] {
+        var checks: [String: Bool] = [:]
+        let base = ["--answer-evaluation", "/synthetic/input.json", "--output-directory", "/synthetic/output"]
+        let v5 = ContextSourceFraming.scopedDeclineSelectionVersion
+        let ablation = ContextSourceFraming.insufficientEvidenceAblationSelectionVersion
+        let plain = try invocationOptions(base)
+        let scoped = try invocationOptions(base + ["--context-framing", v5])
+        let ablated = try invocationOptions(base + ["--context-framing", ablation, "--retrieval-arm", "ordinary_send"])
+        checks["framing_cli_default_is_v4_unpinned"] = plain.framing == ContextSourceFraming.quotedSelectionVersion
+            && !plain.framingPinned && ContextSourceFraming.defaultSelectionVersion == ContextSourceFraming.quotedSelectionVersion
+        checks["framing_cli_v5_and_ablation_pinnable"] = scoped.framing == v5 && scoped.framingPinned
+            && ablated.framing == ablation && ablated.framingPinned && ablated.retrievalArm == .ordinarySend
+        for (index, value) in ["context-source-snapshot-v6", "context-source-snapshot-v1", "context-source-snapshot-v2",
+                               "context-source-snapshot-v4-no-G", ""].enumerated() {
+            do { _ = try invocationOptions(base + ["--context-framing", value]); checks["framing_cli_invalid_\(index)_refused"] = false }
+            catch { checks["framing_cli_invalid_\(index)_refused"] = true }
+        }
+        do {
+            _ = try invocationOptions(base + ["--investigate-memory", "--context-framing", ablation])
+            checks["framing_cli_ablation_refused_with_investigation"] = false
+        } catch { checks["framing_cli_ablation_refused_with_investigation"] = true }
+        // The permission the session grants: only for a pinned evaluation-only framing.
+        func permitted(_ options: InvocationOptions) -> Bool {
+            options.framingPinned && ContextSourceFraming.evaluationOnlySelectionVersions.contains(options.framing)
+        }
+        checks["framing_cli_permission_only_for_pinned_ablation"] = permitted(ablated) && !permitted(scoped) && !permitted(plain)
+            && ContextSourceFraming.permits(ablation, evaluationOnlyPermitted: permitted(ablated))
+            && ContextSourceFraming.permits(v5, evaluationOnlyPermitted: permitted(scoped))
+            && ContextSourceFraming.permits(plain.framing, evaluationOnlyPermitted: permitted(plain))
+        // Outside evaluation: the default settings carry no permission, and
+        // the coordinator refuses the ablation before accepting any request.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("boros-framing-gate-check-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try MemoryStore(directory: directory)
+        let chat = try store.createConversation(projectID: "framing-gate-check", title: "Synthetic framing gate")
+        var settings = GenerationSettings()
+        settings.profile = .customLocal; settings.endpointURL = "http://127.0.0.1:9/v1/"
+        settings.endpointModel = Qwen38TextRendering.modelID
+        settings.contextFraming = ablation
+        let refusedAtAcceptance: Bool
+        do {
+            _ = try AnswerAttemptCoordinator(store: store, conversationID: chat.id, projectID: chat.projectID,
+                prompt: "Synthetic gate request", settings: settings, onText: { _ in }, onComplete: { _, _ in }).accept()
+            refusedAtAcceptance = false
+        } catch { refusedAtAcceptance = error is ContextError }
+        let nothingAccepted = try store.eventCount(conversationID: chat.id, excludingEventID: nil) == 0
+        checks["framing_gate_ablation_refused_outside_evaluation"] = !GenerationSettings().evaluationOnlyFramingPermitted
+            && GenerationSettings().contextFraming == ContextSourceFraming.quotedSelectionVersion
+            && refusedAtAcceptance && nothingAccepted
+            && !ContextSourceFraming.permits(ablation, evaluationOnlyPermitted: false)
+            && ContextSourceFraming.permits(v5, evaluationOnlyPermitted: false)
+            && !ContextSourceFraming.permits("context-source-snapshot-v6", evaluationOnlyPermitted: true)
         return checks
     }
 

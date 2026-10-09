@@ -20,6 +20,17 @@ enum ComponentPreparationChecks {
         /// The pipeline fixture under the V4 quoted framing. `.pipeline`
         /// itself is pinned to V3 so the old format keeps its full coverage.
         case quotedPipeline
+        /// The same fixture under V5 (scoped fix G) and under the
+        /// evaluation-only V4 no-G ablation: only the System framing differs.
+        case scopedPipeline, ablationPipeline
+        var quotedFamily: Bool { [.quotedPipeline, .scopedPipeline, .ablationPipeline].contains(self) }
+        var quotedFraming: String {
+            switch self {
+            case .scopedPipeline: return ContextSourceFraming.scopedDeclineSelectionVersion
+            case .ablationPipeline: return ContextSourceFraming.insufficientEvidenceAblationSelectionVersion
+            default: return ContextSourceFraming.quotedSelectionVersion
+            }
+        }
     }
     private final class Clock: EpisodeClockSource {
         private let lock = NSLock()
@@ -101,7 +112,7 @@ enum ComponentPreparationChecks {
             default: marker = "fixturePipeline"
             }
             prompt = marker + " Where is pipelinekey?"
-            if kind == .pipeline || kind == .quotedPipeline || kind == .envelope || kind == .boundary || kind == .httpLimit {
+            if kind == .pipeline || kind.quotedFamily || kind == .envelope || kind == .boundary || kind == .httpLimit {
                 let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic original spans")
                 for index in 0..<(kind == .boundary ? 3 : 5) {
                     let prefix = "pipelinekey archived source \(index) "
@@ -141,7 +152,7 @@ enum ComponentPreparationChecks {
                     : index == 0 ? "pipelinekey original recent decision" : "Synthetic recent source \(index)"
                 _ = try store.append(conversationID: chat.id, role: index % 2 == 0 ? .human : .assistant,
                     text: text, status: index == 3 || ((kind == .legacyVersion || kind == .identityVersion) && index == 1) ? .partial : .complete,
-                    turnID: "fixture-recent-turn-\(index)", eventID: "fixture-\(kind.rawValue)-recent-\(index)", sourceTime: kind == .pipeline || kind == .quotedPipeline ? try Self.syntheticDate("2023-05-30") : nil)
+                    turnID: "fixture-recent-turn-\(index)", eventID: "fixture-\(kind.rawValue)-recent-\(index)", sourceTime: kind == .pipeline || kind.quotedFamily ? try Self.syntheticDate("2023-05-30") : nil)
             }
             let episodeID = UUID().uuidString
             var limits = EpisodeLimits(); limits.componentPolicy = .selectedQwen
@@ -163,6 +174,11 @@ enum ComponentPreparationChecks {
             // that only V1 to V3 show to the model, so they also stay on V3.
             if [.pipeline, .boundary, .neighborhoodAuditDated, .neighborhoodAuditFit].contains(kind) {
                 settings.contextFraming = ContextSourceFraming.currentSelectionVersion
+            }
+            if kind == .scopedPipeline || kind == .ablationPipeline {
+                settings.contextFraming = kind.quotedFraming
+                // As the answer-evaluation command grants it for a pinned ablation.
+                settings.evaluationOnlyFramingPermitted = kind == .ablationPipeline
             }
             switch kind {
             case .identityModel: settings.endpointAPIKey = "synthetic-component-model-drift"
@@ -365,7 +381,7 @@ enum ComponentPreparationChecks {
             return chain.last?.evidence
         }
         private func inputProofChecks(_ prepared: PreparedComponentContext) throws -> [String: Bool] {
-            guard [.pipeline, .quotedPipeline, .boundary, .envelope].contains(kind) else { return [:] }
+            guard [.pipeline, .boundary, .envelope].contains(kind) || kind.quotedFamily else { return [:] }
             failureStage = "original_input_proof"
             let prefix = "component_preparation_" + kind.rawValue + "_input_proof"
             let admission = try JSONEncoder().encode(AdmissionAudit(version: 2, receipt: prepared.receipt,
@@ -376,7 +392,7 @@ enum ComponentPreparationChecks {
                 snapshot: prepared.body, inputTokensKnown: true)
             var checks: [String: Bool] = [:]
             let original = try lease.checkActive()
-            if kind == .pipeline || kind == .quotedPipeline {
+            if kind == .pipeline || kind.quotedFamily {
                 var oversizedDenied = false
                 do { _ = try store.prepareAnswerInputProof(lease: lease, requestBody: prepared.body,
                     providerIdentity: prepared.receipt.endpoint, admissionJSON: admission, answerRequest: request,
@@ -581,15 +597,15 @@ enum ComponentPreparationChecks {
                             && !prepared.snapshot.evidence.contains { $0.eventID == "fixture-pipeline-recent-1" }
                         checks[prefix + "_geometric_underfilled_caps_declared"] = proof.recent.tokens == 4000 && proof.evidence.tokens == 5000
                             && proof.wholePrompt.tokens == 9100
-                    case .quotedPipeline:
-                        let quoted = ContextSourceFraming.quotedSelectionVersion
+                    case .quotedPipeline, .scopedPipeline, .ablationPipeline:
+                        let quoted = kind.quotedFraming
                         let snapshot = prepared.snapshot
                         let selectedSource = snapshot.recentSources[0]
                         let historicalSource = snapshot.evidence[0]
                         let selection = try JSONSerialization.jsonObject(with: snapshot.selectionEvidence()) as! [String: Any]
                         let labels = selection["citation_labels"] as? [[String: Any]] ?? []
                         let modelText = snapshot.messages.map(\.content).joined(separator: "\n")
-                        checks[prefix + "_same_selection_and_token_geometry_as_v3"] = snapshot.recentSourceIDs == ["fixture-quotedPipeline-recent-6"]
+                        checks[prefix + "_same_selection_and_token_geometry_as_v3"] = snapshot.recentSourceIDs == ["fixture-\(kind.rawValue)-recent-6"]
                             && snapshot.evidence.map(\.eventID) == [droppedSourceID]
                             && snapshot.selectionAudit?.recentTokenExcludedCount == 6
                             && snapshot.selectionAudit?.evidenceTokenExcludedCount == 6
@@ -724,7 +740,7 @@ enum ComponentPreparationChecks {
                         && invocation?.admissionJSON == originalAdmission
                     checks[prefix + "_restore_preserves_own_frozen_policy_and_span_cap"] = restoredReceipt.limits == originalReceipt.limits
                         && restoredReceipt.limits.componentPolicy?.evidenceSpans == state.limits.componentPolicy?.evidenceSpans
-                    if kind == .pipeline || kind == .quotedPipeline {
+                    if kind == .pipeline || kind.quotedFamily {
                         if let inputProof {
                             let proofWork = try restored.episodeWork(episodeID: lease.episodeID, operationID: inputProof.operationID)
                             let restoredAudit: [String: Any]
@@ -736,8 +752,15 @@ enum ComponentPreparationChecks {
                                 && restoredAudit["inputProofSHA256"] as? String == inputProof.digest
                                 && inputProofEvidence(inputProof.operationID, directory: restoredDirectory) == inputProofEvidence(inputProof.operationID, directory: directory)
                         } else { checks[prefix + "_restore_retains_durable_input_proof_link"] = false }
-                        checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory,
-                            prefixOverride: kind == .quotedPipeline ? "component_preparation_quoted_journal_" : nil)) { _, latest in latest }
+                        // The corruption suite runs for V3, V4 and V5; the ablation keeps the valid-journal control.
+                        if kind != .ablationPipeline {
+                            checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory,
+                                prefixOverride: kind == .quotedPipeline ? "component_preparation_quoted_journal_"
+                                    : kind == .scopedPipeline ? "component_preparation_scoped_journal_" : nil)) { _, latest in latest }
+                        } else {
+                            checks["component_preparation_ablation_journal_valid_coordinator_control"] =
+                                JournalCorruptionChecks.validates(archive: archive, directory: directory)
+                        }
                     }
                     if kind == .legacyVersion || kind == .identityVersion {
                         checks.merge(JournalCorruptionChecks.run(archive: archive, directory: directory, versionsOnly: true, identityVersion: kind == .identityVersion)) { _, latest in latest }
@@ -852,7 +875,7 @@ enum ComponentPreparationChecks {
                     "selection work resource mismatch", "selection limits mismatch", "recent source mismatch",
                     "recent source bytes mismatch", "source metadata mismatch", "source metadata missing",
                     "source calendar metadata missing", "source calendar metadata invalid", "source calendar metadata mismatch",
-                    "accepted request mismatch", "accepted request missing", "evidence framing mismatch",
+                    "accepted request mismatch", "accepted request missing", "evidence framing mismatch", "system framing version mismatch",
                     "historical source mismatch", "excerpt bytes missing", "excerpt digest mismatch",
                     "excerpt source range mismatch", "excerpt source range missing", "extra evidence bytes",
                     "provenance digest mismatch", "adapter binding mismatch", "count receipt mismatch",
@@ -987,6 +1010,13 @@ enum ComponentPreparationChecks {
                 for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: copied.path + suffix) }
             }
             return try body(Database(copied))
+        }
+        /// The unmutated archived journal validates (the suite's control alone).
+        static func validates(archive: URL, directory: URL) -> Bool {
+            do {
+                try withCopy(archive: archive, directory: directory) { try MemoryStore.validateEpisodeJournal(database: $0.handle) }
+                return true
+            } catch { return false }
         }
         static func run(archive: URL, directory: URL, versionsOnly: Bool = false, identityVersion: Bool = false,
                         prefixOverride: String? = nil) -> [String: Bool] {
