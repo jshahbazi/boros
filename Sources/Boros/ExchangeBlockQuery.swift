@@ -354,6 +354,17 @@ enum ExchangeBlockQuery {
             let index = Index(sources: loaded.sources)
             let ranked = index.rank(query)
             let budget = Int(Double(componentPolicy.evidenceTokens) * evidenceTokenFraction)
+            if componentPolicy.packsExchangeValueDensity {
+                // P2 step 3: declared candidate window, value-density packing.
+                audit["source_frontier"] = loaded.frontier
+                audit["indexed_source_count"] = loaded.sources.count
+                audit["block_count"] = index.blocks.count
+                audit["matched_block_count"] = ranked.count
+                audit["anchor_matched_block_count"] = ranked.filter { $0.anchorMatches > 0 }.count
+                return try ValuePacking.select(recent: recent, binding: binding, store: store, conversationID: conversationID,
+                    projectID: projectID, excludingEventID: excludingEventID, episodeLease: episodeLease,
+                    componentPolicy: componentPolicy, index: index, ranked: ranked, tokenBudget: budget, baseAudit: audit)
+            }
             let packing = try pack(index: index, ranked: ranked, maximumSpans: componentPolicy.evidenceSpans,
                 tokenBudget: budget, adjacent: componentPolicy.packsAdjacentExchanges, selectionVersion: binding.version)
             hits = packing.hits
@@ -371,7 +382,8 @@ enum ExchangeBlockQuery {
             maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
             componentPolicy: componentPolicy, historicalProvenance: nil)
         var retrieval = try result.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-        retrieval["mode"] = componentPolicy.packsAdjacentExchanges ? "exchange_adjacent" : "exchange_lexical"
+        retrieval["mode"] = componentPolicy.packsExchangeValueDensity ? "exchange_packed"
+            : componentPolicy.packsAdjacentExchanges ? "exchange_adjacent" : "exchange_lexical"
         retrieval["semantic_available"] = false
         retrieval["exchange_query"] = audit
         result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: retrieval, options: [.sortedKeys])

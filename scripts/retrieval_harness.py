@@ -56,11 +56,17 @@ GLOBAL_ARMS = ("global_hybrid", "global_fill")
 # withholds it by user decision (docs/P2-SEMANTIC-DECISION.md, Decision). It
 # must select exactly what `lexical` selects.
 ORDINARY_SEND_ARM = "ordinary_send"
-ARMS = ("recent_only", "lexical", "hybrid", ORDINARY_SEND_ARM, "exchange_lexical", "exchange_adjacent") + GLOBAL_ARMS
+ARMS = ("recent_only", "lexical", "hybrid", ORDINARY_SEND_ARM, "exchange_lexical", "exchange_adjacent",
+        "exchange_packed") + GLOBAL_ARMS
 PRIMARY_ARM = ORDINARY_SEND_ARM
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
 DECLARED_CANDIDATE_DEPTH = 16
+# Declared before measurement (P2 step 3): the exchange_packed arm records its
+# candidate units (the top 32 ranked blocks and their adjacent neighbors) before
+# packing; its R1 is computed from that list, independently of delivery.
+PACKED_CANDIDATE_BLOCK_DEPTH = 32
+PACKED_CANDIDATE_ID_DIGITS = 12
 KNOWN_MISSES = ("51c32626", "1b9b7252", "4baee567", "1a1907b4")
 PROCESS_TIMEOUT = 1800
 
@@ -452,7 +458,25 @@ def score_attempt(attempt, case):
     for item in (attempt.get("exchange") or {}).get("ranked_blocks") or []:
         for identifier in item.get("event_ids") or []:
             blocks.setdefault(identifier, (item.get("rank"), item.get("disposition")))
+    # P2 step 3 arm: compact candidate units recorded before packing.
+    packed = (attempt.get("exchange") or {}).get("candidates")
+    units = {}
+    if packed is not None:
+        require(len(packed) <= PACKED_CANDIDATE_BLOCK_DEPTH, "packed_candidate_depth_exceeded")
+        for rank, (_anchors, members) in enumerate(packed):
+            for short, kind, code in members:
+                # Members of a block take precedence over the same source as a neighbor.
+                if short not in units or (units[short][1] in ("p", "n") and kind in ("l", "r")):
+                    units[short] = (rank, kind, code)
     for identifier in positives:
+        if packed is not None:
+            unit = units.get(digest(identifier.encode())[:PACKED_CANDIDATE_ID_DIGITS])
+            turns.append({"recent": identifier in recent, "candidate_rank": None,
+                          "candidate": identifier in recent or unit is not None,
+                          "whole": identifier in whole, "partial": identifier in partial,
+                          "block_rank": unit[0] if unit else None, "unit_kind": unit[1] if unit else None,
+                          "block_disposition": unit[2] if unit else None})
+            continue
         turns.append({"recent": identifier in recent, "candidate_rank": ranks.get(identifier),
                       "candidate": identifier in recent or identifier in ranks or identifier in whole,
                       "whole": identifier in whole, "partial": identifier in partial})
@@ -462,6 +486,9 @@ def score_attempt(attempt, case):
             "candidate": sum(t["candidate"] for t in turns), "whole": sum(t["whole"] for t in turns),
             "partial": sum(t["partial"] for t in turns),
             "trace_omitted": bool(attempt.get("trace_omitted")),
+            "candidate_list": packed is not None,
+            "delivered_outside_candidates": sum(t["whole"] and not t["candidate"] for t in turns) if packed is not None else None,
+            "context_audit_bytes": attempt.get("context_audit_bytes"),
             "candidate_count": attempt.get("candidate_count"),
             "prompt_tokens": attempt.get("prompt_tokens"),
             "components": attempt.get("components"),
@@ -469,7 +496,8 @@ def score_attempt(attempt, case):
                           if key.endswith("Count") or key.endswith("Rounds")},
             "retrieval_mode": (attempt.get("retrieval") or {}).get("mode"),
             "preparation_milliseconds": attempt.get("preparation_milliseconds"),
-            "exchange": {key: value for key, value in (attempt.get("exchange") or {}).items() if key != "ranked_blocks"} or None}
+            "exchange": {key: value for key, value in (attempt.get("exchange") or {}).items()
+                         if key not in ("ranked_blocks", "candidates", "disposition_codes", "unit_kinds")} or None}
 
 
 def feasibility(control, case):
@@ -527,6 +555,9 @@ def summarize(rows):
             "by_category": by_category,
             "failures": sum(s["failure"] is not None for s in all_attempts),
             "trace_omitted": sum(bool(s.get("trace_omitted")) for s in all_attempts),
+            "candidate_list_attempts": sum(bool(s.get("candidate_list")) for s in all_attempts),
+            "delivered_outside_candidates": sum(int(s.get("delivered_outside_candidates") or 0) for s in all_attempts),
+            "context_audit_bytes_max": max([s["context_audit_bytes"] for s in all_attempts if s.get("context_audit_bytes") is not None], default=None),
             "prompt_tokens_p50": percentile([s.get("prompt_tokens") for s in all_attempts], 0.5),
             "prompt_tokens_p95": percentile([s.get("prompt_tokens") for s in all_attempts], 0.95),
             "preparation_milliseconds_p50": percentile([s.get("preparation_milliseconds") for s in all_attempts], 0.5),
@@ -662,10 +693,12 @@ def run(args):
                  ORDINARY_SEND_ARM: "ordinary Send as the GUI constructs it: the history's semantic index passed through SemanticRetrievalPolicy.ordinarySend, which withholds it",
                  "exchange_lexical": "explicit P2 step 1 policy selected-model-context-components-v3-exchange; no semantic index",
                  "exchange_adjacent": "explicit P2 step 1+2 policy selected-model-context-components-v3-exchange-adjacent; no semantic index",
+                 "exchange_packed": "explicit P2 step 3 policy selected-model-context-components-v3-exchange-packed; no semantic index",
                  "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
                  "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)"},
         "definitions": {
             "r1": f"every annotated positive turn is delivered, in recent context, or among the first {DECLARED_CANDIDATE_DEPTH} ranked candidates traced before span and token limits",
+            "r1_exchange_packed": f"every annotated positive turn is in recent context or among the candidate units (sources of the top {PACKED_CANDIDATE_BLOCK_DEPTH} ranked exchange blocks and their adjacent opposite-role neighbors) recorded before packing",
             "r2": "every annotated positive turn is delivered whole (union of delivered byte ranges covers the source) after component token fitting and admission",
             "feasible": "a separate declared-source control delivers every positive turn whole with no evidence exclusions under the same caps",
             "denominator": "answerable cases minus infeasible ones; preparation and control failures stay in it"},

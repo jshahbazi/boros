@@ -160,10 +160,141 @@ enum ExchangeBlockQueryChecks {
             && reduced?.evidence.map(\.eventID) == Array(adjacentIDs.dropLast())
             && reduced?.selectionAudit?.evidenceTokenExcludedCount == 1
 
+        // P2 step 3: value-density packing over a declared candidate window.
+        result.merge(try packedChecks(source: source)) { _, latest in latest }
+        let step3 = try prepare(.selectedQwenExchangePacked)
+        let packedRetrieval = try JSONSerialization.jsonObject(with: step3.snapshot.retrievalAuditJSON ?? Data()) as? [String: Any] ?? [:]
+        let packedAudit = packedRetrieval["exchange_query"] as? [String: Any] ?? [:]
+        let packedCandidates = packedAudit["candidates"] as? [[Any]] ?? []
+        let packedUnits = packedCandidates.flatMap { ($0.last as? [[String]]) ?? [] }
+        let packedCodes = packedUnits.map { $0[2] }
+        let packedIDs = step3.snapshot.evidence.map(\.eventID)
+        let candidateIDs = Set(packedUnits.map { $0[0] })
+        result["exchange_packed_entry_delivers_best_block_first_from_declared_candidates"] = Array(packedIDs.prefix(4)) == [before1.id, target.id, reply.id, after1.id]
+            && packedRetrieval["mode"] as? String == "exchange_packed" && packedRetrieval["selection_trace"] == nil
+            && packedAudit["packing_version"] as? String == ExchangeBlockQuery.ValuePacking.version
+            && packedAudit["candidate_block_depth"] as? Int == ExchangeBlockQuery.ValuePacking.candidateBlockDepth
+            && packedIDs.allSatisfy { candidateIDs.contains(ExchangeBlockQuery.ValuePacking.candidateID($0)) }
+        result["exchange_packed_every_candidate_unit_has_an_explicit_receipt"] = !packedCodes.isEmpty
+            && packedCodes.allSatisfy { $0 != "?" && ExchangeBlockQuery.ValuePacking.dispositionCodes[$0] != nil }
+            && packedCodes.filter { $0 == "D" }.count == Set(packedIDs).count
+            && (packedAudit["disposition_counts"] as? [String: Int])?.values.reduce(0, +) == packedCodes.count
+        let packedDelivery = try JSONSerialization.jsonObject(with: step3.snapshot.deliveryAudit()) as? [String: Any] ?? [:]
+        let deliveredSources = packedDelivery["historical_sources"] as? [[String: Any]] ?? []
+        let replicaBytes = try step3.snapshot.evidence.map {
+            try ExchangeBlockQuery.ValuePacking.auditEntryBytes($0, selectionVersion: step3.snapshot.selectionBinding!.version)
+        }
+        let actualBytes = try deliveredSources.map { try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]).count + 1 }
+        result["exchange_packed_audit_entry_replica_matches_delivery_audit_bytes"] = !replicaBytes.isEmpty && replicaBytes == actualBytes
+        let measuredAudit = packedAudit["delivery_audit_bytes_before_admission"] as? Int ?? Int.max
+        result["exchange_packed_delivery_audit_keeps_admission_headroom_and_candidates"] = measuredAudit
+            <= ExchangeBlockQuery.ValuePacking.deliveryAuditLimitBytes - ExchangeBlockQuery.ValuePacking.admissionHeadroomBytes
+            && (packedDelivery["retrieval"] as? [String: Any])?["exchange_query"] != nil
+        let packedAuditBytes = try JSONSerialization.data(withJSONObject: packedRetrieval)
+        result["exchange_packed_audit_contains_no_source_payload_or_question"] = ![prompt, target.text, reply.text, weak.text]
+            .contains { packedAuditBytes.range(of: Data($0.utf8)) != nil }
+            && !step3.snapshot.evidence.contains { step3.snapshot.recentSourceIDs.contains($0.eventID) || $0.conversationID == fixture.requests.id }
+            && step3.after.charged.modelCalls == step3.before.charged.modelCalls
+            && step3.after.charged.vectorBytes == step3.before.charged.vectorBytes
+        let packedReduced = try step3.snapshot.reducedEvidenceForComponentCap()
+        let reducedRetrieval = try JSONSerialization.jsonObject(with: packedReduced?.retrievalAuditJSON ?? Data()) as? [String: Any]
+        let reducedAudit = reducedRetrieval?["exchange_query"] as? [String: Any]
+        let receipt = (reducedAudit?["reduction_receipts"] as? [[Any]])?.first
+        result["exchange_packed_counted_removal_is_an_explicit_receipt"] = packedReduced?.evidence.count == step3.snapshot.evidence.count - 1
+            && receipt?.count == 3 && receipt?[0] as? String == packedIDs.last.map(ExchangeBlockQuery.ValuePacking.candidateID)
+            && receipt?[2] as? String == "token" && packedReduced?.selectionAudit?.evidenceTokenExcludedCount == 1
+        let anchoredStep3 = try prepare(.selectedQwenExchangePacked, prompt: "Where is the \"quokka padding\" habitat?")
+        let anchoredRetrieval = try JSONSerialization.jsonObject(with: anchoredStep3.snapshot.retrievalAuditJSON ?? Data()) as? [String: Any]
+        let anchoredAudit = anchoredRetrieval?["exchange_query"] as? [String: Any]
+        let anchoredFirst = (anchoredAudit?["candidates"] as? [[Any]])?.first
+        result["exchange_packed_mandatory_anchor_over_budget_is_receipted"] = anchoredFirst?.first as? Int == 1
+            && ((anchoredFirst?.last as? [[String]])?.contains { $0[1] == "l" && $0[2] == "M" } ?? false)
+            && !anchoredStep3.snapshot.evidence.contains { $0.eventID == huge.id }
+
         let empty = try prepare(.selectedQwenExchange, prompt: "What is it?")
         let emptyAudit = (try? JSONSerialization.jsonObject(with: empty.snapshot.retrievalAuditJSON ?? Data()) as? [String: Any])?["exchange_query"] as? [String: Any]
         result["exchange_query_no_content_terms_delivers_no_evidence"] = empty.snapshot.evidence.isEmpty
             && emptyAudit?["skipped"] as? String == "no_query_terms"
+        return result
+    }
+
+    /// Planner contracts on a synthetic in-memory index.
+    private static func packedChecks(source: (String, String, MemoryRole, String, Int) -> ExchangeBlockQuery.Source) throws -> [String: Bool] {
+        typealias Packing = ExchangeBlockQuery.ValuePacking
+        var result: [String: Bool] = [:]
+        let packed = try ContextComponentPolicy.selectedQwenExchangePacked.validated()
+        let decoded = try JSONDecoder().decode(ContextComponentPolicy.self, from: packed.canonicalData())
+        result["exchange_packed_policy_is_explicit_versioned_and_not_default"] = packed.usesExchangeQuery
+            && packed.packsAdjacentExchanges && packed.packsExchangeValueDensity && decoded == packed
+            && packed.version == "selected-model-context-components-v3-exchange-packed" && packed.evidenceSpans == 48
+            && packed.evidenceTokens == 12_000 && packed.selectionAuditVersion == "context-exchange-v1"
+            && packed != .selectedQwenExchangeAdjacent && ContextComponentPolicy.currentSelectedQwen == .selectedQwen
+            && !ContextComponentPolicy.selectedQwenExchangeAdjacent.packsExchangeValueDensity
+        result["exchange_packed_parameters_are_declared"] = Packing.candidateBlockDepth == 32 && Packing.memberWeight == 1.0
+            && Packing.neighborWeight == 0.5 && Packing.admissionHeadroomBytes == 5_120
+            && Packing.deliveryAuditLimitBytes == 32_768 && Packing.version == "exchange-value-density-v1"
+
+        // c1: [p0] [h1 a1-long] [h2 a2]; c2: [k1 k1a]
+        let longReply = "Synthetic long reply " + String(repeating: "filler ", count: 700) + " zebra"
+        let index = ExchangeBlockQuery.Index(sources: [
+            source("p0", "c1", .assistant, "Synthetic opening note", 1),
+            source("h1", "c1", .human, "Synthetic zebra zebra habitat question", 2),
+            source("a1", "c1", .assistant, longReply, 3),
+            source("h2", "c1", .human, "Synthetic habitat follow-up", 4),
+            source("a2", "c1", .assistant, "Synthetic short answer", 5),
+            source("k1", "c2", .human, "Synthetic quoted anchor habitat", 6),
+            source("k1a", "c2", .assistant, "Synthetic anchor reply", 7),
+        ])
+        func id(_ unit: Packing.Unit) -> String { index.sources[unit.source].reference.eventID }
+        let version = ContextSourceFraming.currentSelectionVersion
+        let ranked = index.rank(ExchangeBlockQuery.query("zebra habitat"))
+        let units = Packing.candidates(index: index, ranked: ranked)
+        let top = units.first?.units.map { $0.kind + ":" + id($0) }
+        result["exchange_packed_candidate_units_are_chronological_with_neighbors"] = top == ["p:p0", "l:h1", "r:a1", "n:h2"]
+            && units.count == min(ranked.count, Packing.candidateBlockDepth)
+        // A tight token budget: short leads beat the long reply of the best block.
+        let tight = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: 900,
+            auditBudget: 100_000, selectionVersion: version)
+        let delivered = Set(tight.hits.map(\.eventID))
+        let topCodes = Dictionary(uniqueKeysWithValues: zip(units[0].units.map(id), tight.codes[0]))
+        result["exchange_packed_value_density_prefers_short_leads_over_long_replies"] = delivered.contains("h1")
+            && delivered.contains("h2") && !delivered.contains("a1") && topCodes["a1"] == "T" && tight.estimatedTokens <= 900
+        var codedDelivered = Set<String>()
+        for (rank, row) in tight.codes.enumerated() {
+            for (position, code) in row.enumerated() where code == "D" { codedDelivered.insert(id(units[rank].units[position])) }
+        }
+        result["exchange_packed_every_unit_is_receipted_and_delivery_is_rank_grouped"] = tight.codes.allSatisfy { $0.allSatisfy { $0 != "?" } }
+            && tight.hits.first?.eventID == "h1" && zip(tight.owners, tight.owners.dropFirst()).allSatisfy { $0.rank <= $1.rank }
+            && codedDelivered == delivered
+        var dependentOK = true
+        for (rank, block) in tight.blocks.enumerated() {
+            let leadDelivered = block.units.contains { $0.kind == "l" && delivered.contains(id($0)) }
+            for (position, unit) in block.units.enumerated() where unit.kind != "l" && tight.codes[rank][position] == "D" && !leadDelivered {
+                dependentOK = false
+            }
+        }
+        result["exchange_packed_dependent_units_need_their_lead"] = dependentOK
+        // The audit-byte budget binds independently of tokens.
+        let narrow = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: 100_000,
+            auditBudget: 900, selectionVersion: version)
+        let narrowAudit = try narrow.hits.reduce(0) { $0 + (try Packing.auditEntryBytes($1, selectionVersion: version)) }
+        result["exchange_packed_audit_byte_budget_binds_with_receipts"] = narrowAudit <= 900 && narrow.estimatedAuditBytes == narrowAudit
+            && narrow.codes.joined().contains("A") && !narrow.hits.isEmpty
+        let spanLimited = try Packing.plan(index: index, ranked: ranked, maximumSpans: 2, tokenBudget: 100_000,
+            auditBudget: 100_000, selectionVersion: version)
+        result["exchange_packed_span_cap_binds_with_receipts"] = spanLimited.hits.count == 2 && spanLimited.codes.joined().contains("S")
+        // Quoted-anchor blocks are mandatory and placed first.
+        let anchoredRank = index.rank(ExchangeBlockQuery.query("zebra \"quoted anchor\""))
+        let anchored = try Packing.plan(index: index, ranked: anchoredRank, maximumSpans: 48, tokenBudget: 600,
+            auditBudget: 100_000, selectionVersion: version)
+        result["exchange_packed_quoted_anchor_members_are_mandatory_and_first"] = anchored.blocks.first?.anchors == 1
+            && anchored.hits.prefix(2).map(\.eventID) == ["k1", "k1a"] && anchored.codes[0].contains("D")
+        let audit = Packing.audit(plan: tight, index: index, matchedBlocks: ranked.count, tokenBudget: 900,
+            auditBudget: 100_000, maximumSpans: 48)
+        let auditBytes = try JSONSerialization.data(withJSONObject: audit)
+        result["exchange_packed_candidate_audit_is_compact_and_content_free"] = auditBytes.range(of: Data("zebra".utf8)) == nil
+            && auditBytes.range(of: Data("\"h1\"".utf8)) == nil
+            && (audit["candidates"] as? [[Any]])?.count == units.count && Packing.candidateID("h1").count == 12
         return result
     }
 

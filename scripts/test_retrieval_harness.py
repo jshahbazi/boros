@@ -69,6 +69,25 @@ class Contracts(unittest.TestCase):
         self.assertEqual(scored["whole"], 0)
         self.assertEqual(scored["turns"][0]["candidate_rank"], 3)
 
+    def test_packed_r1_uses_only_the_recorded_candidate_units(self):
+        short = lambda identifier: harness.digest(identifier.encode())[:harness.PACKED_CANDIDATE_ID_DIGITS]
+        value = attempt(evidence=[("a", 0, 100)], candidates=[("b", 0)])
+        value["exchange"] = {"candidates": [[0, [[short("x"), "p", "D"], [short("a"), "l", "D"]]],
+                                            [1, [[short("a"), "n", "U"], [short("c"), "l", "T"]]]]}
+        scored = harness.score_attempt(value, case())
+        # "b" is in the assembler trace but not among the recorded units, so it is not an R1 candidate.
+        self.assertEqual(scored["candidate"], 1)
+        self.assertEqual(scored["turns"][0]["block_rank"], 0)
+        self.assertEqual(scored["turns"][0]["unit_kind"], "l")
+        self.assertEqual(scored["turns"][0]["block_disposition"], "D")
+        self.assertIsNone(scored["turns"][1]["block_rank"])
+        self.assertTrue(scored["candidate_list"])
+        self.assertEqual(scored["delivered_outside_candidates"], 0)
+        self.assertIsNone(scored["exchange"])  # the unit list itself is not copied into the report
+        value["exchange"]["candidates"] = [[0, []]] * (harness.PACKED_CANDIDATE_BLOCK_DEPTH + 1)
+        with self.assertRaises(harness.HarnessError):
+            harness.score_attempt(value, case())
+
     def test_failed_preparation_scores_zero_and_keeps_its_reason(self):
         scored = harness.score_attempt({"preparation_completed": False, "failure": "context_overflow"}, case())
         self.assertEqual((scored["failure"], scored["whole"], scored["candidate"]), ("context_overflow", 0, 0))

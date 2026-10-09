@@ -2339,7 +2339,12 @@ private enum BonsaiPlayground {
                 if flag == "--answer-coordinator-integration-test" {
                     AnswerAttemptCoordinatorChecks.run(baseURL: CommandLine.arguments[index + 1], completion: completion)
                 } else {
-                    RetrievalStrategyChecks.runIntegration(baseURL: CommandLine.arguments[index + 1], completion: completion)
+                    let baseURL = CommandLine.arguments[index + 1]
+                    RetrievalStrategyChecks.runIntegration(baseURL: baseURL) { strategy in
+                        ExchangeEpisodeChecks.runIntegration(baseURL: baseURL) { exchange in
+                            completion(strategy.merging(exchange) { _, latest in latest })
+                        }
+                    }
                 }
                 dispatchMain()
             }
