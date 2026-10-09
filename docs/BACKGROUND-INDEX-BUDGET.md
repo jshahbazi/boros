@@ -2,7 +2,7 @@
 
 Status: implemented and pushed at `b006b6a`, October 5, 2026. The contract was first recorded October 4. Targeted current-tree verification is described below; integrated application verification is tracked in [STATUS.md](STATUS.md).
 
-Optional semantic maintenance has its own durable allowance in the authoritative main store. Foreground answering, source browsing and query encoding retain their episode allowances. Rebuilding the derived semantic index preserves the background ledger; restoring a schema-5 archive preserves its archived accounting.
+Since October 8, 2026, the application schedules no semantic maintenance; `SemanticRetrievalPolicy.ordinarySend` disables it ([decision](P2-SEMANTIC-DECISION.md#decision)). The ledger and its contracts are unchanged and still govern explicit on-demand builds. Optional semantic maintenance has its own durable allowance in the authoritative main store. Foreground answering, source browsing and query encoding retain their episode allowances. Rebuilding the derived semantic index preserves the background ledger; restoring a schema-5 archive preserves its archived accounting.
 
 ## Allowance and window
 

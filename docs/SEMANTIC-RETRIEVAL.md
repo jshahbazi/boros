@@ -2,6 +2,8 @@
 
 Status: native Send, foreground/read accounting and schema-5 background enforcement are integrated and pushed at `b006b6a`, October 5, 2026. Integrated verification is recorded in [STATUS.md](STATUS.md). This component supplies a source-backed semantic path for the read-only baseline. The optional summary tree remains gated by evaluation.
 
+**Decision, October 8, 2026 (implemented):** by user decision, ordinary Send no longer uses this component, and the application no longer indexes in the background. Both are controlled by `SemanticRetrievalPolicy.ordinarySend`. The reason is measured: fused retrieval lowered delivered recall against lexical selection alone; see [the step 4 record](P2-SEMANTIC-DECISION.md#decision). The component, its contracts and the sidecar format are unchanged. Explicit evaluation and harness paths still build and query an index on demand. Existing sidecar files stay on disk unused. Statements below about Send and background triggers describe the component's behavior when the policy permits it.
+
 ## Adapter decision
 
 The first adapter uses the installed macOS NaturalLanguage English sentence embedding, pinned to revision 1. On the development Mac, `NLEmbedding.supportedSentenceEmbeddingRevisions(for: .english)` includes revision 1; the requested embedding is available and produces 512-dimensional vectors for synthetic English sentences. The application does not request asset downloads or start an embedding server. If that exact revision is unavailable, semantic coverage is unavailable and original-source retrieval continues.

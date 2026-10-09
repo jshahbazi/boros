@@ -1,6 +1,6 @@
 # Offline retrieval harness (P1)
 
-Recorded October 8, 2026. This is work package P1 of the [design repair plan](DESIGN-REPAIR-PLAN.md). It measures two stages only: R1 candidate recall and R2 delivered recall for the ordinary selected-Qwen path. No answers were generated, no judge ran, and no remote or paid request was made. Nothing here measures answer quality.
+Recorded October 8, 2026. This is work package P1 of the [design repair plan](DESIGN-REPAIR-PLAN.md). It measures two stages only: R1 candidate recall and R2 delivered recall for the selected-Qwen path. At the time of this baseline, ordinary Send was the `hybrid` arm. Since October 8, 2026, ordinary Send is the `lexical` arm; see [Arms](#what-runs). No answers were generated, no judge ran, and no remote or paid request was made. Nothing here measures answer quality.
 
 ## What runs
 
@@ -8,7 +8,7 @@ Recorded October 8, 2026. This is work package P1 of the [design repair plan](DE
 
 - **Token counts.** The coordinator talks to a loopback stand-in for mlx-serve 26.10.1. It serves the pinned model metadata and template, and answers `/tokenize` and the one-token admission calibration from the selected model's own `tokenizer.json`, pinned by SHA-256 `0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3`. It refuses every generation request with HTTP 503.
 - **No generation.** The harness stops each attempt when the coordinator reaches the answering stage, which is the GUI Stop path, so the runner never starts. An injected runner that refuses dispatch is a second fence. Both recorded runs report zero refused generation requests and zero runner starts.
-- **Arms.** `recent_only` is the recent-only strategy. `lexical` is the hybrid strategy with no semantic index. `hybrid` is the hybrid strategy with the history's semantic index, as ordinary Send uses it.
+- **Arms.** `recent_only` is the recent-only strategy. `lexical` is the hybrid strategy with no semantic index; since the user's October 8, 2026 [decision](P2-SEMANTIC-DECISION.md#decision) this is the selection ordinary Send uses. `hybrid` is the hybrid strategy with the history's semantic index: explicit fused retrieval, which was ordinary Send until that decision. `ordinary_send` constructs ordinary Send literally: it opens the history's semantic index and passes it through `SemanticRetrievalPolicy.ordinarySend`, which withholds it. The report's `ordinary_send_equivalence` block counts histories where `ordinary_send` and `lexical` deliver the same ranges, trace the same candidates, and where `ordinary_send` recorded `disabled_by_policy` without receiving an index. Later P2 packages add explicit `exchange_*` and `global_*` arms; see [P2-SEMANTIC-DECISION.md](P2-SEMANTIC-DECISION.md).
 - **Answer blindness.** The selection process receives events, the question and the configuration. It never receives annotations. A separate process runs the existing declared-source control with the annotated turn IDs to decide budget feasibility.
 - **Stores.** Each history is ingested once, with its semantic sidecar, into `.build/retrieval-harness/stores/`, keyed by the projection hash and the hashes of the store and indexing sources. Every attempt runs on a private copy. Retrieval and packing changes reuse the cache; changes to store or indexing code rebuild it.
 - **Outputs.** Reports are metadata only: question IDs, categories, counts, ranks, token counts and timings. They contain no source text, questions or answers and stay under `.build/evaluation`.
@@ -60,7 +60,7 @@ Implementation: commit `cbb189d` with a clean tree, harness binary SHA-256 `759b
 |---|---:|---:|---:|
 | recent_only | 0/90 | 0/90 | 2/165 |
 | lexical | 60/90 (66.7%) | 60/90 (66.7%) | 119/165 (72.1%) |
-| hybrid (ordinary Send) | 50/90 (55.6%) | 50/90 (55.6%) | 114/165 (69.1%) |
+| hybrid (ordinary Send at the time) | 50/90 (55.6%) | 50/90 (55.6%) | 114/165 (69.1%) |
 
 R2 by category:
 
@@ -79,7 +79,7 @@ R2 by category:
 |---|---:|---:|---:|
 | recent_only | 0/12 | 0/12 | 0/18 |
 | lexical | 9/12 | 9/12 | 15/18 |
-| hybrid (ordinary Send) | 8/12 | 8/12 | 14/18 |
+| hybrid (ordinary Send at the time) | 8/12 | 8/12 | 14/18 |
 
 Known misses under hybrid: `1b9b7252`, `4baee567` and `1a1907b4` have their single positive turn outside the 16 candidates in both lexical and hybrid. `51c32626` has two positives. Lexical ranks them 0 and 9 and delivers both; hybrid delivers the first and loses the second from the candidate list.
 
@@ -100,7 +100,7 @@ Preparation times include loopback tokenizer calls and these histories are about
 1. **Every miss is a ranking miss.** R1 equals R2 in every arm on both cohorts. Evidence token, envelope, byte and row exclusions are zero in all 228 lexical and hybrid attempts, and no positive turn was a candidate without being delivered. The largest whole prompt is 18,542 of the 31,488 admissible tokens. At v1/16 the packer is not where recall is lost; the candidate list is. Cost-aware packing (P2 step 3) only matters once the window is wider.
 2. **Semantic fusion lowers recall on this path.** Hybrid wins 5 development cases that lexical misses, and loses 15 that lexical finds. The largest loss is assistant recall, 6 of 11 against 11 of 11. This is the question P2 step 4 poses, measured before any change: fusion, as configured, displaces lexical primaries from the 16 slots.
 3. **Multi-session and temporal questions are the weak categories** for both arms: 8 to 9 of 23, and 13 to 14 of 25. These need several turns delivered together, and a single missing turn fails the case.
-4. **The plan's R2 interim target is 90 percent.** The ordinary path is at 55.6 percent and lexical alone at 66.7 percent.
+4. **The plan's R2 interim target is 90 percent.** The ordinary path was at 55.6 percent and lexical alone at 66.7 percent. Since the October 8, 2026 decision, ordinary Send is the lexical selection: 66.7 percent on development, 9/12 on regression.
 
 ## Running it
 
@@ -114,9 +114,9 @@ python3 scripts/retrieval_harness.py --cohort development --output .build/evalua
 
 ## Recall floor in check.py
 
-Implemented October 8, 2026. `scripts/retrieval_floor.py` runs `--cohort regression` with three workers into a temporary report under `.build/`, then compares each arm's case-level R1 and R2 and turn-level counts with the committed numbers in `scripts/retrieval_floor.json`: the cohort manifest hash, the denominators, and per arm the minimum passed cases and turns (hybrid 8/12 cases and 14/18 turns, lexical 9/12 and 15/18, recent-only 0). A lower count, a missing arm, a changed manifest hash or a changed denominator fails `scripts/check.py`. An arm present in a run but absent from the floor is reported and does not fail. `--update` rewrites the floor from a run and refuses to lower any number without `--allow-lower`.
+Implemented October 8, 2026. `scripts/retrieval_floor.py` runs `--cohort regression` with three workers into a temporary report under `.build/`, then compares each arm's case-level R1 and R2 and turn-level counts with the committed numbers in `scripts/retrieval_floor.json`: the cohort manifest hash, the denominators, and per arm the minimum passed cases and turns (hybrid 8/12 cases and 14/18 turns, lexical 9/12 and 15/18, recent-only 0; `ordinary_send` was added October 8, 2026 at 9/12 and 15/18, the lexical figures). A lower count, a missing arm, a changed manifest hash or a changed denominator fails `scripts/check.py`. An arm present in a run but absent from the floor is reported and does not fail. `--update` rewrites the floor from a run and refuses to lower any number without `--allow-lower`.
 
-The floor needs the pinned dataset and the pinned tokenizer, neither of which is committed. When either is missing, or the `tokenizers` package is absent, the script prints one skip reason and exits 0 with zero checks, and `check.py` prints the skip as a skip, not a pass. 22 synthetic contracts in `scripts/test_retrieval_floor.py` cover the comparison and skip logic without the dataset or tokenizer. Measured October 8, 2026 with a warm store cache and a cached harness binary: about 60 to 75 seconds added to `check.py` (a cold store cache needs about 100 seconds at four workers plus the first Swift compile of the harness, about 225 seconds in total on the first run in a fresh checkout). The check contributes 19 comparisons. The floor guards the regression cohort only; the development cohort takes minutes and is not part of `check.py`.
+The floor needs the pinned dataset and the pinned tokenizer, neither of which is committed. When either is missing, or the `tokenizers` package is absent, the script prints one skip reason and exits 0 with zero checks, and `check.py` prints the skip as a skip, not a pass. 22 synthetic contracts in `scripts/test_retrieval_floor.py` cover the comparison and skip logic without the dataset or tokenizer. Measured October 8, 2026 with a warm store cache and a cached harness binary: about 60 to 75 seconds added to `check.py` (a cold store cache needs about 100 seconds at four workers plus the first Swift compile of the harness, about 225 seconds in total on the first run in a fresh checkout). The check contributed 19 comparisons; with the `ordinary_send` floor entry it contributes 25 (October 8, 2026). The floor guards the regression cohort only; the development cohort takes minutes and is not part of `check.py`.
 
 - One replicate per build. Selection is deterministic, so replicates matter for model-involved stages, not this one.
 - LongMemEval positive-turn annotations are a proxy for sufficient source spans. `1a1907b4` was previously accepted without its annotated turn.
