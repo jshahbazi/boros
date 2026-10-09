@@ -19,13 +19,22 @@ Commands:
 - ``score``: compare adjudications (format v1, or v2 with the faithful field and
   an optional revision block) with judge labels (prior labels from the key and
   new label files) and report false-accept and false-reject rates with 95
-  percent Wilson intervals, sufficiency agreement and faithful counts. A derived
-  reference-target file is checked against its source; ``--combined-rule`` adds
-  the evidence-relative combined rule (judge accept, or a lexical decline when
-  the annotated gold turns were not delivered whole).
-- ``derive-reference``: write the reference target derived from an
-  evidence-relative adjudication: the listed accepted declines on answerable
-  questions become rejects, recorded in a ``derived`` block with the source hash.
+  percent Wilson intervals, sufficiency agreement and faithful counts. The
+  verdict target is agreement with the reference under the LongMemEval
+  tolerances (a decline on an answerable question is a reject; user decision of
+  October 9, 2026, latest): ``score`` grades against the supplied adjudication
+  as recorded, which must be a reference-agreement file. A derived file is
+  checked against its source. ``--combined-rule`` adds the combined rule (judge
+  accept, or a lexical decline when the annotated gold turns were not delivered
+  whole), a grader for the withdrawn evidence-relative target kept for history.
+- ``derive-reference``: write a reference-agreement file from an adjudication
+  made under the withdrawn evidence-relative decline rule: the listed accepted
+  declines on answerable questions become rejects, recorded in a ``derived``
+  block with the source hash.
+- ``merge-regrade``: apply a re-graded subset's export (verdict, sufficiency,
+  faithful and a non-empty note only) to the source set's adjudication, mapping
+  subset items to source items through the subset key's ``source_item_id``,
+  and write a new file with a revision block listing each change.
 - ``pool-scores``: sum the overall counts of several score reports (one per set)
   per candidate judge and recompute the rates and intervals.
 - ``check-declaration``: validate a filled judge run declaration (Vertex or local judge).
@@ -1733,12 +1742,15 @@ def disagreement_ids(rows):
                                    if row["truth"] == "accept" and row["label"] == "reject")}
 
 
-# The combined rule grades "right given the delivered evidence" by machine: a reference-only judge's accept, or
-# an answer the lexical classifier calls a decline on an answerable question whose annotated gold turns were not
+# History only. The combined rule was built to grade "right given the delivered evidence" by machine, a target the
+# user withdrew on October 9, 2026 (latest decision): the verdict means agreement with the reference, and honest
+# declines are reported through faithful and pack sufficiency instead. The rule is a reference-only judge's accept,
+# or an answer the lexical classifier calls a decline on an answerable question whose annotated gold turns were not
 # all delivered whole. Gold delivery is the key's ``all_annotated_delivered`` (dataset annotations and delivery
 # metadata, no judge); abstention questions have no gold turns, so the rule leaves them to the judge.
 COMBINED_RULE = {
     "version": "boros-judge-calibration-combined-rule-v1",
+    "status": "superseded: graded the withdrawn evidence-relative target; kept for history, not a current grader",
     "rule": "accept if the judge accepts, or if the answer is a lexical decline and the annotated gold turns of an "
             "answerable question were not all delivered whole; otherwise the judge's verdict",
     "gold": "key all_annotated_delivered is false (answerable questions only)",
@@ -1803,7 +1815,8 @@ def score_judge(name, family, model, labels, key_items, decisions, combined=None
         elif entry["answerer_family"] != "unknown":
             relation = "other_family"
         for variant in rows:
-            # The combined rule is graded against the supplied (evidence-relative) adjudication as recorded.
+            # Every variant, the historical combined rule included, is graded against the supplied adjudication as
+            # recorded (the grounded verdict).
             expected = truth(decision, "grounded" if variant == "combined" else variant)
             label = combined_verdict(verdict, combined.get(item_id, False)) if variant == "combined" else verdict
             if expected is not None and label in ("accept", "reject"):
@@ -1957,11 +1970,13 @@ def validate_revision(document, decisions, manifest, original_raw: bytes | None 
             "original_verified": original_verified, "listed": listed}
 
 
-# A reference-only verdict prompt (prompt sets v2 to v4) never sees the evidence, so it cannot grade "right given
-# the delivered evidence". Its target is derived mechanically from the evidence-relative adjudication.
+# The verdict target is agreement with the reference (user decision, October 9, 2026, latest). An adjudication
+# recorded under the withdrawn evidence-relative decline rule, where an honest decline on an answerable question
+# was an accept, is turned into a reference-agreement file mechanically: each listed accepted decline becomes a
+# reject. Non-decline accepts on insufficient packs are not touched; they need a human re-grade (merge-regrade).
 REFERENCE_TARGET = "reference"
-REFERENCE_TARGET_RULE = ("identical to the evidence-relative adjudication except that each listed accepted decline "
-                         "on an answerable question is a reject")
+REFERENCE_TARGET_RULE = ("identical to the source adjudication except that each listed accepted decline on an "
+                         "answerable question is a reject")
 DERIVED_CHANGE = "accept->reject"
 DERIVED_REASON = "accepted decline on an answerable question"
 
@@ -2043,6 +2058,111 @@ def derive_reference_target(set_dir: Path, source: Path, decline_items, *, appli
                                       for item in sorted(decline_items)]}
     validate_derivation(derived, derived["decisions"], manifest, key["items"], raw)
     return derived
+
+
+SUBSET_KEY_FORMAT = "boros-judge-calibration-subset-key-v1"
+REGRADE_FIELDS = ("sufficiency", "verdict", "faithful", "note")
+REFERENCE_AGREEMENT_RUBRIC = (
+    "verdict = agreement with the reference under the LongMemEval category tolerances; a decline on an answerable "
+    "question is a reject; a self-correction is a reject; honest declines are reported through faithful and pack "
+    "sufficiency, not the verdict (user decisions of October 9, 2026, latest)")
+
+
+def _revision_token(value):
+    return "null" if value is None else value
+
+
+def merge_regrade(set_dir: Path, adjudications: Path, subset_dir: Path, regrade: Path, *, authorized_by: str,
+                  applied_by: str, revised_on: str, rubric: str = REFERENCE_AGREEMENT_RUBRIC):
+    """Apply a re-graded subset's export to the source set's adjudication (nothing is written).
+
+    The subset was made with ``subset`` from items of ``set_dir``; its key maps each subset item to a source item
+    through ``source_item_id``. Checks: the subset key names this set and its items hash, every subset item is the
+    source item byte for byte apart from its ID, the re-grade export matches the subset's set ID and items hash and
+    decides every subset item with sufficiency, verdict and faithful. Only verdict, sufficiency, faithful and a
+    non-empty note are taken from the re-grade; an empty re-grade note keeps the earlier note, and every other
+    decision field is kept. The result drops the base file's own ``revision`` or ``derived`` block (the base keeps
+    it; the new block names the base's hash) and carries a ``revision`` block listing each change, so
+    ``score --original-adjudications BASE`` verifies it. Returns (document, content-free summary)."""
+    manifest = load_json(set_dir / "manifest.json")
+    require(sha256_bytes((set_dir / "items.json").read_bytes()) == manifest["items_sha256"], "items_hash_mismatch")
+    source_items = {item["item_id"]: item for item in load_json(set_dir / "items.json")["items"]}
+    key = load_json(set_dir / "key.json")
+    require(key.get("set_id") == manifest["set_id"], "key_set_mismatch")
+    base_raw = adjudications.read_bytes()
+    read_adjudications(adjudications, manifest, None, key["items"])  # validates the base and its own block
+    base = json.loads(base_raw)
+    require(base.get("format") == ADJUDICATION_FORMAT, "regrade_base_requires_v2")
+
+    subset_manifest = load_json(subset_dir / "manifest.json")
+    subset_raw = (subset_dir / "items.json").read_bytes()
+    require(sha256_bytes(subset_raw) == subset_manifest.get("items_sha256"), "items_hash_mismatch")
+    subset_items = {item["item_id"]: item for item in json.loads(subset_raw)["items"]}
+    subset_key_raw = (subset_dir / "key.json").read_bytes()
+    subset_key = json.loads(subset_key_raw)
+    require(subset_key.get("format") == SUBSET_KEY_FORMAT and subset_key.get("set_id") == subset_manifest["set_id"],
+            "regrade_subset_key_invalid")
+    mapping = {}
+    for entry in subset_key["items"]:
+        require(entry.get("source_set_id") == manifest["set_id"]
+                and entry.get("source_items_sha256") == manifest["items_sha256"], "regrade_source_set_mismatch")
+        source_id = entry.get("source_item_id")
+        require(source_id in source_items and entry.get("item_id") in subset_items, "regrade_unknown_item")
+        require(source_id not in mapping.values(), "regrade_duplicate_source_item")
+        require(dict(subset_items[entry["item_id"]], item_id=source_id) == source_items[source_id],
+                "regrade_item_mismatch")
+        mapping[entry["item_id"]] = source_id
+    require(set(mapping) == set(subset_items), "regrade_unknown_item")
+
+    regrade_raw = regrade.read_bytes()
+    try:
+        regrade_document = json.loads(regrade_raw)
+    except ValueError as error:
+        raise CalibrationError("regrade_export_invalid") from error
+    form, regraded = validate_adjudication_document(regrade_document, subset_manifest)
+    require(form == ADJUDICATION_FORMAT and "revision" not in regrade_document
+            and "derived" not in regrade_document, "regrade_export_invalid")
+    require(set(regraded) == set(mapping), "regrade_items_mismatch")
+    for decision in regraded.values():
+        require(all(decision.get(field) is not None for field in ("sufficiency", "verdict", "faithful")),
+                "regrade_incomplete")
+
+    merged = json.loads(base_raw)
+    merged.pop("revision", None)
+    merged.pop("derived", None)
+    changes = []
+    for subset_id in sorted(mapping, key=lambda value: mapping[value]):
+        item = mapping[subset_id]
+        before, after = merged["decisions"][item], regraded[subset_id]
+        change = {}
+        for field in REGRADE_FIELDS:
+            if field == "note":
+                note = after.get("note") or ""
+                if note and note != (before.get("note") or ""):
+                    before["note"] = note
+                    change["note"] = NOTE_CHANGED
+                continue
+            old, new = before.get(field), after.get(field)
+            if old != new:
+                before[field] = new
+                change[field] = f"{_revision_token(old)}->{new}"
+        if change:
+            changes.append({"item": item, "reason": f"re-graded as {subset_manifest['set_id']}:{subset_id}",
+                            **change})
+    require(changes, "regrade_no_change")
+    merged["revision"] = {
+        "of_export_sha256": sha256_bytes(base_raw), "revised_on": revised_on, "authorized_by": authorized_by,
+        "applied_by": applied_by, "rubric": rubric, "changes": changes,
+        "regrade": {"subset_set_id": subset_manifest["set_id"], "subset_items_sha256": subset_manifest["items_sha256"],
+                    "subset_key_sha256": sha256_bytes(subset_key_raw), "export_sha256": sha256_bytes(regrade_raw),
+                    "item_map": {subset_id: mapping[subset_id] for subset_id in sorted(mapping)}}}
+    checked = validate_revision(merged, merged["decisions"], manifest, base_raw)
+    summary = {"of_export_sha256": merged["revision"]["of_export_sha256"], "regrade": merged["revision"]["regrade"],
+               "changed_items": checked["changed_items"], "changes_by_field": checked["changes_by_field"],
+               "changes": [{field: value for field, value in change.items() if field != "reason"}
+                           for change in changes],
+               "unchanged_items": sorted(mapping[s] for s in mapping if mapping[s] not in checked["listed"])}
+    return merged, summary
 
 
 def read_adjudications(path: Path, manifest, original: Path | None = None, key_items=None):
@@ -2213,10 +2333,13 @@ def score(set_dir: Path, adjudications: Path, label_files=(), include_prior=True
                 "false_reject": "judge reject among items adjudicated accept",
                 "grounded": "adjudicated verdict as recorded",
                 "reference_only": "adjudicated reject with the unsupported-claims flag counts as accept",
-                "combined": "the combined rule's verdict (judge accept, or a lexical decline with the gold turns not "
-                            "delivered whole) against the adjudicated verdict as recorded; only with --combined-rule",
-                "targets": "the evidence-relative target is the adjudication as recorded; the reference target is a "
-                           "derived file in which accepted declines on answerable questions are rejects",
+                "combined": "history only: the combined rule's verdict (judge accept, or a lexical decline with the "
+                            "gold turns not delivered whole) against the adjudicated verdict as recorded; it was built "
+                            "for the withdrawn evidence-relative target; only with --combined-rule",
+                "target": "agreement with the reference under the LongMemEval tolerances; a decline on an answerable "
+                          "question is a reject (user decision, October 9, 2026, latest). Rates are against the "
+                          "supplied adjudication as recorded, which must be a reference-agreement file; the "
+                          "evidence-relative target is withdrawn",
                 "disagreements": "item IDs of false accepts and false rejects per variant",
                 "interval": "Wilson score interval, 95 percent, z=1.96",
                 "excluded": "adjudicated unsure and judge unknown labels are excluded from rate denominators",
@@ -2597,16 +2720,30 @@ def main(argv=None):
                          help="the export a v2 revision block names; verifies its hash and the listed changes")
     scoring.add_argument("--no-prior", action="store_true")
     scoring.add_argument("--combined-rule", choices=sorted(COMBINED_DECLINE_OUTCOMES),
-                         help="add the combined rule (judge accept, or a lexical decline with gold not delivered whole)")
+                         help="history only: add the combined rule (judge accept, or a lexical decline with gold "
+                              "not delivered whole), built for the withdrawn evidence-relative target")
     scoring.add_argument("--output", type=Path, help="private JSON destination under .build")
     deriving = commands.add_parser("derive-reference")
     deriving.add_argument("--set", type=Path, required=True)
-    deriving.add_argument("--adjudications", type=Path, required=True, help="evidence-relative v2 adjudication")
+    deriving.add_argument("--adjudications", type=Path, required=True,
+                          help="v2 adjudication recorded under the withdrawn evidence-relative decline rule")
     deriving.add_argument("--decline", action="append", required=True,
                           help="item-NNN: an accepted decline on an answerable question; repeatable")
     deriving.add_argument("--applied-by", required=True)
     deriving.add_argument("--derived-on", required=True, help="YYYY-MM-DD")
     deriving.add_argument("--output", type=Path, required=True, help="fresh private JSON file under .build")
+    merging = commands.add_parser("merge-regrade")
+    merging.add_argument("--set", type=Path, required=True, help="the source set the subset was taken from")
+    merging.add_argument("--adjudications", type=Path, required=True,
+                         help="the source set's current reference adjudication (v2; a derived or revised file is "
+                              "accepted and its own block is not copied)")
+    merging.add_argument("--subset", type=Path, required=True, help="the re-graded subset's set directory")
+    merging.add_argument("--regrade", type=Path, required=True, help="the subset's v2 export from the form")
+    merging.add_argument("--authorized-by", required=True)
+    merging.add_argument("--applied-by", required=True)
+    merging.add_argument("--revised-on", required=True, help="YYYY-MM-DD")
+    merging.add_argument("--rubric", default=REFERENCE_AGREEMENT_RUBRIC)
+    merging.add_argument("--output", type=Path, required=True, help="fresh private JSON file under .build")
     pooling = commands.add_parser("pool-scores")
     pooling.add_argument("reports", type=Path, nargs="+", help="score reports (--output of score), one per set")
     pooling.add_argument("--output", type=Path, help="private JSON destination under .build")
@@ -2682,6 +2819,15 @@ def main(argv=None):
             print(json.dumps({"written": str(destination), "sha256": digest,
                               "of_export_sha256": document["derived"]["of_export_sha256"],
                               "changed_item_ids": [c["item"] for c in document["derived"]["changes"]]}, indent=1))
+        elif args.command == "merge-regrade":
+            require(ISO_DATE.match(args.revised_on), "revised_on_invalid")
+            destination = check_private_destination(args.output)
+            require(not destination.exists(), "destination_exists")
+            document, summary = merge_regrade(args.set, args.adjudications, args.subset, args.regrade,
+                                              authorized_by=args.authorized_by, applied_by=args.applied_by,
+                                              revised_on=args.revised_on, rubric=args.rubric)
+            digest = write_private_json(destination, document)
+            print(json.dumps({"written": str(destination), "sha256": digest, **summary}, sort_keys=True, indent=1))
         elif args.command == "pool-scores":
             result = pool_scores([load_json(path) for path in args.reports])
             if args.output:

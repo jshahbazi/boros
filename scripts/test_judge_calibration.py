@@ -812,9 +812,11 @@ class Contracts(unittest.TestCase):
             with self.assertRaisesRegex(jc.CalibrationError, "items_hash_mismatch"):
                 jc.subset_set([(root / "two", "item-001")], "seed", root / "tampered")
 
-    def _evidence_relative_set(self, directory, **options):
-        """Synthetic evidence-relative adjudication: index 0-2 accepted declines on answerable questions with gold
-        missing, 3 a partial decline (gold missing), 4 an abstention decline, 5-7 ordinary answers (7 rejected)."""
+    def _withdrawn_rule_set(self, directory, **options):
+        """Synthetic adjudication recorded under the withdrawn evidence-relative decline rule (an honest decline on
+        an answerable question accepted): index 0-2 accepted declines on answerable questions with gold missing,
+        3 a partial decline (gold missing), 4 an abstention decline, 5-7 ordinary answers (7 rejected). Used as the
+        source of a derived reference-agreement file and for the historical combined rule."""
         answers = ["No record of that in the conversations.", "I couldn't find it anywhere.",
                    "The provided chats don't show it.",
                    "The answer is probably the second option. " + "Detail. " * 40 + "There is no information about",
@@ -830,7 +832,7 @@ class Contracts(unittest.TestCase):
 
     def test_derived_reference_target_and_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
-            out, path, manifest, ids = self._evidence_relative_set(directory)
+            out, path, manifest, ids = self._withdrawn_rule_set(directory)
             key_items = json.loads((out / "key.json").read_text())["items"]
             declines = [ids["00000000"], ids["00000001"], ids["00000002"]]
             derived = jc.derive_reference_target(out, path, declines, applied_by="synthetic",
@@ -920,7 +922,7 @@ class Contracts(unittest.TestCase):
                      "I can’t find it", "It was blue.", ""):
             self.assertEqual(jc.lexical_decline(text), apr.decline_outcome(text)["outcome"])
         with tempfile.TemporaryDirectory() as directory:
-            out, path, manifest, ids = self._evidence_relative_set(directory)
+            out, path, manifest, ids = self._withdrawn_rule_set(directory)
             labels = {"format": jc.LABELS_FORMAT, "set_id": manifest["set_id"], "judge": "vertex-sonnet",
                       "labels": {item: [{"verdict": "reject"}] * 3 for item in ids.values()}}
             labels["labels"][ids["00000005"]] = [{"verdict": "accept"}, {"verdict": "accept"}, {"verdict": "reject"}]
@@ -961,11 +963,144 @@ class Contracts(unittest.TestCase):
             for text in ("No record of that", "couldn't find", "It was 42", "note 1"):
                 self.assertNotIn(text, printed)
 
+    def test_merge_regrade_applies_subset_decisions_with_a_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out, source, manifest, ids = self._withdrawn_rule_set(directory)
+            declines = [ids["00000000"], ids["00000001"], ids["00000002"]]
+            base = jc.derive_reference_target(out, source, declines, applied_by="synthetic", derived_on="2026-10-09")
+            base_path = root / "reference.json"
+            base_path.write_text(json.dumps(base))
+            picked = [ids["00000005"], ids["00000006"], ids["00000007"]]
+            jc.subset_set([(out, item) for item in picked], "seed", root / "sub")
+            sub_manifest = json.loads((root / "sub" / "manifest.json").read_text())
+            to_source = {e["item_id"]: e["source_item_id"]
+                         for e in json.loads((root / "sub" / "key.json").read_text())["items"]}
+            to_subset = {value: key for key, value in to_source.items()}
+            first = to_subset[ids["00000005"]]
+            export = {"format": jc.ADJUDICATION_FORMAT, "set_id": sub_manifest["set_id"],
+                      "items_sha256": sub_manifest["items_sha256"], "adjudicator": "", "exported_at": "x",
+                      "decisions": {
+                          first: {"sufficiency": "insufficient", "verdict": "reject", "faithful": "no",
+                                  "note": "regrade note", "unsupported_claims": True, "revealed": False,
+                                  "sufficiency_at_reveal": None},
+                          to_subset[ids["00000006"]]: {"sufficiency": "insufficient", "verdict": "accept",
+                                                       "faithful": "yes", "note": "", "revealed": True,
+                                                       "sufficiency_at_reveal": "insufficient"},
+                          to_subset[ids["00000007"]]: {"sufficiency": "sufficient", "verdict": "reject",
+                                                       "faithful": "yes", "note": "", "revealed": True,
+                                                       "sufficiency_at_reveal": "sufficient"}}}
+            export_path = root / "regrade.json"
+            export_path.write_text(json.dumps(export))
+            options = {"authorized_by": "user", "applied_by": "synthetic", "revised_on": "2026-10-10"}
+            merged, summary = jc.merge_regrade(out, base_path, root / "sub", export_path, **options)
+            self.assertNotIn("derived", merged)
+            revision = merged["revision"]
+            self.assertEqual(revision["of_export_sha256"], hashlib.sha256(base_path.read_bytes()).hexdigest())
+            self.assertEqual(revision["rubric"], jc.REFERENCE_AGREEMENT_RUBRIC)
+            self.assertEqual(revision["regrade"]["item_map"], to_source)
+            self.assertEqual(revision["regrade"]["export_sha256"],
+                             hashlib.sha256(export_path.read_bytes()).hexdigest())
+            changes = {change["item"]: {k: v for k, v in change.items() if k not in ("item", "reason")}
+                       for change in revision["changes"]}
+            self.assertEqual(changes, {ids["00000005"]: {"verdict": "accept->reject", "faithful": "yes->no",
+                                                         "note": "changed"},
+                                       ids["00000007"]: {"faithful": "null->yes"}})
+            self.assertEqual(summary["unchanged_items"], [ids["00000006"]])
+            changed = merged["decisions"][ids["00000005"]]
+            # Only verdict, sufficiency, faithful and a non-empty note come from the re-grade.
+            self.assertEqual((changed["verdict"], changed["faithful"], changed["note"]),
+                             ("reject", "no", "regrade note"))
+            self.assertEqual((changed["revealed"], changed["sufficiency_at_reveal"]), (True, "insufficient"))
+            self.assertNotIn("unsupported_claims", changed)
+            self.assertEqual(merged["decisions"][ids["00000006"]]["note"], "note 6")
+            for item in set(ids.values()) - {ids["00000005"], ids["00000007"]}:
+                self.assertEqual(merged["decisions"][item], base["decisions"][item])
+            merged_path = root / "reference-v2.json"
+            merged_path.write_text(json.dumps(merged))
+            self.assertTrue(jc.read_adjudications(merged_path, manifest, base_path)["revision"]["original_verified"])
+            result = jc.score(out, merged_path, original_adjudications=base_path)
+            self.assertEqual(result["adjudication"]["revision"]["changed_item_ids"],
+                             sorted([ids["00000005"], ids["00000007"]]))
+            self.assertNotIn("regrade note", json.dumps(summary))
+
+            def copy_subset(name):
+                target = root / name
+                target.mkdir()
+                for file_name in ("items.json", "key.json", "manifest.json"):
+                    (target / file_name).write_bytes((root / "sub" / file_name).read_bytes())
+                return target
+
+            def refuse(code, *, document=None, subset=None):
+                bad_export = root / "bad-export.json"
+                bad_export.write_text(json.dumps(document or export))
+                with self.assertRaisesRegex(jc.CalibrationError, f"^{code}$"):
+                    jc.merge_regrade(out, base_path, subset or root / "sub", bad_export, **options)
+
+            def changed_export(mutate):
+                document = copy.deepcopy(export)
+                mutate(document)
+                return document
+
+            refuse("adjudication_set_mismatch", document=changed_export(lambda d: d.update(set_id="js-0")))
+            refuse("adjudication_items_mismatch", document=changed_export(lambda d: d.update(items_sha256="0" * 64)))
+            refuse("regrade_incomplete",
+                   document=changed_export(lambda d: d["decisions"][first].update(faithful=None)))
+            refuse("regrade_items_mismatch", document=changed_export(lambda d: d["decisions"].pop(first)))
+            refuse("regrade_export_invalid", document=changed_export(lambda d: d.update(revision={})))
+            same = {subset_id: {"sufficiency": base["decisions"][item]["sufficiency"],
+                                "verdict": base["decisions"][item]["verdict"],
+                                "faithful": base["decisions"][item]["faithful"], "note": ""}
+                    for subset_id, item in to_source.items() if item != ids["00000007"]}
+            same[to_subset[ids["00000007"]]] = dict(export["decisions"][to_subset[ids["00000007"]]])
+            base_with_faithful = copy.deepcopy(base)
+            base_with_faithful["decisions"][ids["00000007"]]["faithful"] = "yes"
+            base_path.write_text(json.dumps(base_with_faithful))
+            refuse("regrade_no_change", document=changed_export(lambda d: d.update(decisions=same)))
+            base_path.write_text(json.dumps(base))
+            for code, mutate in (
+                    ("regrade_source_set_mismatch", lambda k: k["items"][0].update(source_set_id="jx-0")),
+                    ("regrade_item_mismatch", lambda k: k["items"][0].update(source_item_id=ids["00000000"])),
+                    ("regrade_duplicate_source_item",
+                     lambda k: k["items"][1].update(source_item_id=k["items"][0]["source_item_id"])),
+                    ("regrade_unknown_item", lambda k: k["items"][0].update(source_item_id="item-999"))):
+                subset = copy_subset(f"sub-{code}")
+                key = json.loads((subset / "key.json").read_text())
+                mutate(key)
+                (subset / "key.json").write_text(json.dumps(key))
+                refuse(code, subset=subset)
+            # A subset item that differs from its source item is refused even with consistent hashes.
+            subset = copy_subset("sub-tampered")
+            items = json.loads((subset / "items.json").read_text())
+            items["items"][0]["answer"] = "tampered"
+            raw = json.dumps(items).encode()
+            (subset / "items.json").write_bytes(raw)
+            sub = dict(sub_manifest, items_sha256=hashlib.sha256(raw).hexdigest())
+            (subset / "manifest.json").write_text(json.dumps(sub))
+            refuse("regrade_item_mismatch", subset=subset,
+                   document=changed_export(lambda d: d.update(items_sha256=sub["items_sha256"])))
+            # The CLI writes a fresh private file, prints IDs, hashes and labels only, and refuses to overwrite.
+            build = root / ".build"
+            build.mkdir()
+            arguments = ["merge-regrade", "--set", str(out), "--adjudications", str(base_path), "--subset",
+                         str(root / "sub"), "--regrade", str(export_path), "--authorized-by", "user",
+                         "--applied-by", "synthetic", "--revised-on", "2026-10-10",
+                         "--output", str(build / "reference-v2.json")]
+            stdout = io.StringIO()
+            with unittest.mock.patch("sys.stdout", stdout), \
+                    unittest.mock.patch.object(jc, "check_private_destination", lambda p, *a, **k: p.resolve()):
+                self.assertEqual(jc.main(arguments), 0)
+                self.assertEqual(jc.main(arguments), 1)
+            self.assertEqual(stat.S_IMODE((build / "reference-v2.json").stat().st_mode), 0o600)
+            for text in ("regrade note", "note 5", "note 6"):
+                self.assertNotIn(text, stdout.getvalue())
+            self.assertIn("destination_exists", stdout.getvalue())
+
     def test_pool_scores_sums_sets(self):
         with tempfile.TemporaryDirectory() as directory:
             reports = []
             for seed, name in (("seed-one", "one"), ("seed-two", "two")):
-                out, path, manifest, ids = self._evidence_relative_set(directory, seed=seed, name=name)
+                out, path, manifest, ids = self._withdrawn_rule_set(directory, seed=seed, name=name)
                 labels = {"format": jc.LABELS_FORMAT, "set_id": manifest["set_id"], "judge": "vertex-sonnet",
                           "labels": {item: {"verdict": "reject"} for item in ids.values()}}
                 label_path = Path(directory) / f"labels-{name}.json"
