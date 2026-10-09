@@ -153,7 +153,17 @@ The user, or a reviewer the user designates, uses the form:
 
 Decisions autosave in browser local storage when it is available. Export regularly; "Clear saved progress" removes the browser copy. Notes can contain private text, so exports are private files.
 
-Open rubric decision for the user: the upstream LongMemEval judge tolerates off-by-one day errors on temporal durations and accepts preference answers that use the user's information without every rubric point. The protocol above does not state either tolerance. Decide before adjudicating whether to apply them, and record the decision with the set.
+### Category tolerances (user decision, October 8, 2026)
+
+The user decided that adjudication applies the tolerances built into the pinned upstream LongMemEval judge prompts (`evaluate_qa.py` in the October 6 protocol capture), so human verdicts and runner verdicts grade against the same standard. They apply to the answer verdict only, never to pack sufficiency, and to every item in the set:
+
+- **All answerable categories:** accept a response that is equivalent to the reference or contains all the intermediate steps that lead to it; reject one that gives only a subset of the required information.
+- **Temporal reasoning:** an off-by-one error in a count of days, weeks, months or similar units is still correct.
+- **Knowledge update:** a response that also mentions earlier, superseded information is correct as long as the updated answer it gives is the required one.
+- **Preference:** the response need not reflect every rubric point; it is correct when it recalls and uses the user's personal information correctly.
+- **Abstention:** correct when the response identifies the question as unanswerable, for example by saying the information is incomplete or never mentioned.
+
+These tolerances do not relax step 5's support condition: an answer that agrees with the reference only through a claim the evidence does not support is still ticked as unsupported, so the grounded and reference-only variants stay separable.
 
 ## Scoring (implemented)
 
@@ -224,7 +234,7 @@ Two tasks per item, defined in `JUDGE_PROMPTS` in `scripts/judge_calibration.py`
 
 Consequences of these choices:
 
-- **The verdict judge never sees the evidence.** The upstream prompt is reference-only, so the fair comparison for every runner judge is the score's *reference-only* variant. The grounded variant still applies to the product question of whether a reference-only judge suffices. The upstream prompt also builds in the temporal off-by-one and preference tolerances listed under the open rubric decision above.
+- **The verdict judge never sees the evidence.** The upstream prompt is reference-only, so the fair comparison for every runner judge is the score's *reference-only* variant. The grounded variant still applies to the product question of whether a reference-only judge suffices. The upstream prompt also builds in the category tolerances that adjudication applies (see Category tolerances above).
 - **Parsing is strict and failures are recorded, never coerced.** A verdict reply is normalized only by trimming whitespace, lowercasing and removing one trailing period, then must be exactly `yes` or `no`. A sufficiency reply must be exactly the JSON object above; a code fence, an extra key or `unsure` is a parse failure. JevK5 answers through its structured choice tool with options `yes` and `no` for both tasks; the verdict request is byte-for-byte the earlier JevK5 saved-answer request shape.
 - **Replaced proposal.** The earlier proposed prompt set `boros-judge-calibration-prompts-v1` (SHA-256 `cc41c72e…080f`), which had an evidence-aware verdict prompt, is superseded. The assembled set's manifest still records that earlier hash as a non-binding field; nothing checks it.
 
@@ -350,7 +360,7 @@ Proposed measurement, as a P4 extension once P5 or another authorized run produc
 
 To start P4 adjudication now (no model calls):
 
-1. Decide the two open rubric points: the temporal off-by-one and preference tolerances, and whether to adjudicate the two-item correct-plus-unsupported stratum as is or add reviewer-constructed items.
+1. Decided October 8, 2026: apply the upstream LongMemEval tolerances (see [Category tolerances](#category-tolerances-user-decision-october-8-2026)). Still open: whether to adjudicate the two-item correct-plus-unsupported stratum as is or add reviewer-constructed items.
 2. Open `.build/judge-calibration/set-v1-20261008/adjudication-form.html` locally, adjudicate the 50 items, and export the decisions into `.build/judge-calibration/`. A designated reviewer may do this instead; the export records the adjudicator name.
 
 To run judges, each run needs its own authorization. The runners are built; none has run. For every judge: copy its template to `.build/judge-calibration/declarations/`, fill the fields in the table above, run the dry run, run `check-declaration` until it reports `"complete": true`, then authorize and run the execute command.
