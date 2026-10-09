@@ -201,6 +201,8 @@ The V4 System framing adds: "If the quoted sources contain the answer, answer di
 
 **Status of G under ordinary Send's lexical retrieval (measured October 9, 2026, 42 local generations plus default-judge verdicts):** with `--retrieval-arm ordinary_send`, V4 declined 1 of 13 answerable questions whose gold turns were delivered whole: 54026fce again, on the same historical ranges as hybrid. It answered the other 12, and the judge accepted 11 of them; the reject (gpt4_70e84552) is unexplained. It declined all 3 abstention questions (accepted) and 3 of 4 answerable questions without gold. Judged accuracy on answerable questions: V3 13 of 18, V4 12 of 18. Both retrieval arms deliver the same evidence for 54026fce, so switching to ordinary Send's selection does not remove that false decline. Its offline [diagnosis](#diagnosis-of-the-54026fce-false-decline-offline-no-generation) points to G's scope on preference requests; the proposed rewording is not implemented or tested. See [the lexical replay](#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions).
 
+**Status of the scoped G rewording (V5, measured October 9, 2026, 207 local generations plus default-judge verdicts):** implemented as `context-source-snapshot-v5` and tested under the pre-declared rule in [FRAMING-V5.md](FRAMING-V5.md). V5 removed all four false declines on preference questions whose gold was delivered whole and raised judged preference accepts from 16 to 21 of 27. It failed three of the five criteria, each by one or two questions, so it was not adopted and V4 remains the default. The V4-without-G ablation attributes the preference false declines to fix G, not to fix A.
+
 ### Why one version
 
 A, D and G all change the same fixed framing: the System literal, the recent prefix and the historical header. Each change already requires a new snapshot version, digests and validation. Three versions would create two intermediate framings that no default path uses, and the replay budget (7 + 7) allows only one fix arm. The cost is attribution: the replay measures A, D and G together and cannot separate their effects.
@@ -435,7 +437,7 @@ Inferred, not measured:
 - **Position is not the cause.** V4 does not move the gold excerpt, and V3 used the same excerpt at the same offset.
 - **G and A cannot be separated here.** The quoted user-role presentation of the recent block (fix A) may also weaken the separation between "this conversation" and the historical block. Only a V4-without-G ablation would separate them. The two replays share the recent block, the framing and the question, so they are not independent samples.
 
-### Proposed mitigation (not implemented)
+### Proposed mitigation (implemented as V5 and tested; not adopted, see [FRAMING-V5.md](FRAMING-V5.md))
 
 **Proposal, not implemented.** Reword fix G so that its scope and trigger are explicit. Keep the no-disclaimer clause. For example:
 
