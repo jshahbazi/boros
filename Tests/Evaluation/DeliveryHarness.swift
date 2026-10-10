@@ -13,6 +13,11 @@ import Foundation
 /// `select` runs the declared strategies without any annotation input.
 /// `control` delivers the declared source IDs through the existing
 /// declared-source path to decide budget feasibility; it never ranks.
+/// With `capture_directory` (select only, an existing private directory),
+/// each prepared arm's exact answer request body, the bytes the runner would
+/// dispatch, is written there as `<arm>.request.json` (0600) for offline
+/// reader comparisons. Still no request is dispatched, and the harness output
+/// records only the body's SHA-256 and size.
 @main
 enum DeliveryHarness {
     static let ingestionVersion = "delivery-harness-ingest-v1"
@@ -59,6 +64,7 @@ enum DeliveryHarness {
         let question: Question
         let arms: [String]
         let declared_source_ids: [String]?
+        let capture_directory: String?
         let configuration: Configuration
     }
     enum Failure: Error { case arguments, invalid }
@@ -107,7 +113,13 @@ enum DeliveryHarness {
                 guard input.declared_source_ids == nil, !input.arms.isEmpty,
                       input.arms.allSatisfy({ ["recent_only", "lexical", "hybrid", "ordinary_send"].contains($0) || exchangeLimits($0) != nil || globalArms[$0] != nil }) else { throw Failure.invalid }
             } else {
-                guard let ids = input.declared_source_ids, !ids.isEmpty, input.arms == ["declared_sources"] else { throw Failure.invalid }
+                guard let ids = input.declared_source_ids, !ids.isEmpty, input.arms == ["declared_sources"],
+                      input.capture_directory == nil else { throw Failure.invalid }
+            }
+            if let capture = input.capture_directory {
+                var directory: ObjCBool = false
+                guard capture.hasPrefix("/"), FileManager.default.fileExists(atPath: capture, isDirectory: &directory),
+                      directory.boolValue, Set(input.arms).count == input.arms.count else { throw Failure.invalid }
             }
         } catch {
             fputs("Delivery harness input failed validation.\n", stderr); exit(1)
@@ -283,6 +295,10 @@ enum DeliveryHarness {
                         if let preparation = captured {
                             try self.describe(preparation, episodeID: completion.identifiers.episodeID, owner: owner, into: &item)
                             self.describeSemantic(preparation, arm: arm, semantic: semantic, into: &item)
+                            if let capture = self.input.capture_directory {
+                                try self.capture(preparation, episodeID: completion.identifiers.episodeID, owner: owner,
+                                                 arm: arm, directory: capture, into: &item)
+                            }
                         }
                     } catch { item["failure"] = "harness_metadata_failed"; item["failure_stage"] = "metadata" }
                     item["attempt_milliseconds"] = milliseconds(since: started)
@@ -312,6 +328,22 @@ enum DeliveryHarness {
             }
         }
 
+        /// Writes the prepared answer work's request body, which the
+        /// coordinator dispatches unchanged, after checking it against the
+        /// preparation's request digest. Records only its digest and size.
+        func capture(_ preparation: AnswerAttemptPreparation, episodeID: String, owner: MemoryStore, arm: String,
+                     directory: String, into item: inout [String: Any]) throws {
+            guard let body = try owner.episodeWork(episodeID: episodeID, operationID: preparation.answerWorkID)?.request.snapshot,
+                  EndpointRequest.digest(body) == preparation.requestDigest else { throw Failure.invalid }
+            let path = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(arm + ".request.json").path
+            guard !FileManager.default.fileExists(atPath: path),
+                  FileManager.default.createFile(atPath: path, contents: body, attributes: [.posixPermissions: 0o600]) else {
+                throw Failure.invalid
+            }
+            item["request_sha256"] = preparation.requestDigest
+            item["request_bytes"] = body.count
+        }
+
         /// Content-free delivery description: recent IDs, evidence byte
         /// ranges, the traced ranked candidates and component token counts.
         func describe(_ preparation: AnswerAttemptPreparation, episodeID: String, owner: MemoryStore,
@@ -329,6 +361,11 @@ enum DeliveryHarness {
                let snapshot = try owner.episodeWork(episodeID: episodeID, operationID: workID)?.request.snapshot,
                let selection = try JSONSerialization.jsonObject(with: snapshot) as? [String: Any] {
                 recent = selection["recent_source_ids"] as? [String] ?? []
+                if input.capture_directory != nil {
+                    // Content-free: labels and event IDs, and the framing version.
+                    item["citation_labels"] = selection["citation_labels"] ?? NSNull()
+                    item["context_framing"] = selection["version"] ?? NSNull()
+                }
             } else { throw Failure.invalid }
             item["recent_source_ids"] = recent
             item["omitted_recent_count"] = audit["omitted_recent_count"] ?? NSNull()

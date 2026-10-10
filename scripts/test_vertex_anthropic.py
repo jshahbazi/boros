@@ -151,7 +151,7 @@ class Contracts(unittest.TestCase):
 
     def test_opus_remains_the_default_for_existing_callers(self):
         self.assertEqual(v.MODEL, "claude-opus-5-5")
-        self.assertEqual(v.MODELS, ("claude-opus-5-5", "claude-sonnet-5-5"))
+        self.assertEqual(v.MODELS, ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"))
         messages = [{"role": "user", "content": "x"}]
         self.assertEqual(v.generation_url(), v.generation_url(model="claude-opus-5-5"))
         self.assertEqual(v.count_payload(messages), v.count_payload(messages, model="claude-opus-5-5"))
@@ -180,15 +180,27 @@ class Contracts(unittest.TestCase):
             v.post(v.generation_url(model=sonnet), v.payload(messages, 8), "synthetic-token")
         self.assertEqual(opener.requests[0].full_url, v.generation_url(model=sonnet))
 
+    def test_haiku_is_a_reader_with_thinking_disabled(self):
+        haiku = "claude-haiku-5-5"
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        self.assertTrue(v.is_vertex_url(v.generation_url(model=haiku)))
+        body = v.payload(messages, 64, model=haiku, thinking={"type": "disabled"})
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+        self.assertNotIn("output_config", body)
+        self.assertTrue({"temperature", "top_p", "top_k", "model"}.isdisjoint(body))
+        self.assertEqual(v.payload(messages, 64, model=haiku, thinking={"type": "disabled"}, effort="low")["output_config"],
+                         {"effort": "low"})
+        self.assertEqual(v.parse_response(reply(model=haiku), model=haiku)[0], "answer")
+
     def test_unknown_models_are_refused_before_any_opener(self):
         with patch.object(v, "build_opener", side_effect=AssertionError("network")) as opener:
-            for model in ("claude-haiku-5-5", "claude-opus-5-5 ", "", None):
+            for model in ("claude-haiku-4-5", "claude-opus-5-5 ", "", None):
                 for call in (lambda: v.generation_url(model=model), lambda: v.configuration(model=model),
                              lambda: v.count_payload([{"role": "user", "content": "x"}], model=model),
                              lambda: v.parse_response(reply(), model=model)):
                     with self.subTest(model=model), self.assertRaisesRegex(v.VertexError, "model_not_supported"):
                         call()
-            other = v.generation_url().replace("claude-opus-5-5", "claude-haiku-5-5")
+            other = v.generation_url().replace("claude-opus-5-5", "claude-haiku-4-5")
             with self.assertRaisesRegex(v.VertexError, "endpoint_refused"):
                 v.post(other, {}, "synthetic-token")
             self.assertFalse(opener.called)
@@ -225,7 +237,10 @@ class Contracts(unittest.TestCase):
                 ("claude-opus-5-5", {"type": "between_tools"}, None, "thinking_unsupported_for_model"),
                 ("claude-opus-5-5", {"type": "disabled"}, "low", "thinking_invalid"),
                 ("claude-opus-5-5", None, "minimal", "effort_invalid"),
-                ("claude-haiku-5-5", None, "low", "model_not_supported")):
+                ("claude-haiku-5-5", {"type": "between_tools"}, None, "thinking_unsupported_for_model"),
+                ("claude-haiku-5-5", {"type": "disabled"}, "xhigh", "effort_invalid_with_between_tools"),
+                ("claude-haiku-5-5", {"type": "disabled", "display": "omitted"}, None, "thinking_invalid"),
+                ("claude-haiku-4-5", None, "low", "model_not_supported")):
             with self.subTest(model=model, thinking=thinking, effort=effort), self.assertRaisesRegex(v.VertexError, code):
                 v.payload(messages, 64, model=model, thinking=thinking, effort=effort)
         for bad in ({"type": "object", "properties": {}, "required": []},

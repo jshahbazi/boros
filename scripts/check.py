@@ -94,7 +94,8 @@ def main():
                              ("answer-presentation-replay", "test_answer_presentation_replay.py"),
                              ("framing-v5-replay", "test_framing_v5_replay.py"),
                              ("framing-v4-variants-replay", "test_framing_v4_variants_replay.py"),
-                             ("vertex-anthropic", "test_vertex_anthropic.py")):
+                             ("vertex-anthropic", "test_vertex_anthropic.py"),
+                             ("reader-comparison", "test_reader_comparison.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)
             report = json.loads(checked.stdout)

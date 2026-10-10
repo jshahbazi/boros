@@ -33,7 +33,7 @@ MODEL = "claude-opus-5-5"  # default for existing callers
 # both models, and its tokens count against `max_tokens` (observed October 9, 2026
 # on Sonnet 5.5 through usage.output_tokens_details.thinking_tokens). The adapter
 # never sends `temperature`, `top_p` or `top_k`.
-MODELS = ("claude-opus-5-5", "claude-sonnet-5-5")
+MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 # Opt-in generation controls (see payload). The defaults send none of them, so
 # existing callers keep their request bodies byte for byte.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -44,6 +44,11 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 BETWEEN_TOOLS = {"type": "between_tools"}
 BETWEEN_TOOLS_MODELS = ("claude-sonnet-5-5",)
 BETWEEN_TOOLS_EFFORTS = ("low", "medium", "high")
+# `disabled` turns thinking off on Haiku 5.5 only, also at effort `high` or below
+# (Haiku's default effort is medium). Haiku is a reader candidate in the reader
+# comparison (docs/READER-COMPARISON.md), not a judge.
+DISABLED = {"type": "disabled"}
+DISABLED_MODELS = ("claude-haiku-5-5",)
 ANTHROPIC_VERSION = "vertex-2023-10-16"
 # Opus 5.5 rejects `temperature` (HTTP 400, "deprecated for this model"; observed
 # October 8, 2026), so sampling is the provider default and replies are not pinned.
@@ -204,15 +209,20 @@ def output_format(schema):
 def generation_controls(model=MODEL, *, thinking=None, effort=None):
     """Validated opt-in `thinking` and `output_config.effort` for `model`; fixed codes on refusal.
 
-    `thinking` is None (field omitted: adaptive thinking) or exactly {"type": "between_tools"}
-    (Sonnet 5.5 only, at effort high or below). `disabled`, `enabled`, `adaptive` with options and
-    `budget_tokens` are refused. `effort` is None (provider default) or one of EFFORTS.
+    `thinking` is None (field omitted: adaptive thinking), exactly {"type": "between_tools"}
+    (Sonnet 5.5 only, at effort high or below) or exactly {"type": "disabled"} (Haiku 5.5 only, at
+    effort high or below). `enabled`, `adaptive` with options and `budget_tokens` are refused, and so
+    is each off switch on the other models. `effort` is None (provider default) or one of EFFORTS.
     """
     require_model(model)
     require(effort is None or effort in EFFORTS, "effort_invalid")
     if thinking is not None:
-        require(isinstance(thinking, dict) and thinking == BETWEEN_TOOLS, "thinking_invalid")
-        require(model in BETWEEN_TOOLS_MODELS, "thinking_unsupported_for_model")
+        require(isinstance(thinking, dict) and thinking in (BETWEEN_TOOLS, DISABLED), "thinking_invalid")
+        if thinking == BETWEEN_TOOLS:
+            require(model in BETWEEN_TOOLS_MODELS, "thinking_unsupported_for_model")
+        else:
+            # Keeps the earlier code for `disabled` on Opus and Sonnet, which reject it.
+            require(model in DISABLED_MODELS, "thinking_invalid")
         require(effort is None or effort in BETWEEN_TOOLS_EFFORTS, "effort_invalid_with_between_tools")
     return {"thinking": dict(thinking) if thinking is not None else None, "effort": effort}
 
