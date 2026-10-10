@@ -135,6 +135,22 @@ class Contracts(unittest.TestCase):
             for name in ("answer)", "text)", "messages", "raw)", "body)", "prompt"):
                 self.assertNotIn(name, printed)
 
+    def test_gemini_judge_uses_the_default_judges_request_and_parser(self):
+        import gemini_judge as gj
+        import judge_calibration as jc
+        shape = jc.REPLY_INSTRUCTIONS["shapes"]["verdict"]
+        accept = [key for key, value in shape["mapping"].items() if value == "accept"][0]
+        reply = json.dumps({shape["field"]: accept})
+        self.assertEqual(gj.label_from(gemini_reply(text=reply)), ("completed", "accept", None))
+        self.assertEqual(gj.label_from(gemini_reply(text="```json\n" + reply + "\n```"))[1], "accept")
+        self.assertEqual(gj.label_from(gemini_reply(text="yes")), ("parse_failed", None, "output_off_schema"))
+        self.assertEqual(gj.label_from(gemini_reply(text=reply, reason="MAX_TOKENS"))[:2], ("response_invalid", None))
+        source = (ROOT / "scripts/gemini_judge.py").read_text()
+        self.assertIn('jc.judge_messages(item, "verdict", prompt_function, reply_instruction=True, verdict_rubric=False)',
+                      source)
+        self.assertEqual((gj.MODEL, gj.THINKING_LEVEL, gj.REPLICATES), ("gemini-3.8-flash", "low", 3))
+        self.assertIn("vertex-gemini", jc.CANDIDATE_JUDGES)
+
     def test_harness_capture_writes_only_the_prepared_request_and_reports_digests(self):
         source = (ROOT / "Tests/Evaluation/DeliveryHarness.swift").read_text()
         self.assertIn("let capture_directory: String?", source)

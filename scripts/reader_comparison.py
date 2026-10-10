@@ -724,26 +724,32 @@ def judge_set(args):
         jc.verify_answer(candidate, entry["answer"])
         candidates.append((jc.rank(seed, str(index), entry["question_id"], arm), index, entry, candidate))
     candidates.sort(key=lambda value: value[0])
-    items, keys = [], []
-    for position, (_rank, index, entry, candidate) in enumerate(candidates, start=1):
-        item, replaced = jc.blind_item(candidate, f"item-{position:04d}")
-        items.append(item)
-        keys.append({"item_id": item["item_id"], "row_index": index, "reader": entry["reader"],
-                     "replicate": entry["replicate"], "cohort": entry["cohort"], "question_id": entry["question_id"],
-                     "abstention": bool(candidate["abstention"]), "question_type": candidate["question_type"],
-                     "answer_sha256": candidate["answer_sha256"], "item_sha256": replay.digest(replay.canonical(item)),
-                     "identifier_substitutions": replaced})
-    set_id = "jrc-" + replay.digest(replay.canonical({"seed": seed, "keys": [[key["row_index"], key["answer_sha256"]]
-                                                                             for key in keys]}))[:16]
-    items_document = {"format": jc.ITEMS_FORMAT, "set_id": set_id, "items": items}
-    key_document = {"format": replay.JUDGE_KEY_FORMAT, "set_id": set_id, "seed": seed, "items": keys}
-    require(not jc.blinding_violations(items_document, key_document), "blinding_violation")
-    manifest = replay.write_judge_set(output / "judge-set", items_document, key_document, "reader-comparison", seed)
-    print(json.dumps({"set_id": manifest["set_id"], "items": manifest["item_count"],
-                      "items_sha256": manifest["items_sha256"], "readers": {reader: sum(1 for key in keys
-                                                                                        if key["reader"] == reader)
-                                                                            for reader in readers_of(rows)},
-                      "identity_mention_items": len(manifest["identity_mention_items"])}))
+    # Calibration item IDs have three digits, so the seeded order is split into interleaved halves.
+    halves = {"a": candidates[0::2], "b": candidates[1::2]}
+    require(all(len(half) <= 999 for half in halves.values()), "judge_set_too_large")
+    for name, half in halves.items():
+        items, keys = [], []
+        for position, (_rank, index, entry, candidate) in enumerate(half, start=1):
+            item, replaced = jc.blind_item(candidate, f"item-{position:03d}")
+            items.append(item)
+            keys.append({"item_id": item["item_id"], "row_index": index, "run": candidate["run"],
+                         "arm": candidate["arm"], "reader": entry["reader"], "replicate": entry["replicate"],
+                         "cohort": entry["cohort"], "question_id": entry["question_id"],
+                         "abstention": bool(candidate["abstention"]), "question_type": candidate["question_type"],
+                         "answer_sha256": candidate["answer_sha256"],
+                         "item_sha256": replay.digest(replay.canonical(item)), "identifier_substitutions": replaced})
+        set_id = "jrc-" + replay.digest(replay.canonical({"seed": seed, "half": name, "keys": [
+            [key["row_index"], key["answer_sha256"]] for key in keys]}))[:16]
+        items_document = {"format": jc.ITEMS_FORMAT, "set_id": set_id, "items": items}
+        key_document = {"format": replay.JUDGE_KEY_FORMAT, "set_id": set_id, "seed": seed, "items": keys}
+        require(not jc.blinding_violations(items_document, key_document), "blinding_violation")
+        manifest = replay.write_judge_set(output / f"judge-set-{name}", items_document, key_document,
+                                          "reader-comparison", seed)
+        print(json.dumps({"half": name, "set_id": manifest["set_id"], "items": manifest["item_count"],
+                          "items_sha256": manifest["items_sha256"],
+                          "readers": {reader: sum(1 for key in keys if key["reader"] == reader)
+                                      for reader in readers_of(rows)},
+                          "identity_mention_items": len(manifest["identity_mention_items"])}))
 
 
 def score(args):
@@ -751,16 +757,21 @@ def score(args):
     import judge_calibration as jc
     output = args.output.absolute()
     _declaration, rows, _answered, _frozen, _sources = measure_rows(output, args.dataset, args.qwen_run)
-    key_document = jc.load_json(output / "judge-set" / "key.json")
-    labels_document = jc.load_json(args.labels)
-    require(labels_document.get("set_id") == key_document["set_id"], "labels_set_mismatch")
-    require(labels_document.get("replicates") == 3 and labels_document.get("complete") is True, "labels_incomplete")
-    for key in key_document["items"]:
-        row = rows[key["row_index"]]
-        require(row["question_id"] == key["question_id"] and row["reader"] == key["reader"], "key_row_mismatch")
-        verdicts = [entry.get("verdict") for entry in labels_document["labels"].get(key["item_id"], [{}, {}, {}])]
-        row["replicate_verdicts"] = verdicts
-        row["verdict"] = replay.majority_of_three(verdicts)
+    require(len(args.labels) == 2, "labels_for_both_halves_required")
+    set_ids, declarations = [], []
+    for name, labels_path in zip(("a", "b"), args.labels):
+        key_document = jc.load_json(output / f"judge-set-{name}" / "key.json")
+        labels_document = jc.load_json(labels_path)
+        require(labels_document.get("set_id") == key_document["set_id"], "labels_set_mismatch")
+        require(labels_document.get("replicates") == 3 and labels_document.get("complete") is True, "labels_incomplete")
+        set_ids.append(key_document["set_id"])
+        declarations.append(labels_document.get("declaration_sha256"))
+        for key in key_document["items"]:
+            row = rows[key["row_index"]]
+            require(row["question_id"] == key["question_id"] and row["reader"] == key["reader"], "key_row_mismatch")
+            verdicts = [entry.get("verdict") for entry in labels_document["labels"].get(key["item_id"], [{}, {}, {}])]
+            row["replicate_verdicts"] = verdicts
+            row["verdict"] = replay.majority_of_three(verdicts)
 
     def verdicts(chosen):
         done = [row for row in chosen if row.get("verdict")]
@@ -784,8 +795,8 @@ def score(args):
                                   and not row["abstention"]]),
         }
     document = {"version": VERSION, "kind": "reader-comparison-score", "recorded_at_utc": now(),
-                "set_id": key_document["set_id"], "judge": labels_document.get("judge"),
-                "labels_declaration_sha256": labels_document.get("declaration_sha256"),
+                "set_ids": set_ids, "judge": labels_document.get("judge"),
+                "labels_declaration_sha256": declarations,
                 "prompts": labels_document.get("prompts"), "tables": tables,
                 "verdict_repeatability": repeatability([row for row in rows if row.get("verdict")],
                                                        lambda row: row["verdict"]),
@@ -795,14 +806,77 @@ def score(args):
         if row.get("verdict"):
             document["per_question"][row["reader"]][case_name(row["cohort"], row["question_id"])].append(
                 [row["replicate"], row["verdict"], row.get("outcome")])
-    replay.private_write(output / "score.json", replay.canonical(document) + b"\n")
-    print(json.dumps({key: document[key] for key in ("set_id", "tables", "verdict_repeatability")}, indent=1))
+    replay.private_write(output / args.score_name, replay.canonical(document) + b"\n")
+    print(json.dumps({key: document[key] for key in ("set_ids", "tables", "verdict_repeatability")}, indent=1))
+
+
+def compare_judges(args):
+    """Self-preference check: per reader, each judge's mean per-question accept rate, the paired
+    comparison against Qwen under each judge, and answer-level agreement between the judges."""
+    import math
+    scores = {}
+    for value in args.score:
+        require("=" in value, "score_argument_invalid")
+        name, path = value.split("=", 1)
+        scores[name] = json.loads(Path(path).read_text())
+    names = list(scores)
+    require(len(names) == 2, "two_judges_required")
+
+    def fraction(samples):
+        return sum(1 for sample in samples if sample[1] == "accept") / len(samples)
+
+    def sign_test(better, worse):
+        n, k = better + worse, min(better, worse)
+        return min(1.0, 2 * sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n) if n else 1.0
+
+    per = {name: document["per_question"] for name, document in scores.items()}
+    readers = list(per[names[0]])
+    questions = [question for question in per[names[0]]["qwen-local"] if not question.endswith(tuple(EXCLUDED_FROM_COUNTS))]
+    groups = {"with_retrieval": lambda q: not q.startswith("recent-only-21"),
+              "retrieval-on-21": lambda q: q.startswith("retrieval-on-21"),
+              "preference-27": lambda q: q.startswith("preference-27"),
+              "temporal-25": lambda q: q.startswith("temporal-25")}
+    rates = {name: {reader: {group: round(100 * sum(fraction(per[name][reader][q]) for q in questions if test(q))
+                                          / sum(1 for q in questions if test(q)), 1)
+                             for group, test in groups.items()} for reader in readers} for name in names}
+    paired = {}
+    retrieval = [q for q in questions if groups["with_retrieval"](q)]
+    for name in names:
+        paired[name] = {}
+        for reader in readers:
+            if reader == "qwen-local":
+                continue
+            better = sum(1 for q in retrieval if fraction(per[name][reader][q]) > fraction(per[name]["qwen-local"][q]))
+            worse = sum(1 for q in retrieval if fraction(per[name][reader][q]) < fraction(per[name]["qwen-local"][q]))
+            paired[name][reader] = {"better": better, "worse": worse, "tie": len(retrieval) - better - worse,
+                                    "sign_test_p": round(sign_test(better, worse), 4)}
+    agreement = {}
+    for reader in readers:
+        counts = {"answers": 0, "agree": 0, f"{names[0]}_accept_only": 0, f"{names[1]}_accept_only": 0}
+        for q in questions:
+            first = {sample[0]: sample[1] for sample in per[names[0]][reader][q]}
+            second = {sample[0]: sample[1] for sample in per[names[1]][reader][q]}
+            for replicate in first.keys() & second.keys():
+                counts["answers"] += 1
+                if first[replicate] == second[replicate]:
+                    counts["agree"] += 1
+                elif first[replicate] == "accept":
+                    counts[f"{names[0]}_accept_only"] += 1
+                elif second[replicate] == "accept":
+                    counts[f"{names[1]}_accept_only"] += 1
+        agreement[reader] = counts
+    document = {"version": VERSION, "kind": "reader-comparison-judge-comparison", "judges": names,
+                "mean_per_question_accept_percent": rates, "paired_against_qwen_with_retrieval": paired,
+                "answer_level_agreement_without_54026fce": agreement}
+    output = args.output.absolute()
+    replay.private_write(output / "judge-comparison.json", replay.canonical(document) + b"\n")
+    print(json.dumps(document, indent=1))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("capture", "count", "declare", "run", "measure", "judge-set", "score"):
+    for name in ("capture", "count", "declare", "run", "measure", "judge-set", "score", "compare-judges"):
         command = commands.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
         if name in ("capture", "measure", "judge-set", "score"):
@@ -811,17 +885,23 @@ def main(argv=None):
             import retrieval_harness as harness
             command.add_argument("--reference", type=Path, required=True, help="the step 3 replay output directory")
             command.add_argument("--tokenizer", type=Path, default=harness.DEFAULT_TOKENIZER)
+        if name == "compare-judges":
+            command.add_argument("--score", type=Path, action="append", required=True,
+                                 help="JUDGE=score file written by score, one per judge")
         if name in ("measure", "judge-set", "score"):
             command.add_argument("--qwen-run", type=Path, action="append", default=[],
                                  help="a local replay output directory whose v4-default arm is the Qwen baseline")
         if name == "score":
-            command.add_argument("--labels", type=Path, required=True)
+            command.add_argument("--labels", type=Path, action="append", required=True,
+                                 help="labels of judge-set-a, then of judge-set-b")
+            command.add_argument("--score-name", default="score.json",
+                                 help="private output file name, one per judge (score.json is the default judge)")
     args = parser.parse_args(argv)
     import judge_calibration as jc
     import retrieval_harness as harness
     try:
         {"capture": capture, "count": count, "declare": declare, "run": run, "measure": measure,
-         "judge-set": judge_set, "score": score}[args.command](args)
+         "judge-set": judge_set, "score": score, "compare-judges": compare_judges}[args.command](args)
     except (ComparisonError, va.VertexError, replay.ReplayError, v5plan.PlanError, v4v.PlanError,
             jc.CalibrationError, harness.HarnessError) as error:
         print(json.dumps({"error": str(error)}))

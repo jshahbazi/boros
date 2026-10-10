@@ -84,6 +84,8 @@ CANDIDATE_JUDGES = {
                    "route": "local model server"},
     "vertex-opus": {"family": "anthropic", "model": "claude-opus-5-5", "route": "Vertex AI llm-train"},
     "vertex-sonnet": {"family": "anthropic", "model": "claude-sonnet-5-5", "route": "Vertex AI llm-train"},
+    "vertex-gemini": {"family": "google", "model": "gemini-3.8-flash",
+                      "route": "Vertex AI llm-train (scripts/gemini_judge.py, thinking level low)"},
     "jev-hosted": {"family": "jev", "model": "Jev (hosted, version unpinned)",
                    "route": "typesafe.ai hosted; no adapter or contract exists"},
 }
@@ -108,7 +110,8 @@ PRIOR_JUDGES = {
                                           "reply-format line, prompt set v3, majority of three)"},
 }
 MODEL_FAMILIES = {"ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit": "qwen", "gpt-6.1-sol": "openai",
-                  "claude-opus-5-5": "anthropic", "claude-sonnet-5-5": "anthropic"}
+                  "claude-opus-5-5": "anthropic", "claude-sonnet-5-5": "anthropic",
+                  "claude-haiku-5-5": "anthropic", "gemini-3.8-flash": "google"}
 QWEN_MODEL = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
 SOL_MODEL = "gpt-6.1-sol"
 
@@ -871,7 +874,7 @@ def blinding_violations(items_document, key_document):
     violations = []
     require(set(items_document) == {"format", "set_id", "items"}, "items_document_keys")
     forbidden_structural = {name.lower() for name in (list(CANDIDATE_JUDGES) + list(PRIOR_JUDGES)
-                                                      + list(MODEL_FAMILIES) + ["qwen", "sol", "openai",
+                                                      + list(MODEL_FAMILIES) + ["qwen", "sol", "openai", "google", "gemini",
                                                                                 "anthropic", "jevk5", "jev"])}
     entries = {entry["item_id"]: entry for entry in key_document["items"]}
     runs = {entry["run"] for entry in key_document["items"]}
