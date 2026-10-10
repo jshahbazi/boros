@@ -112,7 +112,14 @@ Status, October 10, 2026: upper-reference readers measured on delivered packs, n
 - Qwen 56.9 percent.
 - Haiku 48.1 percent: mostly false declines.
 
-Sonnet judged Claude-authored answers that the calibration does not cover, so self-preference is unmeasured. No default changes ([record](READER-COMPARISON.md)).
+A second judge, Gemini 3.8 Flash, re-graded everything ($3.10):
+
+- On the 79 calibration items it made 6 errors against the default judge's 9 (0 false rejects, 6 false accepts).
+- It agrees with the default judge on 275 of 276 Sonnet answers, so the default judge does not favour Sonnet's answers.
+- It leans slightly toward Gemini's own answers (7 accepts the default judge withholds, 0 the other way).
+- The ranking is unchanged. Sonnet's paired edge over Qwen is 10 better and 5 worse under Gemini (p = 0.30).
+
+No default changes ([record](READER-COMPARISON.md)).
 
 ### P6 Registered comparison
 

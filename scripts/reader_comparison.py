@@ -886,7 +886,7 @@ def main(argv=None):
             command.add_argument("--reference", type=Path, required=True, help="the step 3 replay output directory")
             command.add_argument("--tokenizer", type=Path, default=harness.DEFAULT_TOKENIZER)
         if name == "compare-judges":
-            command.add_argument("--score", type=Path, action="append", required=True,
+            command.add_argument("--score", action="append", required=True,
                                  help="JUDGE=score file written by score, one per judge")
         if name in ("measure", "judge-set", "score"):
             command.add_argument("--qwen-run", type=Path, action="append", default=[],

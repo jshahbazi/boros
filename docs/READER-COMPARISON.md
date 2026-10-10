@@ -2,9 +2,15 @@
 
 Status, October 10, 2026:
 
-- **Measured:** the 94 V4 answer prompts of the step 3 cohorts ([FRAMING-V4-VARIANTS.md](FRAMING-V4-VARIANTS.md)), sent unchanged to three Vertex-hosted readers, three replicates each: 846 generations, no failure, no truncated answer, $14.72. Every answer was graded by the default judge, blinded and interleaved with the 163 local Qwen V4 answers to the same inputs from the step 3 replay and the V5 test: 1,009 items, three replicates, $3.58. Lexical measures as in the step 3 replay.
+- **Measured:** the 94 V4 answer prompts of the step 3 cohorts ([FRAMING-V4-VARIANTS.md](FRAMING-V4-VARIANTS.md)), sent unchanged to three Vertex-hosted readers, three replicates each: 846 generations, no failure, no truncated answer, $14.72. Every answer was graded by the default judge, blinded and interleaved with the 163 local Qwen V4 answers to the same inputs from the step 3 replay and the V5 test: 1,009 items, three replicates, $3.58. Lexical measures as in the step 3 replay. A second judge, Gemini 3.8 Flash, then re-graded everything to check for self-preference ($3.10).
 - **Result:** Sonnet 5.5 is the best reader here and the most repeatable at the verdict level. On the 72 questions with retrieval, its mean per-question accept rate is 67.1 percent against Qwen's 56.9 percent; it does better than Qwen on 11 questions and worse on 2 (two-sided sign test p = 0.022). Gemini 3.8 Flash matches Qwen overall (57.4 percent; 7 better, 8 worse). Haiku 5.5 is worse than Qwen (48.1 percent; 5 better, 14 worse, p = 0.064), mostly through false declines.
-- **Main caveat:** Sonnet judged Sonnet- and Haiku-authored answers. The judge's calibration set has no Claude-authored answer, so self-preference is not measured. Sonnet's largest lead is on preference questions, the rubric-graded category. The lexical false-decline counts, which do not depend on the judge, point the same way.
+- **Self-preference check (second judge):** Gemini 3.8 Flash re-graded all 1,009 items with the default judge's prompts, after grading the 79 calibration items. On those 79 items it made 6 errors, against the default judge's 9. On Sonnet's own answers the two judges agree on 275 of 276, so Sonnet's grades show no self-preference. Gemini shows a small lean toward its own answers: it accepted 7 Gemini answers that Sonnet rejected, and Sonnet accepted none that Gemini rejected. Under Gemini the ranking is unchanged:
+  - Sonnet 66.7 percent;
+  - Gemini 60.6 percent;
+  - Qwen 59.0 percent;
+  - Haiku 48.6 percent.
+
+  Sonnet's paired edge over Qwen is 10 better and 5 worse under Gemini (p = 0.30), so its lead of about 8 points is the same size under either judge but significant only under the default judge ([Second judge](#second-judge-self-preference-check)).
 - **Not decided:** no default changes. A hosted default reader in the application needs the plan's egress and disclosure contracts first ([DESIGN-REPAIR-PLAN.md](DESIGN-REPAIR-PLAN.md#p5-reader-decision)). This is P5's upper-reference measurement on delivered packs, not A1 on sufficient packs.
 
 This document contains no question, answer, reference, evidence or history text. It reports identifiers, counts and classes only.
@@ -142,6 +148,66 @@ On recent-only-21 (no delivered gold), every reader declined all 3 abstention qu
 - **Prompts** average about 14,500 tokens across all 94 inputs (Claude count), so input dominates cost.
 - **Gemini's cost** would be about half at the reported promotional rate.
 
+## Second judge: self-preference check
+
+Requested by the user on October 10, 2026, after the first results.
+
+- **Judge.** Vertex `gemini-3.8-flash` through `scripts/gemini_judge.py`. The request is the default judge's: prompt set v3, verdict task only, rendered by `judge_calibration.judge_messages` with the reply-format line, and parsed by `judge_calibration.parse_instructed_reply`. Three replicates, majority vote.
+- **Settings.** Thinking level "low"; no sampling field; output limit 2,048 tokens, because thought tokens count against it.
+- **Declaration.** Frozen before dispatch (`gemini-judge/declaration.json`, SHA-256 `805287b7…1465`), under a $12 cap. It records the sets with their item hashes, a digest of every rendered request, and the default judge's prompt hashes.
+- **Run.** 3,264 requests (the 79 calibration items, then both halves). All parsed, with no failure. 160,237 thought tokens (about 49 per request). $3.10.
+- **Registry.** `judge_calibration.CANDIDATE_JUDGES` gains `vertex-gemini`, so the existing `score` and `pool-scores` read its labels.
+
+### Calibration on the 79 items (against the reference adjudication)
+
+| Judge | Error | False reject | False accept |
+|---|---|---|---|
+| Gemini 3.8 Flash (prompt set v3) | 6/79 (7.6%, 3.5-15.6%) | 0/35 | 6/44 (13.6%, 6.4-26.7%) |
+| Sonnet 5.5 (default judge, prompt set v3) | 9/79 (11.4%, 6.1-20.3%) | 3/35 | 6/44 |
+
+- **Shared false accepts.** Five of Gemini's six are also Sonnet's: extension items 004, 008 and 009 (self-corrections) and 024 and 029 (judgment-call rejects). The sixth is base item-006; Sonnet's own sixth is base item-011.
+- **No false rejects.** Gemini rejected nothing the reference accepts.
+- **Intervals.** They overlap. Neither calibration set contains a Claude- or Gemini-authored answer.
+
+### The reader comparison under both judges
+
+**Mean per-question accept rate:**
+
+| Questions | Judge | Sonnet 5.5 | Gemini 3.8 Flash | Qwen (local) | Haiku 5.5 |
+|---|---|---:|---:|---:|---:|
+| With retrieval (72) | Sonnet | 67.1% | 57.4% | 56.9% | 48.1% |
+| With retrieval (72) | Gemini | 66.7% | 60.6% | 59.0% | 48.6% |
+| preference-27 | Sonnet | 72.8% | 45.7% | 55.6% | 39.5% |
+| preference-27 | Gemini | 71.6% | 54.3% | 55.6% | 42.0% |
+| temporal-25 | Sonnet | 53.3% | 56.0% | 48.0% | 45.3% |
+| temporal-25 | Gemini | 53.3% | 56.0% | 52.0% | 44.0% |
+| retrieval-on-21 (20) | Sonnet | 76.7% | 75.0% | 70.0% | 63.3% |
+| retrieval-on-21 (20) | Gemini | 76.7% | 75.0% | 72.5% | 63.3% |
+
+**Answer-level agreement between the judges** (every sample, without 54026fce):
+
+| Reader | Answers | Same verdict | Only Sonnet accepts | Only Gemini accepts |
+|---|---:|---:|---:|---:|
+| Sonnet 5.5 | 276 | 275 | 1 | 0 |
+| Haiku 5.5 | 276 | 259 | 8 | 9 |
+| Gemini 3.8 Flash | 276 | 269 | 0 | 7 |
+| Qwen (local) | 159 | 155 | 1 | 3 |
+
+**Paired against Qwen per question, 72 questions with retrieval:**
+
+| Reader | Sonnet judge | Gemini judge |
+|---|---|---|
+| Sonnet 5.5 | 11 better, 2 worse (p = 0.022) | 10 better, 5 worse (p = 0.30) |
+| Gemini 3.8 Flash | 7 better, 8 worse | 6 better, 6 worse |
+| Haiku 5.5 | 5 better, 14 worse (p = 0.064) | 7 better, 17 worse (p = 0.064) |
+
+**Reading:**
+
+- **No sign that Sonnet favours Sonnet's answers.** The other family's judge accepts the same Sonnet answers in 275 of 276 cases. Haiku's disagreements split evenly (8 and 9).
+- **Gemini is the more lenient judge, most of all on Gemini's own answers.** Its accepts that Sonnet withholds are 7 of 276 Gemini answers, against 3 of 159 Qwen answers, 9 of 276 Haiku answers and 0 of 276 Sonnet answers. Its calibration also shows no false rejects. The 7 are concentrated in preference questions: Gemini's preference score rises from 45.7 to 54.3 percent under its own judge. That is consistent with a small self-preference, or with leniency on the preference rubric's partial matches. At this size it cannot be separated from either.
+- **Sonnet's advantage over Qwen is about 8 to 10 points under either judge.** Its statistical support depends on the judge, because Gemini accepts a few more Qwen answers. Treat the lead as likely, not established. The Qwen arm also has fewer samples (one on temporal-25), which adds noise.
+- **Both judges could share a bias** toward fluent hosted answers, which this check cannot detect. The user's adjudication of a small blinded sample of hosted answers would.
+
 ## Measured and inferred
 
 Measured:
@@ -154,7 +220,7 @@ Measured:
 
 Inferred, not measured:
 
-- **Self-preference may inflate Sonnet's and Haiku's grades.** The judge is Sonnet, and its 79-item calibration contains no Claude-authored answer. The preference category, graded against rubrics, is where judgment is most open. Sonnet's lead there (72.8% against Qwen's 55.6%) is consistent with self-preference, and also with its lower lexical false-decline rate, which needs no judge (7 of 42 against Qwen's 10 of 28). On retrieval-on and temporal, which have short references, Sonnet's lead is smaller, and Gemini is level with or ahead of it on temporal. A second, non-Claude judge, or the user's adjudication of a Sonnet-authored sample, would bound this.
+- **Self-preference does not explain Sonnet's grades.** Before the second judge, this was the main open question. The Gemini judge agrees on 275 of 276 Sonnet answers, and Sonnet's lower lexical false-decline rate on preference questions needs no judge (7 of 42 against Qwen's 10 of 28). Gemini's small lean toward its own answers is described under [Second judge](#second-judge-self-preference-check).
 - **Retrieval, not the reader, limits the end-to-end score.** With gold whole, Sonnet is accepted 90 percent of the time. With gold none, every reader is mostly, and correctly, declining. Raising A2 still depends on P2.
 - **The comparison uses V4, which was tuned against Qwen.** Fix G's decline wording was written for Qwen. Hosted readers may do better with a framing tuned for them, Haiku especially, but that was not tested.
 
@@ -175,10 +241,10 @@ The two judge halves run with `scripts/judge_calibration_run.py` and their decla
 
 - **Capture interpreter.** `capture` needs an interpreter with `tokenizers`, for the stand-in.
 - **Locations.** The step 3 and V5 outputs are in the agent worktrees `agent-a80d0b180c643f811` and `agent-aa05a0dd01171d721`.
-- **Tests.** `scripts/test_reader_comparison.py` (10 synthetic contracts) and the extended `scripts/test_vertex_anthropic.py` (16) run in `check.py`.
+- **Tests.** `scripts/test_reader_comparison.py` (11 synthetic contracts, including the Gemini judge) and the extended `scripts/test_vertex_anthropic.py` (16) run in `check.py`.
 
 ## Possible next steps
 
-- **Bound self-preference.** Either the user adjudicates a small blinded sample of Sonnet and Gemini answers, or a non-Claude judge (Gemini) is calibrated on the existing 79 items and then grades this set.
+- **Check shared judge bias.** The user adjudicates a small blinded sample of hosted answers, especially those the two judges split on: 17 Haiku answers, 7 Gemini answers and 1 Sonnet answer.
 - **Measure A1 on sufficient packs.** P5's actual gate: Sonnet, Gemini and Qwen on the sufficient packs, three replicates.
 - **Design hosted-reader contracts.** If a hosted reader is wanted in the application, the egress and disclosure contracts come first. Routing private history to Vertex is a product decision, not an evaluation setting.

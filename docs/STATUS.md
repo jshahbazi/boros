@@ -34,7 +34,7 @@ Start with the [gate numbers](#gate-numbers), [next work](#6-dependency-ordered-
 - Local Qwen: 56.9 percent.
 - Haiku: 48.1 percent.
 
-Sonnet's verdicts were also the most repeatable. The judge is Sonnet, so self-preference is a caveat. Hosted answers took 1.5 to 2.5 seconds at the median, against 11 for Qwen. Generation cost $14.72 and grading $3.58. No default changed ([record](READER-COMPARISON.md)).
+Sonnet's verdicts were also the most repeatable. A second judge, Gemini 3.8 Flash, agrees on 275 of 276 Sonnet answers and gives the same ranking, though Sonnet's per-question edge over Qwen is not significant under it (10 better, 5 worse). Hosted answers took 1.5 to 2.5 seconds at the median, against 11 for Qwen. Generation cost $14.72 and grading $3.58. No default changed ([record](READER-COMPARISON.md)).
 
 **User stop, October 7, 2026:** the 100-question evaluation and its goal are paused by the user. The runner and active native evaluation process were terminated. Seven attempts were graded (six accepted, one rejected), two earlier attempts failed preparation and count as zero credit, the tenth attempt was interrupted, and ninety questions were never attempted. All captures and the stop record are retained. This is an incomplete evaluation, and it establishes no accuracy for the declared 100 questions. Do not resume, replace or retry attempts without explicit user authorization; whether to close it is the user's decision ([record](NATIVE-INVESTIGATION-100.md#user-requested-stop)).
 
