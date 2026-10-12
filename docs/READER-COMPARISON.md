@@ -11,6 +11,7 @@ Status, October 10, 2026:
   - Haiku 48.6 percent.
 
   Sonnet's paired edge over Qwen is 10 better and 5 worse under Gemini (p = 0.30), so its lead of about 8 points is the same size under either judge but significant only under the default judge ([Second judge](#second-judge-self-preference-check)).
+- **User adjudication of the 25 split answers (October 11):** the user graded, blinded, the 25 hosted answers on which the two judges split. The user agreed with Gemini on 18 and with Sonnet on 7. On Gemini's own answers the user accepted 6 of the 7 that only Gemini accepted, so the apparent self-preference was mostly the default judge rejecting too much. With the split answers resolved by the user, Sonnet stays at 67.1 percent (11 better than Qwen, 2 worse), Gemini rises to 60.2 percent, and Haiku falls to 47.2 percent (5 better, 18 worse, p = 0.011) ([User adjudication](#user-adjudication-of-the-judges-disagreements)).
 - **Not decided:** no default changes. A hosted default reader in the application needs the plan's egress and disclosure contracts first ([DESIGN-REPAIR-PLAN.md](DESIGN-REPAIR-PLAN.md#p5-reader-decision)). This is P5's upper-reference measurement on delivered packs, not A1 on sufficient packs.
 
 This document contains no question, answer, reference, evidence or history text. It reports identifiers, counts and classes only.
@@ -208,6 +209,55 @@ Requested by the user on October 10, 2026, after the first results.
 - **Sonnet's advantage over Qwen is about 8 to 10 points under either judge.** Its statistical support depends on the judge, because Gemini accepts a few more Qwen answers. Treat the lead as likely, not established. The Qwen arm also has fewer samples (one on temporal-25), which adds noise.
 - **Both judges could share a bias** toward fluent hosted answers, which this check cannot detect. The user's adjudication of a small blinded sample of hosted answers would.
 
+The user's adjudication below resolves the 25 hosted split answers. It finds the default judge, not Gemini, responsible for most of them.
+
+## User adjudication of the judges' disagreements
+
+**Method.** The 25 hosted answers on which the two judges' majority verdicts differ (17 Haiku, 7 Gemini, 1 Sonnet; Qwen's 4 split answers and 54026fce were left out) were copied unchanged into a blinded subset, `js-a35b0f0932e643df` (items SHA-256 `c907d088…c546`), in a seeded order. The form showed the question, its date and category, the reference and the answer, with no evidence. That is what both judges saw. Neither the reader nor either judge's verdict was shown. The user graded each answer against the reference. Pack sufficiency was marked unsure throughout, because there was no evidence to judge. The export and the joined score are private (`disagreement-set/adjudications-js-a35b0f0932e643df.json`, `disagreement-set/human-score.json`). No model was called.
+
+**Agreement with the user, by reader of the answer:**
+
+| Reader | Split answers | User agrees with Sonnet | User agrees with Gemini |
+|---|---:|---:|---:|
+| Haiku 5.5 | 17 | 5 | 12 |
+| Gemini 3.8 Flash | 7 | 1 | 6 |
+| Sonnet 5.5 | 1 | 1 | 0 |
+| All | 25 | 7 | 18 |
+
+**Each judge's errors on the 25, taking the user's verdict as correct:**
+
+| Judge | False rejects | False accepts | Errors |
+|---|---:|---:|---:|
+| Sonnet (default) | 11 (5 Haiku, 6 Gemini) | 7 (all Haiku) | 18 |
+| Gemini | 2 (1 Haiku, 1 Sonnet) | 5 (4 Haiku, 1 Gemini) | 7 |
+
+By category, 20 of the 25 are preference questions; the user sided with Gemini on 15 of them. Of the rest, the user sided with Gemini on 2 temporal questions and on 1 of 2 knowledge-update questions, and with Sonnet on 1 multi-session question and the other knowledge-update question.
+
+**The user's notes**, on 4 items, all Haiku answers:
+
+- Two preference answers were rejected for talking about the user in the third person instead of to them. Sonnet accepted both. The upstream rubric does not address presentation, so this is a stricter criterion than either judge applies.
+- One preference answer was rejected for describing the user's interests without answering the question. Sonnet accepted it.
+- One knowledge-update answer was rejected because it missed the later update. Gemini accepted it.
+
+**Accept rates with the splits resolved.** Here an answer's verdict is the judges' common verdict where they agree and the user's where they split (private `human-resolved/`). Qwen's 4 split answers keep the default judge's verdict, so Qwen may be understated by up to about 2 points (it is 59.0 percent under Gemini). Mean per-question accept rate on the 72 questions with retrieval:
+
+| Reader | Sonnet judge | Resolved | Paired against Qwen, resolved |
+|---|---:|---:|---|
+| Sonnet 5.5 | 67.1% | 67.1% | 11 better, 2 worse (p = 0.022) |
+| Gemini 3.8 Flash | 57.4% | 60.2% | 7 better, 6 worse |
+| Qwen (local) | 56.9% | 56.9% | |
+| Haiku 5.5 | 48.1% | 47.2% | 5 better, 18 worse (p = 0.011) |
+
+Gemini's change is entirely on preference questions (45.7 to 53.1 percent).
+
+**Reading:**
+
+- **Sonnet's lead stands.** None of its answers changed, and its paired edge over Qwen is the one measured under the default judge.
+- **The Gemini judge's lean toward Gemini's answers was mostly correct.** The user accepted 6 of the 7 Gemini answers that only Gemini accepted. The earlier reading, a small self-preference or leniency, is replaced: the default judge under-credits Gemini's preference answers. Gemini as a reader is level with or slightly above Qwen, not level with it.
+- **The default judge is weakest on preference questions.** On these 25 hard cases its errors were 18 against Gemini's 7, both ways round: it rejected answers the user accepted and accepted Haiku answers the user rejected. The 25 are selected disagreements, so this is not an error rate. It does not affect the calibration result on the 79 items. It does say that preference verdicts carry more judge noise than the other categories.
+- **Haiku is clearly worse than Qwen** once its split answers are resolved (p = 0.011).
+- **A shared bias is still possible** on the 984 answers where the judges agree, which this check does not sample.
+
 ## Measured and inferred
 
 Measured:
@@ -220,7 +270,7 @@ Measured:
 
 Inferred, not measured:
 
-- **Self-preference does not explain Sonnet's grades.** Before the second judge, this was the main open question. The Gemini judge agrees on 275 of 276 Sonnet answers, and Sonnet's lower lexical false-decline rate on preference questions needs no judge (7 of 42 against Qwen's 10 of 28). Gemini's small lean toward its own answers is described under [Second judge](#second-judge-self-preference-check).
+- **Self-preference does not explain Sonnet's grades.** Before the second judge, this was the main open question. The Gemini judge agrees on 275 of 276 Sonnet answers, and Sonnet's lower lexical false-decline rate on preference questions needs no judge (7 of 42 against Qwen's 10 of 28). Gemini's apparent lean toward its own answers was, on the user's adjudication, mostly the default judge rejecting good Gemini answers ([User adjudication](#user-adjudication-of-the-judges-disagreements)).
 - **Retrieval, not the reader, limits the end-to-end score.** With gold whole, Sonnet is accepted 90 percent of the time. With gold none, every reader is mostly, and correctly, declining. Raising A2 still depends on P2.
 - **The comparison uses V4, which was tuned against Qwen.** Fix G's decline wording was written for Qwen. Hosted readers may do better with a framing tuned for them, Haiku especially, but that was not tested.
 
@@ -245,6 +295,7 @@ The two judge halves run with `scripts/judge_calibration_run.py` and their decla
 
 ## Possible next steps
 
-- **Check shared judge bias.** The user adjudicates a small blinded sample of hosted answers, especially those the two judges split on: 17 Haiku answers, 7 Gemini answers and 1 Sonnet answer.
+- **Check shared judge bias.** Done for the 25 split answers. A random blinded sample of the answers on which the judges agree, preference questions first, would test what both judges might share.
+- **Revisit the default judge for preference questions.** Gemini made fewer errors on the 79 calibration items (6 against 9) and on the 25 splits (7 against 18). Whether to switch, or to take a two-judge vote with the user resolving splits, is the user's decision; the default is unchanged.
 - **Measure A1 on sufficient packs.** P5's actual gate: Sonnet, Gemini and Qwen on the sufficient packs, three replicates.
 - **Design hosted-reader contracts.** If a hosted reader is wanted in the application, the egress and disclosure contracts come first. Routing private history to Vertex is a product decision, not an evaluation setting.

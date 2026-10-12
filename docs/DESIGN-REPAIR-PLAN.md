@@ -119,6 +119,8 @@ A second judge, Gemini 3.8 Flash, re-graded everything ($3.10):
 - It leans slightly toward Gemini's own answers (7 accepts the default judge withholds, 0 the other way).
 - The ranking is unchanged. Sonnet's paired edge over Qwen is 10 better and 5 worse under Gemini (p = 0.30).
 
+The user then adjudicated, blinded, the 25 hosted answers the two judges split on, and agreed with Gemini on 18. On Gemini's own answers the user accepted 6 of the 7 that only Gemini accepted, so the default judge was under-crediting them rather than Gemini favouring itself. With the splits resolved: Sonnet 67.1 percent (unchanged; 11 better than Qwen, 2 worse), Gemini 60.2 percent, Qwen 56.9 percent, Haiku 47.2 percent (5 better, 18 worse, p = 0.011).
+
 No default changes ([record](READER-COMPARISON.md)).
 
 ### P6 Registered comparison
