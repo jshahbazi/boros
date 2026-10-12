@@ -184,9 +184,11 @@ def capture(args):
                 accepted_path = args.contexts / label / "accepted.json"
                 accepted = json.loads(accepted_path.read_text())
                 source = accepted["input"]
-                frozen = accepted["envelope"]["attempts"][0]
-                require(source["arms"] == [BASELINE] and frozen["arm"] == BASELINE and frozen["preparation_completed"],
+                # Some frozen inputs also carry the comparison's lexical arm; only the ordinary Send attempt is used.
+                frozen = [attempt for attempt in accepted["envelope"]["attempts"] if attempt["arm"] == BASELINE]
+                require(BASELINE in source["arms"] and len(frozen) == 1 and frozen[0]["preparation_completed"],
                         "frozen_input_unexpected")
+                frozen = frozen[0]
                 require(source["question"]["prompt"] == question["question"], "frozen_question_mismatch")
                 digest = replay.digest(replay.canonical(source["events"]))
                 require(events_digest in (None, digest), "histories_differ")
