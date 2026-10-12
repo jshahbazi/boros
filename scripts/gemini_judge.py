@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Gemini 3.8 Flash as a second verdict judge, to check the default judge for self-preference.
+"""Gemini 3.8 Flash verdict judge: the default judge for answer verdicts since October 11, 2026
+(docs/JUDGE-CALIBRATION.md). It was first run as a second judge, to check Sonnet for self-preference.
 
-The default judge (Vertex Sonnet 5.5) graded Sonnet- and Haiku-authored answers in the reader
+The earlier default judge (Vertex Sonnet 5.5) graded Sonnet- and Haiku-authored answers in the reader
 comparison (docs/READER-COMPARISON.md). This runner grades the same blinded items with a judge from
 another model family, and first grades the 79 calibration items so that its own error rates against
 the user's reference adjudication are known.
 
-The judge request is the default judge's: prompt set v3, verdict task only, rendered by
+The judge request is the Sonnet judge's: prompt set v3, verdict task only, rendered by
 ``judge_calibration.judge_messages`` with the reply-format system line (instructed JSON) and parsed by
 ``judge_calibration.parse_instructed_reply``. Only the model and its controls differ: Gemini through
 ``vertex_gemini.py``, thinking level "low" (its lowest; it cannot be turned off), no sampling field,

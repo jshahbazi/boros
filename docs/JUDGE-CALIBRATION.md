@@ -1080,7 +1080,43 @@ The two prompt sets differ only in the self-correction stratum.
   Caveat: a change of default is a new judge configuration whose rates are the v4 column of the rescoring.
 - **Evidence-relative grading: withdrawn.** Against that target, neither prompt set graded alone: about half of the evidence-relative accepts were false rejects. The combined rule's 24 to 25 percent error was not adequate either. The user withdrew the target ([Decline-rule reversal](#decline-rule-reversal-user-decision-october-9-2026-latest)), so no further grader is proposed for it.
 
+## Default judge changed to Gemini 3.8 Flash (user decision, October 11, 2026)
+
+The user replaced Vertex Sonnet 5.5 with Vertex Gemini 3.8 Flash as the default judge for answer verdicts. The evidence:
+
+- **Calibration, 79 items.** Gemini made 6 errors against Sonnet's 9.
+- **Disagreements, 25 split answers.** In the [reader comparison](READER-COMPARISON.md#user-adjudication-of-the-judges-disagreements), the user agreed with Gemini on 18 of the 25 hosted answers the two judges split on. Gemini made 7 errors there, Sonnet 18.
+- **Cost.** At the introductory rate it costs about $0.48 per 1,000 verdicts, against Sonnet's $1.18.
+
+The Sonnet decision below is kept as history. Its configuration remains valid for re-scoring earlier runs, and those runs keep its rates.
+
+- **Scope.** Answer verdicts only, against the reference, with the [category tolerances](#category-tolerances-user-decision-october-8-2026) and the rule that a decline on an answerable question is a reject. Sufficiency is not judged; A1 packs keep the human sufficiency labels.
+- **Configuration.** `scripts/gemini_judge.py` (`gemini-judge-v1`).
+  - Model: `gemini-3.8-flash` on the global endpoint of `llm-train-482420`, through `scripts/vertex_gemini.py`.
+  - Thinking level "low". This is the lowest level, and thinking cannot be turned off.
+  - No sampling field. Output limit 2,048 tokens, because thought tokens count against it.
+  - The request is prompt set v3, verdict task only: `judge_calibration.judge_messages` with the reply-format line, parsed by `judge_calibration.parse_instructed_reply`.
+  - Three replicates; a majority vote decides. A tie or an unparseable majority is `unknown` and is reported, never counted as accept.
+  - Labels use the judge name `vertex-gemini`. A run that changes the prompt, the reply format, the model, the thinking level or the replicate count is a different judge and needs its own calibration.
+- **Rates attached to every later acceptance** (95% Wilson intervals), against the reference target:
+
+  | Measure | All 79 items | First 50 items |
+  |---|---|---|
+  | Error | 6/79, 8% (4-16%) | 1/50, 2% (0-11%) |
+  | False reject | 0/35, 0% (0-10%) | 0/30 |
+  | False accept | 6/44, 14% (6-27%) | 1/20, 5% (1-24%) |
+
+  The 79-item rates are the headline. Labels: `.build/reader-comparison-20261010/gemini-judge/` in this worktree, set `jc-9adfaeeb572b8380` and `jx-6dbd69dec7456178`.
+- **Known weaknesses.**
+  - False accepts. Five of its six are shared with Sonnet: three self-corrections (extension items 004, 008 and 009) and two judgment-call rejects (024 and 029). The sixth is base item-006. The self-correction rule is not in prompt set v3.
+  - Prompt set v4, which adds that rule, was measured only with Sonnet. Whether Gemini should move to v4 needs its own calibration run and the user's decision. The earlier open question, v4 for Sonnet, no longer applies to the default.
+- **Self-preference.** Gemini will grade Gemini-authored answers if Gemini is used as a reader. On the user's adjudication of the 25 splits, the user accepted 6 of the 7 Gemini answers that only Gemini accepted. So its apparent lean was mostly correct, but 7 answers is a small sample.
+- **Price.** Google's Vertex pricing page, checked October 11, 2026, lists $0.75 input and $3.75 output per million tokens, with reasoning billed as output, through December 31, 2026. From January 1, 2027 the rate is $1.50 and $7.50, about 20 percent cheaper per verdict than Sonnet rather than about 60 percent. Declarations keep the standard rate so their caps stay conservative.
+- **Earlier results are not re-graded.** Runs graded by Sonnet before October 11 keep Sonnet's verdicts and rates. Re-grading any of them with Gemini is a separate, paid run that needs its own authorization.
+
 ## Default judge (user decision, October 9, 2026)
+
+*Superseded on October 11, 2026 by [the Gemini decision](#default-judge-changed-to-gemini-38-flash-user-decision-october-11-2026). Kept for the earlier runs it graded.*
 
 The user selected Vertex Sonnet 5.5 as the default evaluation judge. Plan P4 step 3 asks for the judge with the lowest error. Sonnet is the only candidate run over all 50 items. The earlier judges were scored only on the historical labels they already had, on 13 to 27 items each (Qwen 2/27, JevK5 1/18, Sol 0/13). Sol's 0/13 has an interval of 0-23 percent, too wide to separate it from Sonnet, and Sonnet costs less. This is a selection by the user on that evidence, not a measured win over every candidate.
 

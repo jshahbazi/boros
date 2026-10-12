@@ -2,7 +2,7 @@
 
 Status, October 10, 2026:
 
-- **Measured:** the 94 V4 answer prompts of the step 3 cohorts ([FRAMING-V4-VARIANTS.md](FRAMING-V4-VARIANTS.md)), sent unchanged to three Vertex-hosted readers, three replicates each: 846 generations, no failure, no truncated answer, $14.72. Every answer was graded by the default judge, blinded and interleaved with the 163 local Qwen V4 answers to the same inputs from the step 3 replay and the V5 test: 1,009 items, three replicates, $3.58. Lexical measures as in the step 3 replay. A second judge, Gemini 3.8 Flash, then re-graded everything to check for self-preference ($3.10).
+- **Measured:** the 94 V4 answer prompts of the step 3 cohorts ([FRAMING-V4-VARIANTS.md](FRAMING-V4-VARIANTS.md)), sent unchanged to three Vertex-hosted readers, three replicates each: 846 generations, no failure, no truncated answer, $12.07 billed ($14.72 at the declared rates). Every answer was graded by the default judge, blinded and interleaved with the 163 local Qwen V4 answers to the same inputs from the step 3 replay and the V5 test: 1,009 items, three replicates, $3.58. Lexical measures as in the step 3 replay. A second judge, Gemini 3.8 Flash, then re-graded everything to check for self-preference ($1.55 billed; $3.10 at the standard rate).
 - **Result:** Sonnet 5.5 is the best reader here and the most repeatable at the verdict level. On the 72 questions with retrieval, its mean per-question accept rate is 67.1 percent against Qwen's 56.9 percent; it does better than Qwen on 11 questions and worse on 2 (two-sided sign test p = 0.022). Gemini 3.8 Flash matches Qwen overall (57.4 percent; 7 better, 8 worse). Haiku 5.5 is worse than Qwen (48.1 percent; 5 better, 14 worse, p = 0.064), mostly through false declines.
 - **Self-preference check (second judge):** Gemini 3.8 Flash re-graded all 1,009 items with the default judge's prompts, after grading the 79 calibration items. On those 79 items it made 6 errors, against the default judge's 9. On Sonnet's own answers the two judges agree on 275 of 276, so Sonnet's grades show no self-preference. Gemini shows a small lean toward its own answers: it accepted 7 Gemini answers that Sonnet rejected, and Sonnet accepted none that Gemini rejected. Under Gemini the ranking is unchanged:
   - Sonnet 66.7 percent;
@@ -41,7 +41,7 @@ The inputs are the answer request bodies the ordinary path assembles for the 94 
 |---|---|---|---|---|
 | `claude-sonnet-5-5` | `scripts/vertex_anthropic.py` | `between_tools` (off) | the step 3 cap: 512 for runner document 5, 1,024 otherwise | 2.00 / 10.00 (as declared for the default judge) |
 | `claude-haiku-5-5` | `scripts/vertex_anthropic.py` (Haiku added, thinking `disabled` only) | `disabled` (off) | same | 0.10 / 0.50 (prompts of 100K tokens or fewer) |
-| `gemini-3.8-flash` | `scripts/vertex_gemini.py` (new) | `thinkingLevel` "low", its lowest; thinking cannot be turned off | the cap plus a 2,048-token thinking allowance | 1.50 / 7.50 (list rate from third-party pages; a promotional 0.75 / 3.75 is also reported) |
+| `gemini-3.8-flash` | `scripts/vertex_gemini.py` (new) | `thinkingLevel` "low", its lowest; thinking cannot be turned off | the cap plus a 2,048-token thinking allowance | 1.50 / 7.50 (the standard rate, declared to keep the cap conservative; the billed rate is the introductory 0.75 / 3.75, see [Latency and cost](#latency-and-cost)) |
 | Qwen (baseline) | local mlx-serve, earlier runs | off | same | local |
 
 - **What was sent.** Only the captured body's messages: the System message as the system instruction, then the remaining turns in order. No temperature, seed or Qwen template field was sent, because none of these models accepts a pinned temperature through these adapters. Repeatability is therefore measured with replicates.
@@ -142,12 +142,12 @@ On recent-only-21 (no delivered gold), every reader declined all 3 abstention qu
 |---|---:|---:|---:|---:|
 | Haiku 5.5 | 1.53 | 2.72 | $0.0016 | $0.44 |
 | Sonnet 5.5 | 2.38 | 5.20 | $0.032 | $8.98 |
-| Gemini 3.8 Flash | 2.45 | 5.42 | $0.019 (at the declared list rate) | $5.30 |
+| Gemini 3.8 Flash | 2.45 | 5.42 | $0.0094 ($0.019 at the standard rate) | $2.65 ($5.30 at the standard rate) |
 | Qwen (local) | 10.98 | 17.39 | local | local |
 
 - **Wall time** is per request with six concurrent workers, and includes the network round trip. Qwen's time is the recorded provider time of the earlier local runs.
 - **Prompts** average about 14,500 tokens across all 94 inputs (Claude count), so input dominates cost.
-- **Gemini's cost** would be about half at the reported promotional rate.
+- **Gemini's price.** Google's Vertex pricing page (checked October 11, 2026) lists Gemini 3.8 Flash on the global endpoint at an introductory $0.75 input and $3.75 output per million tokens through December 31, 2026, and the standard $1.50 and $7.50 from January 1, 2027. Reasoning tokens are billed as output. The declarations used the standard rate, so the recorded Gemini spend is twice the billed amount. The cost column above uses the billed rate. Sonnet 5.5 ($2.00 / $10.00) and Haiku 5.5 ($0.10 / $0.50) match the declared prices.
 
 ## Second judge: self-preference check
 
@@ -156,7 +156,7 @@ Requested by the user on October 10, 2026, after the first results.
 - **Judge.** Vertex `gemini-3.8-flash` through `scripts/gemini_judge.py`. The request is the default judge's: prompt set v3, verdict task only, rendered by `judge_calibration.judge_messages` with the reply-format line, and parsed by `judge_calibration.parse_instructed_reply`. Three replicates, majority vote.
 - **Settings.** Thinking level "low"; no sampling field; output limit 2,048 tokens, because thought tokens count against it.
 - **Declaration.** Frozen before dispatch (`gemini-judge/declaration.json`, SHA-256 `805287b7…1465`), under a $12 cap. It records the sets with their item hashes, a digest of every rendered request, and the default judge's prompt hashes.
-- **Run.** 3,264 requests (the 79 calibration items, then both halves). All parsed, with no failure. 160,237 thought tokens (about 49 per request). $3.10.
+- **Run.** 3,264 requests (the 79 calibration items, then both halves). All parsed, with no failure. 160,237 thought tokens (about 49 per request). $3.10 at the declared standard rate; $1.55 at the introductory rate billed through 2026.
 - **Registry.** `judge_calibration.CANDIDATE_JUDGES` gains `vertex-gemini`, so the existing `score` and `pool-scores` read its labels.
 
 ### Calibration on the 79 items (against the reference adjudication)
@@ -296,6 +296,6 @@ The two judge halves run with `scripts/judge_calibration_run.py` and their decla
 ## Possible next steps
 
 - **Check shared judge bias.** Done for the 25 split answers. A random blinded sample of the answers on which the judges agree, preference questions first, would test what both judges might share.
-- **Revisit the default judge for preference questions.** Gemini made fewer errors on the 79 calibration items (6 against 9) and on the 25 splits (7 against 18). Whether to switch, or to take a two-judge vote with the user resolving splits, is the user's decision; the default is unchanged.
+- **Default judge: decided.** On October 11, 2026 the user made Gemini 3.8 Flash the default judge for answer verdicts. Gemini made fewer errors on the 79 calibration items (6 against 9) and on the 25 splits (7 against 18) ([decision](JUDGE-CALIBRATION.md#default-judge-changed-to-gemini-38-flash-user-decision-october-11-2026)). This comparison's headline figures stay as graded by Sonnet; the Gemini-judged figures are in [Second judge](#second-judge-self-preference-check).
 - **Measure A1 on sufficient packs.** P5's actual gate: Sonnet, Gemini and Qwen on the sufficient packs, three replicates.
 - **Design hosted-reader contracts.** If a hosted reader is wanted in the application, the egress and disclosure contracts come first. Routing private history to Vertex is a product decision, not an evaluation setting.
