@@ -816,6 +816,7 @@ The [official LongMemEval protocol](https://github.com/xiaowu0162/LongMemEval/tr
 | [Design repair plan](DESIGN-REPAIR-PLAN.md) | Stage-split gates (R1, R2, A1, A2, L1, L2), cohorts and dependency-ordered packages P0–P7 |
 | [Offline retrieval harness](RETRIEVAL-HARNESS.md) | P1: case-level R1/R2 on the development and regression cohorts, token parity with mlx-serve, baseline for P2 |
 | [Adversarial judging/retrieval review](reviews/JUDGING-RETRIEVAL-ADVERSARIAL-20261006.md) | Reproduced judging results, concrete primary/neighbor omissions and bounded application amendment |
+| [Context diagnostic response](reviews/CONTEXT-DIAGNOSTIC-RESPONSE-20261012.md) | Mechanisms behind the OptChat long-history comparison misses, what P2 already addresses, and the ordered next work: answer-quality evidence for `exchange_packed`, a controlled presentation comparison, and the reader decision |
 | [Synthetic scaling](SCALING.md) | Declared provider-free 1k/10k/100k warm/restart tool, latency results and remaining N5 boundary |
 | [Local QA diagnostic](LOCAL-QA.md) | Pinned grading templates, local synthetic controls, private outputs and explicit judge limits |
 | [Experimental memory investigation](MEMORY-INVESTIGATION.md) | New navigation/retrieval/reading implementation, offline default, spending limits, synthetic verification and the experimental native adapter |
