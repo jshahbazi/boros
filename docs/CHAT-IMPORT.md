@@ -17,7 +17,7 @@ python3 scripts/import_chat.py \
   --open
 ```
 
-The destination must be new. `--open` launches the built binary with `BOROS_DATA_DIR` pointing to the imported store. The conversation uses project `default` and appears in the existing chat picker. Follow-up answers use the app's local server settings; optional credentials remain in Keychain. Semantic indexing starts under the existing background budget when the GUI opens. The importer builds the lexical index without running an encoder.
+The destination must be new. `--open` launches the built binary with `BOROS_DATA_DIR` pointing to the imported store. The conversation uses project `default` and appears in the existing chat picker. Follow-up answers use the app's local server settings; optional credentials remain in Keychain. The importer builds the lexical index without running an encoder. Under the current ordinary-Send policy, opening the GUI schedules no semantic indexing; explicit evaluation builders retain their separate background-budget contracts.
 
 [BEAM](https://github.com/mohammadtavakoli78/BEAM) provides generated conversations in nominal 128K, 500K, 1M, and 10M token sets. Its repository names the smallest directory `100K`. The dataset includes coding and other domains; this example is a general benchmark conversation, not a verified coding-only sample. The [benchmark/data license](https://github.com/mohammadtavakoli78/BEAM#license) is CC BY-SA 4.0. Follow its attribution and sharing terms when redistributing data or derivatives. No dataset payloads are checked into Boros.
 
