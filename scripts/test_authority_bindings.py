@@ -9,14 +9,12 @@ import shutil
 import subprocess
 import tempfile
 
+from swift_store_sources import STORE_CORE_SOURCES
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
-    "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ExchangeIndex.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift",
-    "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift",
-    "AuthorityBindingJournal.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingChecks.swift", "BackgroundIndexBudget.swift",
-    "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift",
-    "ContextSourceFraming.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
-    "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift",
+    *STORE_CORE_SOURCES,
+    "AuthorityBindingChecks.swift", "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift",
 )
 HARNESS = r'''
 import Foundation

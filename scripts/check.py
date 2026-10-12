@@ -103,6 +103,14 @@ def main():
             total += report["checks"]
             if checked.returncode or report["failed"] or report["errors"] or report["skipped"]:
                 return 1
+        # Typechecks the source subsets the standalone store scripts compile; it does not run them.
+        subsets = subprocess.run([sys.executable, str(ROOT / "scripts/test_swift_subsets.py")],
+                                 capture_output=True, text=True, env=env, timeout=600)
+        subsets_report = json.loads(subsets.stdout)
+        print(json.dumps({"suite": "swift-subsets", **subsets_report}))
+        total += subsets_report["checks"]
+        if subsets.returncode or subsets_report["failed"]:
+            return 1
         importer = subprocess.run([sys.executable, str(ROOT / "scripts/test_chat_import.py"),
                                    "--binary", str(binary)], capture_output=True, text=True, env=env, timeout=90)
         importer_report = json.loads(importer.stdout)

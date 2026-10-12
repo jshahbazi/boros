@@ -10,7 +10,13 @@ import subprocess
 import tempfile
 import time
 
+from swift_store_sources import STORE_CORE_SOURCES
+
 ROOT = Path(__file__).resolve().parents[1]
+SOURCES = (
+    *STORE_CORE_SOURCES,
+    "EpisodeChecks.swift",
+)
 HARNESS = r'''
 import Foundation
 import Darwin
@@ -215,8 +221,7 @@ def main():
         harness = scratch / "EpisodeHarness.swift"
         harness.write_text(HARNESS)
         binary = scratch / "episode-checks"
-        sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ExchangeIndex.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "MeteredRetrieval.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "EpisodeChecks.swift")]
+        sources = [ROOT / "Sources/Boros" / name for name in SOURCES]
         subprocess.run(["swiftc", "-I", str(ROOT / "Sources/CSQLite"), "-o", str(binary),
                         *map(str, sources), str(harness)], check=True)
         checks = parsed(subprocess.run([str(binary)], capture_output=True, text=True, timeout=90))
