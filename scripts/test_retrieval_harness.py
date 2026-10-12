@@ -72,7 +72,8 @@ class Contracts(unittest.TestCase):
     def test_packed_r1_uses_only_the_recorded_candidate_units(self):
         short = lambda identifier: harness.digest(identifier.encode())[:harness.PACKED_CANDIDATE_ID_DIGITS]
         value = attempt(evidence=[("a", 0, 100)], candidates=[("b", 0)])
-        value["exchange"] = {"candidates": [[0, [[short("x"), "p", "D"], [short("a"), "l", "D"]]],
+        value["exchange"] = {"candidate_block_depth": harness.PACKED_CANDIDATE_BLOCK_DEPTH,
+                             "candidates": [[0, [[short("x"), "p", "D"], [short("a"), "l", "D"]]],
                                             [1, [[short("a"), "n", "U"], [short("c"), "l", "T"]]]]}
         scored = harness.score_attempt(value, case())
         # "b" is in the assembler trace but not among the recorded units, so it is not an R1 candidate.
@@ -83,10 +84,24 @@ class Contracts(unittest.TestCase):
         self.assertIsNone(scored["turns"][1]["block_rank"])
         self.assertTrue(scored["candidate_list"])
         self.assertEqual(scored["delivered_outside_candidates"], 0)
-        self.assertIsNone(scored["exchange"])  # the unit list itself is not copied into the report
+        # The unit list itself is not copied into the report; the declared depth is.
+        self.assertEqual(scored["exchange"], {"candidate_block_depth": harness.PACKED_CANDIDATE_BLOCK_DEPTH})
         value["exchange"]["candidates"] = [[0, []]] * (harness.PACKED_CANDIDATE_BLOCK_DEPTH + 1)
         with self.assertRaises(harness.HarnessError):
             harness.score_attempt(value, case())
+        # The wide arm declares 48 blocks; the scorer accepts its depth and refuses an undeclared one.
+        value["exchange"]["candidate_block_depth"] = harness.WIDE_CANDIDATE_BLOCK_DEPTH
+        value["exchange"]["candidates"] = [[0, []]] * harness.WIDE_CANDIDATE_BLOCK_DEPTH
+        self.assertEqual(harness.score_attempt(value, case())["exchange"],
+                         {"candidate_block_depth": harness.WIDE_CANDIDATE_BLOCK_DEPTH})
+        value["exchange"]["candidates"] = [[0, []]] * (harness.WIDE_CANDIDATE_BLOCK_DEPTH + 1)
+        with self.assertRaises(harness.HarnessError):
+            harness.score_attempt(value, case())
+        value["exchange"].pop("candidate_block_depth")
+        with self.assertRaisesRegex(harness.HarnessError, "packed_candidate_depth_undeclared"):
+            harness.score_attempt(value, case())
+        self.assertIn("exchange_wide", harness.ARMS)
+        self.assertEqual(harness.ARMS.index("exchange_wide"), harness.ARMS.index("exchange_packed") + 1)
 
     def test_failed_preparation_scores_zero_and_keeps_its_reason(self):
         scored = harness.score_attempt({"preparation_completed": False, "failure": "context_overflow"}, case())

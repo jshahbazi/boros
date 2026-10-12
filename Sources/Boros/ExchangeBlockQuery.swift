@@ -603,7 +603,7 @@ enum ExchangeBlockQuery {
 
     /// Retrieval audit `mode` of a turn that the policy's exchange selection served.
     static func retrievalMode(_ policy: ContextComponentPolicy) -> String {
-        policy.packsExchangeValueDensity ? "exchange_packed"
+        policy.widensEvidenceWindow ? "exchange_wide" : policy.packsExchangeValueDensity ? "exchange_packed"
             : policy.packsAdjacentExchanges ? "exchange_adjacent" : "exchange_lexical"
     }
 

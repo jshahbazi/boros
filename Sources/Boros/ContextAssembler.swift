@@ -81,6 +81,11 @@ struct ContextSnapshot {
     /// when present, is authoritative. The v3 fallback keeps hand-built
     /// historical snapshots and their digests unchanged.
     var framing: String = ContextSourceFraming.currentSelectionVersion
+    /// Hard limit of `deliveryAudit()`. The frozen component policy sets it
+    /// when evidence is added (`ContextComponentPolicy.deliveryAuditBytes`);
+    /// every other snapshot keeps the 32 KiB default. Reductions carry it.
+    static let defaultDeliveryAuditLimit = 32_768
+    var deliveryAuditLimit: Int = ContextSnapshot.defaultDeliveryAuditLimit
 
     var selectionVersion: String { selectionBinding?.version ?? framing }
 
@@ -217,21 +222,22 @@ struct ContextSnapshot {
             }
         }
         var bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
-        if bytes.count > 32768, var retrieval = value["retrieval"] as? [String: Any] {
-            for key in ["selection_trace", "exchange_expansion", "exchange_query"] where bytes.count > 32768 {
+        let limit = deliveryAuditLimit
+        if bytes.count > limit, var retrieval = value["retrieval"] as? [String: Any] {
+            for key in ["selection_trace", "exchange_expansion", "exchange_query"] where bytes.count > limit {
                 guard retrieval.removeValue(forKey: key) != nil else { continue }
                 retrieval[key + "_omitted"] = "metadata_limit"
                 value["retrieval"] = retrieval
                 bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
             }
-            if bytes.count > 32768 && evidenceProvenance == nil {
+            if bytes.count > limit && evidenceProvenance == nil {
                 retrieval.removeValue(forKey: "selection_trace_omitted")
                 retrieval.removeValue(forKey: "exchange_expansion_omitted")
                 value["retrieval"] = retrieval
                 bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
             }
         }
-        guard bytes.count <= 32768 else { throw ContextError.invalidBudget }
+        guard bytes.count <= limit else { throw ContextError.invalidBudget }
         return bytes
     }
 
@@ -419,6 +425,7 @@ struct ContextSnapshot {
             retrievalAuditJSON: retrievalAuditJSON, retrievalNotice: retrievalNotice, recentSources: recentSources,
             selectionBinding: selectionBinding, selectionAudit: selectionAudit, componentAuditJSON: nil,
             evidenceProvenance: evidenceProvenance ?? self.evidenceProvenance, framing: framing)
+        result.deliveryAuditLimit = deliveryAuditLimit
         try result.refreshHistoricalDeliveryTrace()
         return result
     }
@@ -709,6 +716,7 @@ enum ContextAssembler {
                 retrievalNotice: recent.retrievalNotice, recentSources: recent.recentSources,
                 selectionBinding: recent.selectionBinding, selectionAudit: recent.selectionAudit,
                 evidenceProvenance: componentPolicy.usesBoundedNeighborhood ? selectedProvenance : nil, framing: recent.framing)
+            result.deliveryAuditLimit = componentPolicy.deliveryAuditBytes
             var retrieval = try result.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
             retrieval["selection_trace"] = ["version": componentPolicy.usesBoundedNeighborhood ? "historical-selection-trace-v2" : "historical-selection-trace-v1",
                 "candidate_count": historicalHits.count, "trace_truncated": historicalHits.count > traceLimit,

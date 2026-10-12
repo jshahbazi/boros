@@ -16,12 +16,16 @@ import Foundation
 extension ExchangeBlockQuery {
     enum ValuePacking {
         static let version = "exchange-value-density-v1"
-        /// R1 depth: ranked blocks whose units are packing candidates.
+        /// R1 depth: ranked blocks whose units are packing candidates, for
+        /// `exchange_packed`. The wide variant declares its own depth on the
+        /// policy (`ContextComponentPolicy.candidateBlockDepth`).
         static let candidateBlockDepth = 32
         /// Relevance of a unit is its block's score times this weight.
         static let memberWeight = 1.0
         static let neighborWeight = 0.5
-        /// Hard limit of `ContextSnapshot.deliveryAudit()`.
+        /// Hard limit of `ContextSnapshot.deliveryAudit()` for `exchange_packed`.
+        /// The wide variant declares its own on the policy
+        /// (`ContextComponentPolicy.deliveryAuditBytes`).
         static let deliveryAuditLimitBytes = 32_768
         /// Reserved for what admission adds after selection: the component
         /// count proof, the selection work ID and reduction receipts.
@@ -80,8 +84,9 @@ extension ExchangeBlockQuery {
 
         /// Candidate units of the top ranked blocks, in chronological order
         /// within each block: previous neighbor, lead, replies, next neighbor.
-        static func candidates(index: ExchangeCorpus, ranked: [RankedBlock]) throws -> [(anchors: Int, units: [Unit])] {
-            try ranked.prefix(candidateBlockDepth).enumerated().map { rank, entry in
+        static func candidates(index: ExchangeCorpus, ranked: [RankedBlock],
+                               depth: Int = candidateBlockDepth) throws -> [(anchors: Int, units: [Unit])] {
+            try ranked.prefix(depth).enumerated().map { rank, entry in
                 let sources = try index.members(entry.block), mandatory = entry.anchorMatches > 0
                 var units: [Unit] = []
                 if let first = sources.first, let candidate = try index.previous(first),
@@ -104,8 +109,8 @@ extension ExchangeBlockQuery {
         /// value per normalized cost. A reply or neighbor needs its block's
         /// lead delivered; one that outranks its lead waits for that lead.
         static func plan(index: ExchangeCorpus, ranked: [RankedBlock], maximumSpans: Int, tokenBudget: Int,
-                         auditBudget: Int, selectionVersion: String) throws -> Plan {
-            let blocks = try candidates(index: index, ranked: ranked)
+                         auditBudget: Int, selectionVersion: String, depth: Int = candidateBlockDepth) throws -> Plan {
+            let blocks = try candidates(index: index, ranked: ranked, depth: depth)
             var codes = blocks.map { Array(repeating: "?", count: $0.units.count) }
             var costs: [Int: (spans: [MemoryHit], tokens: Int, audit: Int)] = [:]
             func cost(_ source: Int) throws -> (spans: [MemoryHit], tokens: Int, audit: Int) {
@@ -195,7 +200,7 @@ extension ExchangeBlockQuery {
         /// character, so a placeholder plan has the final serialized size up
         /// to numeric fields.
         static func audit(plan: Plan, index: ExchangeCorpus, matchedBlocks: Int, tokenBudget: Int, auditBudget: Int?,
-                          maximumSpans: Int) throws -> [String: Any] {
+                          maximumSpans: Int, depth: Int = candidateBlockDepth) throws -> [String: Any] {
             var counts: [String: Int] = [:]
             for row in plan.codes { for code in row { counts[code, default: 0] += 1 } }
             let candidates: [[Any]] = try plan.blocks.enumerated().map { rank, block in
@@ -203,7 +208,7 @@ extension ExchangeBlockQuery {
                     [candidateID(try index.eventID(unit.source)), unit.kind, plan.codes[rank][position]]
                 }]
             }
-            return ["packing_version": version, "candidate_block_depth": candidateBlockDepth,
+            return ["packing_version": version, "candidate_block_depth": depth,
                 "candidate_block_count": plan.blocks.count,
                 "below_candidate_depth_block_count": max(0, matchedBlocks - plan.blocks.count),
                 "candidate_unit_count": plan.blocks.reduce(0) { $0 + $1.units.count },
@@ -228,23 +233,27 @@ extension ExchangeBlockQuery {
             func retrieval(_ exchange: [String: Any], from snapshot: ContextSnapshot) throws -> Data {
                 var value = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
                 value.removeValue(forKey: "selection_trace")
-                value["mode"] = "exchange_packed"; value["semantic_available"] = false
+                value["mode"] = ExchangeBlockQuery.retrievalMode(componentPolicy); value["semantic_available"] = false
                 value["exchange_query"] = baseAudit.merging(exchange) { _, new in new }
                 return try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
             }
+            // The policy's declared window and audit limit (`exchange_packed`
+            // keeps this packer's declared constants).
+            let depth = componentPolicy.candidateBlockDepth, auditLimit = componentPolicy.deliveryAuditBytes
             // Size probe: the delivery audit with no historical sources and
             // a placeholder candidate audit of the final shape.
-            let placeholderBlocks = try candidates(index: index, ranked: ranked)
+            let placeholderBlocks = try candidates(index: index, ranked: ranked, depth: depth)
             let placeholder = Plan(hits: [], owners: [], blocks: placeholderBlocks,
                 codes: placeholderBlocks.map { Array(repeating: "?", count: $0.units.count) },
-                estimatedTokens: tokenBudget, estimatedAuditBytes: deliveryAuditLimitBytes)
+                estimatedTokens: tokenBudget, estimatedAuditBytes: auditLimit)
             var probe = recent
+            probe.deliveryAuditLimit = auditLimit
             probe.retrievalAuditJSON = try retrieval(try audit(plan: placeholder, index: index, matchedBlocks: ranked.count,
-                tokenBudget: tokenBudget, auditBudget: deliveryAuditLimitBytes, maximumSpans: componentPolicy.evidenceSpans), from: recent)
+                tokenBudget: tokenBudget, auditBudget: auditLimit, maximumSpans: componentPolicy.evidenceSpans, depth: depth), from: recent)
             let base = try probe.deliveryAudit().count
-            let auditBudget = max(0, deliveryAuditLimitBytes - admissionHeadroomBytes - probeSlackBytes - base)
+            let auditBudget = max(0, auditLimit - admissionHeadroomBytes - probeSlackBytes - base)
             var plan = try plan(index: index, ranked: ranked, maximumSpans: componentPolicy.evidenceSpans,
-                tokenBudget: tokenBudget, auditBudget: auditBudget, selectionVersion: binding.version)
+                tokenBudget: tokenBudget, auditBudget: auditBudget, selectionVersion: binding.version, depth: depth)
             var trimmed = 0
             while true {
                 var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
@@ -252,7 +261,7 @@ extension ExchangeBlockQuery {
                     maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
                     componentPolicy: componentPolicy, historicalProvenance: nil)
                 var exchange = try audit(plan: plan, index: index, matchedBlocks: ranked.count, tokenBudget: tokenBudget,
-                    auditBudget: auditBudget, maximumSpans: componentPolicy.evidenceSpans)
+                    auditBudget: auditBudget, maximumSpans: componentPolicy.evidenceSpans, depth: depth)
                 exchange["verification_trimmed_source_count"] = trimmed
                 exchange["delivery_audit_bytes_before_admission"] = 0
                 result.retrievalAuditJSON = try retrieval(exchange, from: result)
@@ -262,7 +271,7 @@ extension ExchangeBlockQuery {
                 if let bytes = try? result.deliveryAudit(),
                    let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
                    (object["retrieval"] as? [String: Any])?["exchange_query"] != nil { measured = bytes.count }
-                if measured <= deliveryAuditLimitBytes - admissionHeadroomBytes || plan.hits.isEmpty {
+                if measured <= auditLimit - admissionHeadroomBytes || plan.hits.isEmpty {
                     exchange["delivery_audit_bytes_before_admission"] = measured
                     result.retrievalAuditJSON = try retrieval(exchange, from: result)
                     result.retrievalManifestID = nil; result.retrievalManifestJSON = nil

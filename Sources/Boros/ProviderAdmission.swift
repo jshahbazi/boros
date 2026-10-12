@@ -194,6 +194,10 @@ struct ProviderComponentCountReceipt: Codable, Equatable {
 /// supplied independently at handoff, so rebuilding a candidate invalidates it.
 struct ProviderComponentProof: Codable {
     static let rendererVersion = "qwen38-attributed-text-v1"
+    /// The v1 component caps (`ContextComponentPolicy.selectedQwen`). A proof
+    /// bounds its receipts by the caps of the policy frozen for its episode
+    /// (`recentCap`, `evidenceCap`), which the exchange-wide policy raises for
+    /// evidence; these constants remain the v1 values that its own checks use.
     static let recentTokenLimit = 8000
     static let evidenceTokenLimit = 12000
     let bodyDigest: String
@@ -255,7 +259,7 @@ struct ProviderComponentProof: Codable {
               effectiveContextLimit <= modelIdentity.modelContextLimit,
               adapterIdentity == ProviderAdmission.adapterIdentity(endpoint: endpoint, modelIdentity: modelIdentity, thinking: thinkingEnabled),
               recent.kind == .recent, evidence.kind == .evidence, wholePrompt.kind == .wholePrompt,
-              recent.tokens <= Self.recentTokenLimit, evidence.tokens <= Self.evidenceTokenLimit,
+              recent.tokens <= recentCap, evidence.tokens <= evidenceCap,
               recent.renderedDigest == EndpointRequest.digest(Data(rendered.recent.utf8)),
               evidence.renderedDigest == EndpointRequest.digest(Data(rendered.evidence.utf8)),
               wholePrompt.renderedDigest == EndpointRequest.digest(Data(rendered.complete.utf8)),
@@ -630,9 +634,11 @@ final class ProviderAdmissionOperation: NSObject, URLSessionDataDelegate, URLSes
                       evidenceReceipt.renderedDigest == EndpointRequest.digest(Data(rendered.evidence.utf8)),
                       let output = ProviderUsage.integer(object["max_tokens"]),
                       let policy = self.componentPolicy else { throw ProviderAdmissionError.invalidRequest }
-                guard
-                      recentReceipt.tokens <= ProviderComponentProof.recentTokenLimit,
-                      evidenceReceipt.tokens <= ProviderComponentProof.evidenceTokenLimit else { throw ProviderAdmissionError.contextOverflow }
+                // Component receipts are bounded by the caps of the policy
+                // frozen for this episode, which the proof records and the
+                // journal validator checks against the same policy.
+                guard recentReceipt.tokens <= policy.recentTokens,
+                      evidenceReceipt.tokens <= policy.evidenceTokens else { throw ProviderAdmissionError.contextOverflow }
                 self.verifyComponentIdentity {
                     self.count(rendered.complete) { tokens in
                         guard ProviderAdmission.fits(promptTokens: tokens, outputReserve: output, safetyTokens: self.safety,

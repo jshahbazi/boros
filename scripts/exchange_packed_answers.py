@@ -21,6 +21,15 @@ judge (gemini_judge.py, prompt set v4) on one blinded set holding both arms.
 
 Commands: ``capture``, ``count`` (free), ``declare``, ``run`` (paid), ``judge-set``, ``score``.
 
+Arms: ``--baseline-arm`` and ``--candidate-arm`` (defaults ``ordinary_send`` and ``exchange_packed``) select
+the two harness arms, so the same driver measures a later policy against the current default. A
+baseline other than ``ordinary_send`` has no step 3 declaration to check against; its delivery and gold
+class are instead checked against the same arm's rows in ``--baseline-captures`` (a previous run of this
+driver), which must then be given. ``--promote-minimum-points`` raises the declared promotion threshold
+on D (default 0, the October 12 rule); the declaration records it and ``score`` applies the recorded value.
+The evidence-allowance run (docs/EVIDENCE-ALLOWANCE.md) used ``exchange_packed`` against ``exchange_wide``
+with a 5-point threshold.
+
 Privacy: request bodies, answers and raw responses stay in the private output directory (0700
 directories, 0600 files) and are never printed. stdout carries counts, hashes, identifiers and fixed
 codes only. The Boros application is unchanged.
@@ -54,6 +63,10 @@ VERSION = "exchange-packed-answers-v1"
 READER = "gemini-3.8-flash"
 ARMS = ("ordinary_send", "exchange_packed")
 BASELINE, CANDIDATE = ARMS
+# Harness arms this driver may compare (DeliveryHarness.exchangeLimits plus the ordinary default).
+SELECTABLE_ARMS = ("ordinary_send", "exchange_packed", "exchange_wide", "exchange_adjacent", "exchange_lexical", "lexical")
+# Promotion threshold on D in points; the declaration records the value used.
+PROMOTE_MINIMUM_POINTS = 0.0
 COHORTS = ("retrieval-on-21", "preference-27", "temporal-25")
 EXCLUDED_FROM_COUNTS = v4v.EXCLUDED_FROM_DECISION
 REPLICATES = 3
@@ -62,18 +75,32 @@ SPENDING_CAP_USD = Decimal("30")
 WORKERS = 6
 BOOTSTRAP_RESAMPLES = 10000
 # Declared before any answer exists. Points are percentage points of the mean per-question accept rate.
-DECISION_RULE = {
-    "unit": "question: the 72 retrieval questions without 54026fce; each question's accept rate is its accepted "
-            "answers over its three replicates (judge majority of three; unknown is not accepted)",
-    "difference": "D = mean accept rate of exchange_packed minus ordinary_send, in points, with a 95 percent paired "
-                  f"bootstrap percentile interval over questions ({BOOTSTRAP_RESAMPLES} resamples, seeded by the "
-                  "declaration digest) and a two-sided sign test on questions that differ",
-    "promote": "recommend exchange_packed as the ordinary Send default when D >= 0, the interval's lower bound is "
-               ">= -2 points, and no cohort's D is below -5 points",
-    "retrieval_lever": "retrieval is confirmed as a practical lever for this reader when D >= +5 points and the "
-                       "interval's lower bound is above 0",
-    "otherwise": "no default change from this run; the delivery gain did not convert to answers at a detectable size",
-}
+def decision_rule():
+    """The declared rule for the configured arms and promotion threshold."""
+    return {
+        "unit": "question: the 72 retrieval questions without 54026fce; each question's accept rate is its accepted "
+                "answers over its three replicates (judge majority of three; unknown is not accepted)",
+        "difference": f"D = mean accept rate of {CANDIDATE} minus {BASELINE}, in points, with a 95 percent paired "
+                      f"bootstrap percentile interval over questions ({BOOTSTRAP_RESAMPLES} resamples, seeded by the "
+                      "declaration digest) and a two-sided sign test on questions that differ",
+        "promote": f"recommend {CANDIDATE} as the ordinary Send default when D >= {PROMOTE_MINIMUM_POINTS:g}, the "
+                   "interval's lower bound is >= -2 points, and no cohort's D is below -5 points",
+        "promote_minimum_points": PROMOTE_MINIMUM_POINTS,
+        "retrieval_lever": "retrieval is confirmed as a practical lever for this reader when D >= +5 points and the "
+                           "interval's lower bound is above 0",
+        "otherwise": "no default change from this run; the delivery gain did not convert to answers at a detectable size",
+    }
+
+
+def configure_arms(baseline, candidate, promote_minimum_points=0.0):
+    """Select the two harness arms this run compares and the declared promotion threshold."""
+    global ARMS, BASELINE, CANDIDATE, PROMOTE_MINIMUM_POINTS
+    require(baseline in SELECTABLE_ARMS and candidate in SELECTABLE_ARMS and baseline != candidate, "arms_invalid")
+    require(promote_minimum_points >= 0, "promotion_threshold_invalid")
+    ARMS = (baseline, candidate)
+    BASELINE, CANDIDATE = ARMS
+    PROMOTE_MINIMUM_POINTS = float(promote_minimum_points)
+    return ARMS
 AUTHORIZATION = ("user, 2026-10-12, in chat: 'ok do it' to the proposed exchange_packed answer-quality evaluation, "
                  "including the exception to the repair plan's principle 3 for a configuration below the offline "
                  "R2 gate; then 'just use vertex for evals, don't worry about the local llm anymore' and 'yeah gemini "
@@ -112,10 +139,16 @@ def capture(args):
     require(output.is_relative_to(ROOT / ".build"), "output_outside_build")
     reference = args.reference.absolute()
     ref_declaration, ref_runs = rc.reference_runs(reference)
-    baseline = {}
+    baseline, baseline_rows = {}, {}
     if args.baseline_captures:
         document = json.loads(args.baseline_captures.read_text())
-        baseline = {(row["cohort"], row["question_id"]): row["request_sha256"] for row in document["rows"]}
+        # Rows of this driver carry an arm; the reader comparison's rows (one arm) do not.
+        baseline_rows = {(row["cohort"], row["question_id"]): row for row in document["rows"]
+                         if row.get("arm", BASELINE) == BASELINE}
+        baseline = {key: row["request_sha256"] for key, row in baseline_rows.items()}
+    # A baseline other than the step 3 declaration's ordinary Send is checked against the same arm's
+    # recorded delivery in --baseline-captures instead.
+    require(BASELINE == "ordinary_send" or baseline_rows, "baseline_captures_required")
     plan = v4v.cohorts()
     frozen = v4v.frozen_inputs(args.dataset, plan)
     replay.private_directory(output)
@@ -136,7 +169,7 @@ def capture(args):
                     index, entry = ref_runs[(cohort, qid)]
                     history, document, _ = frozen[(qid, run)]
                     require(v5plan.e_digest(document) == entry["runner_input_sha256"], "runner_input_mismatch")
-                    require(v4v.gold_arm(cohort, strategy) == BASELINE == entry["declared_gold_arm"], "arm_mismatch")
+                    require(v4v.gold_arm(cohort, strategy) == "ordinary_send" == entry["declared_gold_arm"], "arm_mismatch")
                     directory = requests / case_name(cohort, qid)
                     require(not directory.exists(), "capture_exists")
                     replay.private_directory(directory)
@@ -168,12 +201,23 @@ def capture(args):
                                "maximum_output": entry["maximum_output"], "question_type": entry["question_type"],
                                "abstention": entry["abstention"], "citation_labels": item.get("citation_labels"),
                                **replay.gold_delivery(history, ranges)}
-                        if arm == BASELINE:
+                        if arm == BASELINE and BASELINE == "ordinary_send":
+                            row["reference"] = "step3_declaration"
                             row["delivery_matches_reference"] = row["delivered_ranges_sha256"] \
                                 == entry["declared_delivered_ranges_sha256"]
                             row["gold_matches_reference"] = row["gold_delivery"] == entry["declared_gold_delivery"]
                             if baseline:
                                 row["request_matches_baseline"] = baseline.get((cohort, qid)) == row["request_sha256"]
+                        elif arm == BASELINE:
+                            # The baseline's delivery and gold class must reproduce the earlier capture
+                            # of the same arm; its request body differs in ingestion identifiers only.
+                            previous = baseline_rows.get((cohort, qid)) or {}
+                            row["reference"] = "baseline_captures:" + BASELINE
+                            row["delivery_matches_reference"] = row["delivered_ranges_sha256"] \
+                                == previous.get("delivered_ranges_sha256")
+                            row["gold_matches_reference"] = row["gold_delivery"] == previous.get("gold_delivery") \
+                                and row["gold_turns_whole"] == previous.get("gold_turns_whole")
+                            row["request_matches_baseline"] = baseline.get((cohort, qid)) == row["request_sha256"]
                         body_path = directory / (arm + ".request.json")
                         if body_path.exists():
                             raw = body_path.read_bytes()
@@ -291,8 +335,8 @@ def declare(args):
     reader = rc.READERS[READER]
     declaration = {
         "version": VERSION, "declared_at_utc": now(), "authorization": AUTHORIZATION,
-        "purpose": "answer-quality evidence for the exchange_packed default decision (R1 of the context-diagnostic "
-                   "response): the same reader, inputs and judge under ordinary Send and exchange_packed",
+        "purpose": f"answer-quality evidence for the ordinary Send default decision: the same reader, inputs and judge "
+                   f"under the baseline arm {BASELINE} and the candidate arm {CANDIDATE}",
         "captures_sha256": replay.digest((output / "captures.json").read_bytes()),
         "counts_sha256": replay.digest((output / "counts.json").read_bytes()),
         "reference": manifest["reference"], "harness": manifest["harness"], "arms": list(ARMS),
@@ -313,7 +357,7 @@ def declare(args):
                     "must not exceed the cap; spend uses billed usage at the declared prices",
         "judge": "the default verdict judge: gemini_judge.py, prompt set v4, three replicates, majority vote, on one "
                  "blinded set holding every answer of both arms in a seeded interleaved order",
-        "decision_rule": DECISION_RULE,
+        "decision_rule": decision_rule(),
         "exclusion": "54026fce is answered and reported separately and excluded from counts, as in the step 3 replay",
         "remote_calls": "Vertex AI only (llm-train-482420, global): count endpoint (free) and generation; the inputs are "
                         "LongMemEval benchmark histories, not private user history",
@@ -525,12 +569,13 @@ def paired(per_question, questions, seed):
             "tie": len(questions) - better - worse, "sign_test_p": round(sign_test(better, worse), 4)}
 
 
-def decide(overall, cohorts):
-    """The pre-declared outcome (DECISION_RULE)."""
+def decide(overall, cohorts, promote_minimum_points=0.0):
+    """The pre-declared outcome (decision_rule) at the declared promotion threshold."""
     difference, (low, _high) = overall["difference_points"], overall["interval_points"]
     lever = difference >= 5 and low > 0
-    promote = difference >= 0 and low >= -2 and all(value["difference_points"] >= -5 for value in cohorts.values())
-    return {"promote": promote, "retrieval_lever": lever,
+    promote = difference >= promote_minimum_points and low >= -2 \
+        and all(value["difference_points"] >= -5 for value in cohorts.values())
+    return {"promote": promote, "retrieval_lever": lever, "promote_minimum_points": promote_minimum_points,
             "outcome": "promote" if promote else "no_default_change"}
 
 
@@ -588,7 +633,8 @@ def score(args):
                 "set_id": key_document["set_id"], "judge": labels_document.get("judge"),
                 "labels_declaration_sha256": labels_document.get("declaration_sha256"),
                 "decision_rule": declaration["decision_rule"], "overall": overall, "cohorts": cohorts,
-                "decision": decide(overall, cohorts), "by_gold_transition": by_transition,
+                "decision": decide(overall, cohorts, float(declaration["decision_rule"].get("promote_minimum_points", 0))),
+                "by_gold_transition": by_transition,
                 "gold_delivery": {arm: {kind: sum(1 for q in counted if gold[q][arm] == kind)
                                         for kind in ("whole", "partial", "none", "no_gold_turns")} for arm in ARMS},
                 "declines": decline_table, "verdicts": verdict_counts, "median_input_tokens": tokens,
@@ -608,6 +654,10 @@ def main(argv=None):
     for name in ("capture", "count", "declare", "run", "judge-set", "score"):
         command = commands.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--baseline-arm", default=BASELINE, choices=SELECTABLE_ARMS)
+        command.add_argument("--candidate-arm", default=CANDIDATE, choices=SELECTABLE_ARMS)
+        command.add_argument("--promote-minimum-points", type=float, default=PROMOTE_MINIMUM_POINTS,
+                             help="declared promotion threshold on D in points (recorded by declare)")
         if name in ("capture", "judge-set"):
             command.add_argument("--dataset", type=Path, required=True)
         if name == "capture":
@@ -621,6 +671,7 @@ def main(argv=None):
     import judge_calibration as jc
     import retrieval_harness as harness
     try:
+        configure_arms(args.baseline_arm, args.candidate_arm, args.promote_minimum_points)
         {"capture": capture, "count": count, "declare": declare, "run": run, "judge-set": judge_set,
          "score": score}[args.command](args)
     except (EvaluationError, rc.ComparisonError, va.VertexError, replay.ReplayError, v5plan.PlanError, v4v.PlanError,

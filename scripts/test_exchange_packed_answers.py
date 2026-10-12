@@ -58,21 +58,52 @@ class Contracts(unittest.TestCase):
     def test_decision_rule_is_the_declared_one(self):
         cohorts = {name: {"difference_points": 1.0} for name in epa.COHORTS}
         self.assertEqual(epa.decide({"difference_points": 6.0, "interval_points": [0.5, 11.0]}, cohorts),
-                         {"promote": True, "retrieval_lever": True, "outcome": "promote"})
+                         {"promote": True, "retrieval_lever": True, "outcome": "promote", "promote_minimum_points": 0.0})
         self.assertEqual(epa.decide({"difference_points": 2.0, "interval_points": [-1.5, 5.0]}, cohorts),
-                         {"promote": True, "retrieval_lever": False, "outcome": "promote"})
+                         {"promote": True, "retrieval_lever": False, "outcome": "promote", "promote_minimum_points": 0.0})
         self.assertEqual(epa.decide({"difference_points": 2.0, "interval_points": [-2.5, 5.0]}, cohorts)["outcome"],
                          "no_default_change")
         self.assertEqual(epa.decide({"difference_points": -0.5, "interval_points": [-1.0, 1.0]}, cohorts)["outcome"],
                          "no_default_change")
         falling = dict(cohorts, **{"temporal-25": {"difference_points": -6.0}})
         self.assertEqual(epa.decide({"difference_points": 6.0, "interval_points": [0.5, 11.0]}, falling),
-                         {"promote": False, "retrieval_lever": True, "outcome": "no_default_change"})
-        self.assertIn("-2 points", epa.DECISION_RULE["promote"])
-        self.assertIn("+5 points", epa.DECISION_RULE["retrieval_lever"])
+                         {"promote": False, "retrieval_lever": True, "outcome": "no_default_change", "promote_minimum_points": 0.0})
+        rule = epa.decision_rule()
+        self.assertIn("-2 points", rule["promote"])
+        self.assertIn("D >= 0,", rule["promote"])
+        self.assertIn("+5 points", rule["retrieval_lever"])
+        self.assertEqual(rule["promote_minimum_points"], 0.0)
+        # A declared threshold raises the promotion bar only; the lever rule is unchanged.
+        self.assertEqual(epa.decide({"difference_points": 4.0, "interval_points": [0.5, 8.0]}, cohorts, 5.0)["outcome"],
+                         "no_default_change")
+        self.assertEqual(epa.decide({"difference_points": 5.0, "interval_points": [-1.0, 11.0]}, cohorts, 5.0),
+                         {"promote": True, "retrieval_lever": False, "outcome": "promote", "promote_minimum_points": 5.0})
+
+    def test_configured_arms_drive_the_rule_and_are_restored(self):
+        try:
+            self.assertEqual(epa.configure_arms("exchange_packed", "exchange_wide", 5), ("exchange_packed", "exchange_wide"))
+            self.assertEqual((epa.BASELINE, epa.CANDIDATE, epa.PROMOTE_MINIMUM_POINTS), ("exchange_packed", "exchange_wide", 5.0))
+            rule = epa.decision_rule()
+            self.assertIn("exchange_wide minus exchange_packed", rule["difference"])
+            self.assertIn("recommend exchange_wide", rule["promote"])
+            self.assertIn("D >= 5,", rule["promote"])
+            self.assertEqual(rule["promote_minimum_points"], 5.0)
+            jobs = epa.jobs_for(rows_for([("temporal-25", "q1")]))
+            self.assertEqual(sorted({job["arm"] for job in jobs}), ["exchange_packed", "exchange_wide"])
+            with self.assertRaisesRegex(epa.EvaluationError, "arms_invalid"):
+                epa.configure_arms("exchange_wide", "exchange_wide")
+            with self.assertRaisesRegex(epa.EvaluationError, "arms_invalid"):
+                epa.configure_arms("ordinary_send", "recent_only")
+            with self.assertRaisesRegex(epa.EvaluationError, "promotion_threshold_invalid"):
+                epa.configure_arms("ordinary_send", "exchange_packed", -1)
+        finally:
+            epa.configure_arms("ordinary_send", "exchange_packed", 0)
+        self.assertEqual(epa.ARMS, ("ordinary_send", "exchange_packed"))
+        self.assertEqual(epa.PROMOTE_MINIMUM_POINTS, 0.0)
 
     def test_scope_reader_and_arms_are_pinned(self):
         self.assertEqual(epa.ARMS, ("ordinary_send", "exchange_packed"))
+        self.assertIn("exchange_wide", epa.SELECTABLE_ARMS)
         self.assertEqual(epa.COHORTS, ("retrieval-on-21", "preference-27", "temporal-25"))
         self.assertEqual(epa.READER, "gemini-3.8-flash")
         self.assertIn(epa.READER, epa.rc.READERS)
@@ -82,6 +113,7 @@ class Contracts(unittest.TestCase):
     def test_harness_accepts_both_arms_in_one_capture(self):
         source = (ROOT / "Tests/Evaluation/DeliveryHarness.swift").read_text()
         self.assertIn('case "exchange_packed": limits.componentPolicy = .selectedQwenExchangePacked', source)
+        self.assertIn('case "exchange_wide": limits.componentPolicy = .selectedQwenExchangeWide', source)
         self.assertIn('"ordinary_send"].contains($0) || exchangeLimits($0) != nil', source)
         self.assertIn("Set(input.arms).count == input.arms.count", source)
         driver = (ROOT / "scripts/exchange_packed_answers.py").read_text()

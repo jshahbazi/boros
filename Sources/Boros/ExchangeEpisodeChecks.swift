@@ -18,7 +18,12 @@ enum ExchangeEpisodeChecks {
 
     private static let policies: [(String, ContextComponentPolicy)] = [
         ("exchange_lexical", .selectedQwenExchange), ("exchange_adjacent", .selectedQwenExchangeAdjacent),
-        ("exchange_packed", .selectedQwenExchangePacked), (defaultFallbackCase, .currentSelectedQwen)]
+        ("exchange_packed", .selectedQwenExchangePacked), ("exchange_wide", .selectedQwenExchangeWide),
+        (defaultFallbackCase, .currentSelectedQwen)]
+    /// The synthetic tokenizer counts this many tokens per historical source,
+    /// so a policy's evidence cap forces counted single-span reductions down
+    /// to `evidenceTokens / syntheticTokensPerSource` spans.
+    static let syntheticTokensPerSource = 5_000
     static let defaultFallbackCase = "default_v1_lexical_fallback"
 
     private final class Suite {
@@ -151,9 +156,14 @@ enum ExchangeEpisodeChecks {
                         && retrieval["exchange_query"] is [String: Any] && retrieval["mode"] as? String == name
                         && prepared.snapshot.selectionAudit?.version == "context-exchange-v1"
                     // The synthetic tokenizer counts 5,000 tokens per historical
-                    // source, so the 12,000-token cap forces counted reductions.
+                    // source, so the policy's evidence cap (12,000, or 16,000 for
+                    // the wide variant) forces counted reductions.
                     let reduced = prepared.snapshot.selectionAudit?.evidenceTokenExcludedCount ?? 0
-                    checks[prefix + "_counted_reduction_removes_single_spans"] = reduced > 0 && prepared.snapshot.evidence.count == 2
+                    checks[prefix + "_counted_reduction_removes_single_spans"] = reduced > 0
+                        && prepared.snapshot.evidence.count == policy.evidenceTokens / ExchangeEpisodeChecks.syntheticTokensPerSource
+                    let auditCount = try prepared.snapshot.deliveryAudit().count
+                    checks[prefix + "_snapshot_carries_the_policy_audit_limit"] = prepared.snapshot.deliveryAuditLimit == policy.deliveryAuditBytes
+                        && auditCount <= policy.deliveryAuditBytes
                     if policy.packsExchangeValueDensity {
                         let receipts = (retrieval["exchange_query"] as? [String: Any])?["reduction_receipts"] as? [[Any]] ?? []
                         checks[prefix + "_every_counted_removal_has_a_receipt"] = receipts.count == reduced
@@ -165,8 +175,16 @@ enum ExchangeEpisodeChecks {
                 let work = try lease.prepare(kind: .answer,
                     resources: EpisodeResources(inputTokens: prepared.receipt.promptTokens, outputTokens: prepared.receipt.outputReserve,
                         modelCalls: 1, httpAttempts: 1), adapterIdentity: prepared.receipt.answerAdapterIdentity, snapshot: prepared.body)
+                let auditBytes = try prepared.snapshot.deliveryAudit()
                 let admission = try JSONEncoder().encode(AdmissionAudit(version: 2, receipt: prepared.receipt,
-                    attempts: prepared.receipt.accounting.map { [$0] } ?? [], context: prepared.snapshot.deliveryAudit()))
+                    attempts: prepared.receipt.accounting.map { [$0] } ?? [], context: auditBytes))
+                // The store caps the admission receipt at 64 KiB. The receipt
+                // carries the delivery audit as base64, so the policy's audit
+                // limit plus the receipt's other fields (measured here, with
+                // 1 KiB for the coordinator's version 3 proof fields) must fit.
+                let overhead = admission.count - 4 * ((auditBytes.count + 2) / 3)
+                checks[prefix + "_admission_receipt_fits_the_store_limit_at_the_policy_audit_limit"] = overhead > 0
+                    && overhead + 1_024 + 4 * ((policy.deliveryAuditBytes + 2) / 3) <= 65_536
                 _ = try store.beginInvocation(invocationID: "exchange-episode-invocation", conversationID: chat.id,
                     turnID: "exchange-episode-turn", humanEventID: currentID, assistantEventID: "exchange-episode-assistant",
                     providerIdentity: prepared.receipt.endpoint, requestBody: prepared.body, admissionJSON: admission,

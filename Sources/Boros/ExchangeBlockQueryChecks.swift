@@ -217,6 +217,23 @@ enum ExchangeBlockQueryChecks {
             && ((anchoredFirst?.last as? [[String]])?.contains { $0[1] == "l" && $0[2] == "M" } ?? false)
             && !anchoredStep3.snapshot.evidence.contains { $0.eventID == huge.id }
 
+        // Evidence-allowance variant: the same packer under the policy's own
+        // window, caps and audit limit, recorded in its audit and mode.
+        let wide = try prepare(.selectedQwenExchangeWide)
+        let wideRetrieval = try JSONSerialization.jsonObject(with: wide.snapshot.retrievalAuditJSON ?? Data()) as? [String: Any] ?? [:]
+        let wideAudit = wideRetrieval["exchange_query"] as? [String: Any] ?? [:]
+        let wideMeasured = wideAudit["delivery_audit_bytes_before_admission"] as? Int ?? Int.max
+        let wideReduced = try wide.snapshot.reducedEvidenceForComponentCap()
+        let wideAuditCount = try wide.snapshot.deliveryAudit().count
+        result["exchange_wide_entry_records_its_window_mode_and_audit_limit"] = wideRetrieval["mode"] as? String == "exchange_wide"
+            && wideAudit["candidate_block_depth"] as? Int == 48 && wideAudit["estimated_token_budget"] as? Int == 16_000
+            && wideAudit["maximum_spans"] as? Int == 64 && wideAudit["packing_version"] as? String == ExchangeBlockQuery.ValuePacking.version
+            && wide.snapshot.deliveryAuditLimit == 40_960 && wideMeasured <= 40_960 - ExchangeBlockQuery.ValuePacking.admissionHeadroomBytes
+            && wideAuditCount <= 40_960
+            && Array(wide.snapshot.evidence.map(\.eventID).prefix(4)) == [before1.id, target.id, reply.id, after1.id]
+            && wideReduced?.deliveryAuditLimit == 40_960 && step3.snapshot.deliveryAuditLimit == 32_768
+            && packedReduced?.deliveryAuditLimit == 32_768
+
         let empty = try prepare(.selectedQwenExchange, prompt: "What is it?")
         let emptyAudit = (try? JSONSerialization.jsonObject(with: empty.snapshot.retrievalAuditJSON ?? Data()) as? [String: Any])?["exchange_query"] as? [String: Any]
         result["exchange_query_no_content_terms_delivers_no_evidence"] = empty.snapshot.evidence.isEmpty
@@ -239,6 +256,24 @@ enum ExchangeBlockQueryChecks {
         result["exchange_packed_parameters_are_declared"] = Packing.candidateBlockDepth == 32 && Packing.memberWeight == 1.0
             && Packing.neighborWeight == 0.5 && Packing.admissionHeadroomBytes == 5_120
             && Packing.deliveryAuditLimitBytes == 32_768 && Packing.version == "exchange-value-density-v1"
+            && packed.candidateBlockDepth == Packing.candidateBlockDepth && packed.deliveryAuditBytes == Packing.deliveryAuditLimitBytes
+            && !packed.widensEvidenceWindow && ContextSnapshot.defaultDeliveryAuditLimit == Packing.deliveryAuditLimitBytes
+        // Evidence-allowance variant (docs/EVIDENCE-ALLOWANCE.md): explicit,
+        // versioned, distinct, with its window and audit limit declared on the
+        // policy, and an audit that still fits the store's 64 KiB admission
+        // receipt after base64 with headroom for the receipt's own fields.
+        let wide = try ContextComponentPolicy.selectedQwenExchangeWide.validated()
+        let decodedWide = try JSONDecoder().decode(ContextComponentPolicy.self, from: wide.canonicalData())
+        var forgedWide = wide; forgedWide.evidenceTokens = 20_000
+        result["exchange_wide_policy_is_versioned_distinct_and_declares_its_window"] = wide.usesExchangeQuery
+            && wide.packsAdjacentExchanges && wide.packsExchangeValueDensity && wide.widensEvidenceWindow && decodedWide == wide
+            && wide.version == "selected-model-context-components-v3-exchange-wide" && wide.evidenceTokens == 16_000
+            && wide.evidenceSpans == 64 && wide.candidateBlockDepth == 48 && wide.deliveryAuditBytes == 40_960
+            && wide.selectionAuditVersion == "context-exchange-v1" && wide.reductionVersion == packed.reductionVersion
+            && wide.rendererVersion == packed.rendererVersion && wide.recentTokens == packed.recentTokens
+            && wide != packed && wide != .selectedQwenExchangeAdjacent && (try? forgedWide.validated()) == nil
+            && ExchangeBlockQuery.retrievalMode(wide) == "exchange_wide" && ExchangeBlockQuery.retrievalMode(packed) == "exchange_packed"
+            && 4 * ((wide.deliveryAuditBytes + 2) / 3) + 8_192 <= 65_536
 
         // c1: [p0] [h1 a1-long] [h2 a2]; c2: [k1 k1a]
         let longReply = "Synthetic long reply " + String(repeating: "filler ", count: 700) + " zebra"
