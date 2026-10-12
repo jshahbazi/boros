@@ -1,31 +1,37 @@
 # Boros
 
-**Local chat with an inspectable conversation archive.**
+**A framework for handling very long conversations.**
 
-Boros is a native macOS chat app for local language models. It preserves accepted conversation text, retrieves original passages from older chats when preparing a reply, and lets you search and open those sources yourself.
+Boros preserves complete conversation sources, retrieves relevant passages, and assembles bounded model context with source provenance and durable work accounting. It is built for histories that outgrow a model's context window.
 
-The project explores a practical question: how much useful conversation history can a local model recover within a fixed context and work budget? Boros keeps the original messages in SQLite and records which source ranges reach the model. Retrieval, token admission, streaming, and interrupted requests have explicit accounting and recovery paths.
+The framework keeps original messages in SQLite and records which source ranges reach each model request. Retrieval, token admission, streaming, and interrupted requests have explicit budgets and recovery paths. Its evaluation tools measure source recovery and answering behavior on long histories.
 
-**Status: early developer preview.** You can build and use the chat, archive, search, and backup features today. Retrieval can miss relevant evidence, and representative answer quality remains unproven. The current verified inference path supports one specific model/server combination.
+The native macOS chat app is a reference integration and an easy way to test the framework end to end. Import and diagnostic tools provide additional ways to exercise it with existing conversation histories.
 
-## What works today
+**Status: early developer preview.** The current implementation consists of Swift modules embedded in the test app and diagnostic tools. A published standalone library and stable external API remain integration work. Retrieval can miss relevant evidence, and representative answer quality remains unproven.
 
-- **Native chat:** Swift/AppKit interface with streaming, Stop, saved drafts, a chat picker, and Markdown answer rendering with inline math. Copy preserves the original response text.
-- **Durable history:** accepted inputs are committed before dispatch; received answer chunks are committed before display. Interrupted attempts reopen with an explicit incomplete status.
-- **Searchable sources:** Search Memory offers literal and lexical search plus exact source pages. Ordinary Send combines recent messages with bounded lexical excerpts from the archive.
-- **Bounded model input:** the verified Qwen adapter counts the fully rendered prompt with the server's tokenizer, reserves response capacity, and enforces separate recent-history and evidence limits. Retrieval and answering share durable work allowances and deadlines.
-- **Saved preferences:** explicit Save instructions persists the System text across chats and restarts. The supported API profile also offers optional JSON-object output with thinking disabled.
-- **Backup and import:** verified backup/restore through the File menu and CLI; an offline importer for BEAM, DevGPT, ShareGPT, and user/assistant message JSON.
+## Framework capabilities
 
-Ordinary Send uses lexical retrieval. Semantic search, exchange-index selectors, and multi-stage memory investigation are available through explicit experimental or evaluation paths; they have separate evidence and limitations.
+- **Durable source history:** complete accepted UTF-8 text, stable source IDs, digests, and capture status in SQLite. Prompt and preview limits preserve the stored originals.
+- **Scoped retrieval:** literal and FTS5 lexical search, exact source paging, and bounded archive excerpts alongside recent messages. The reference Send path uses lexical retrieval.
+- **Context assembly and admission:** separate recent-history and evidence limits, complete request provenance, and response-capacity reservations. The verified Qwen adapter counts the fully rendered prompt with the server's tokenizer.
+- **Work accounting and recovery:** retrieval and answering share durable allowances and deadlines. Accepted inputs commit before dispatch; received chunks commit before display. Interrupted attempts retain incomplete status and incurred work.
+- **Import and backup:** verified backup/restore and offline ingestion of BEAM, DevGPT, ShareGPT, and user/assistant message JSON.
+- **Evaluation tooling:** isolated source-recovery diagnostics, answering comparisons, and synthetic checks for storage, retrieval, admission, and recovery contracts.
 
-## Build and run
+Semantic search, exchange-index selectors, and multi-stage memory investigation are available through explicit experimental or evaluation paths; they have separate evidence and limitations.
+
+## Test the framework
+
+The reference app provides a Swift/AppKit interface with streaming, Stop, saved drafts, a chat picker, a source browser, and Markdown answer rendering with inline math. It exposes the framework's storage and answering paths through a simple chat workflow.
+
+The instructions below build this test harness. Its current verified inference integration supports one specific model/server combination.
 
 ### Requirements
 
 - An Apple silicon Mac.
-- macOS 14 or newer to build Boros. The verified inference server has a higher requirement: [mlx-serve v26.10.1 requires macOS 26.2 or newer](https://github.com/ddalcu/mlx-serve/blob/v26.10.1/README.md#get-started).
-- Xcode Command Line Tools with Swift, Python 3, and Git. The Boros build uses system frameworks and SQLite; no Python packages are required.
+- macOS 14 or newer to build the reference app. The verified inference server has a higher requirement: [mlx-serve v26.10.1 requires macOS 26.2 or newer](https://github.com/ddalcu/mlx-serve/blob/v26.10.1/README.md#get-started).
+- Xcode Command Line Tools with Swift, Python 3, and Git. The current build uses system frameworks and SQLite; no Python packages are required.
 - A running local model server for generating replies. Boros does not bundle or download model weights.
 
 ### 1. Start the supported model server
@@ -48,7 +54,7 @@ Boros defaults to `http://localhost:11234/v1/` and the model ID above. In Show s
 
 Unknown model IDs, chat templates, or server versions fail admission visibly. An OpenAI-compatible API alone does not establish compatibility. Existing native GGUF profiles are experimental; their exact input-token admission and model/runtime identity remain unverified. See [the provider contract](docs/PROVIDER-ADMISSION.md) before changing the inference setup.
 
-### 2. Build Boros
+### 2. Build the test app
 
 ```sh
 git clone https://github.com/jshahbazi/boros.git
@@ -56,15 +62,17 @@ cd boros
 python3 scripts/build.py --open
 ```
 
-The build produces `.build/boros/Boros.app` and launches it. It is locally ad-hoc signed. A notarized distribution and installer remain release work.
+The build produces `.build/boros/Boros.app` and launches it. The test app is locally ad-hoc signed.
 
-### 3. Try the archive
+### 3. Exercise conversation memory
 
-Send a message, use New Chat to start another conversation, and reopen a previous chat with the chat picker. Search Memory lets you find and inspect original messages. The current UI uses one local user and the `default` project scope.
+Send messages, use New Chat to start another conversation, and reopen previous chats with the chat picker. Search Memory lets you find and inspect original messages. The harness uses one local user and the `default` project scope.
 
 To retain custom instructions, open Show settings, edit System, and click Save instructions. Unsaved edits apply in the current window; the explicit save makes them persist. Saved instructions apply to future requests across chats in the local store.
 
-File → Create Backup writes a verified archive. File → Restore Backup to New Folder creates a separate store. See [backup and restore](docs/BACKUP-RESTORE.md) for archive contents and CLI commands, and [chat import](docs/CHAT-IMPORT.md) for supported formats and import examples.
+To test a long existing history, use [chat import](docs/CHAT-IMPORT.md) to load a supported conversation into a separate store, then ask follow-up questions in the harness. The [offline imported-chat diagnostic](docs/IMPORTED-CHAT-EVALUATION.md) measures source recovery without generating answers.
+
+File → Create Backup writes a verified archive. File → Restore Backup to New Folder creates a separate store. See [backup and restore](docs/BACKUP-RESTORE.md) for archive contents and CLI commands.
 
 ## How memory works
 
@@ -84,15 +92,15 @@ Research tools have a separate scope: some download public datasets or call host
 
 ## Current limits and next work
 
-The available app is a text-only, single-user prototype. Scoped task/policy controls, deletion and retention workflows, a multi-client or MCP service, remote inference in the app, and production summary-tree browsing remain unfinished or gated. The application schedules no background semantic indexing under its current policy.
+The current framework implementation and reference harness target text conversations on a single-user macOS store. Standalone library packaging, a stable external API, a multi-client or MCP service, scoped task/policy controls, deletion and retention workflows, and production summary-tree browsing remain unfinished or gated. The harness schedules no background semantic indexing under its current policy; a remote inference adapter for it remains unimplemented.
 
 Development evaluations expose source-selection and answering failures. Representative recall, citation correctness, abstention, full interaction latency, and total cost have not met the project's release gates. Test counts and retrieval-only timings do not establish those results.
 
-Current work focuses on improving evidence selection and measuring the answering path before promoting experimental memory strategies. See [status and measured results](docs/STATUS.md), [the design repair plan](docs/DESIGN-REPAIR-PLAN.md), and [the evaluation specification](docs/EVALUATION.md).
+Current work focuses on improving evidence selection and measuring the answering path before promoting experimental memory strategies. See [status and measured results](docs/STATUS.md), [the design repair plan](docs/DESIGN-REPAIR-PLAN.md), and [the evaluation specification](docs/EVALUATION.md) for the framework's roadmap and decision gates.
 
 ## Development and contributions
 
-The app is written in Swift using AppKit and system SQLite. Python scripts provide builds, synthetic contract checks, import, and evaluation tooling.
+The framework's current Swift modules and AppKit reference app live in `Sources/Boros`. They compile into one executable today. Python scripts provide builds, synthetic contract checks, import, and evaluation tooling.
 
 Run the developer check suite from the repository root:
 
@@ -102,7 +110,7 @@ python3 scripts/check.py
 
 It builds the app, runs synthetic checks in isolated stores, and checks the Swift subsets used by standalone tools. Checks that require pinned dataset/tokenizer artifacts report a skip when those dependencies are absent. Real-model evaluations are separate workflows; follow their declared inputs, accounting, and execution controls.
 
-Useful contributions include reproducible source-selection failures, compatibility adapters with exact token-count verification, UI improvements, and release packaging. For bug reports, include the commit, macOS version, hardware, model/server versions, and a minimal synthetic reproduction. Keep private conversation text and credentials out of issues, logs, and patches.
+Useful contributions include reproducible failures on long histories, retrieval and context strategies, model adapters with exact token-count verification, evaluation improvements, and library/API integration work. For bug reports, include the commit, macOS version, hardware, model/server versions, and a minimal synthetic reproduction. Keep private conversation text and credentials out of issues, logs, and patches.
 
 Read [AGENTS.md](AGENTS.md) and [the implementation boundary](docs/IMPLEMENTATION.md) before extending a feature. Open an [issue](https://github.com/jshahbazi/boros/issues) for design discussion or submit a focused pull request with appropriate verification.
 
