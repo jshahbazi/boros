@@ -197,6 +197,9 @@ final class MemoryStore: @unchecked Sendable {
     private var exchangeIndexHandle: ExchangeIndexStore?
     private var exchangeIndexEnabled = false
     private var exchangeIndexPending: [ExchangeIndexEvent] = []
+    private var exchangeIndexBuildScheduled = false
+    private var exchangeIndexBuildFailed = false
+    private let exchangeIndexBuildQueue = DispatchQueue(label: "boros.exchange-index-build", qos: .utility)
 
     init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil,
         authorityValidationCheckpoint: ((String) throws -> Void)? = nil,
@@ -3469,6 +3472,42 @@ extension MemoryStore {
         }
         total.milliseconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
         return total
+    }
+
+    /// Builds or catches up the sidecar on a private utility queue, outside
+    /// any episode, in owner-locked batches of 2,000 events (about 0.1 s of
+    /// lock each at the measured rate). Called when an exchange-policy turn
+    /// finds the index unavailable, so stores that never use an exchange
+    /// policy never build or maintain one. Coalesces while a build runs; a
+    /// failed build is retried by the next such turn.
+    func scheduleExchangeIndexBuild() {
+        let start: Bool = (try? locked { () -> Bool in
+            guard !exchangeIndexBuildScheduled else { return false }
+            exchangeIndexBuildScheduled = true
+            return true
+        }) ?? false
+        guard start else { return }
+        exchangeIndexBuildQueue.async { [weak self] in
+            guard let self else { return }
+            let failed = (try? self.buildExchangeIndex(batchEvents: 2_000)) == nil
+            _ = try? self.locked { self.exchangeIndexBuildScheduled = false; self.exchangeIndexBuildFailed = failed }
+        }
+    }
+
+    /// Waits for a scheduled build (checks and diagnostics). Returns whether
+    /// the last build completed.
+    @discardableResult
+    func waitForExchangeIndexBuild() -> Bool {
+        exchangeIndexBuildQueue.sync {}
+        return (try? locked { !exchangeIndexBuildFailed }) ?? false
+    }
+
+    /// Unindexed committed events, or nil without a sidecar.
+    func exchangeIndexLag() -> Int? {
+        try? locked {
+            guard exchangeIndexHandle != nil || ExchangeIndexStore.exists(storeDirectory: directory) else { throw ExchangeIndexError.unavailable }
+            return try exchangeIndexPendingInventory(afterSequence: try openExchangeIndexLocked(create: false).watermark).count
+        }
     }
 
     /// Diagnostics: events applied by post-commit maintenance in this process

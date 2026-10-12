@@ -57,6 +57,11 @@ enum ExchangeBlockQuery {
     /// audit byte budget, which serializes this audit, is identical for both.
     static let rebuildIndexLabel = "in_memory_per_turn"
     static let persistentIndexLabel = "persistent_sidecar"
+    /// The in-memory rebuild served the turn because the persistent index was
+    /// not built or more than `ExchangeIndexStore.maximumTurnCatchUp` events
+    /// behind. Same length as the other labels, so this audit's size, which
+    /// step 3 budgets, does not depend on which index served the turn.
+    static let fallbackIndexLabel = "in_memory_fallback"
     static let maximumQueryTerms = 256
     static let maximumAnchors = 8
     /// Ranked blocks reported by identifier for offline diagnosis.
@@ -485,6 +490,7 @@ enum ExchangeBlockQuery {
         let frontier: Int
         let sourceCount: Int
         let blockCount: Int
+        var indexLabel: String
     }
 
     static func rankedCorpus(source: IndexSource, store: MemoryStore, projectID: String, query: Query,
@@ -495,12 +501,25 @@ enum ExchangeBlockQuery {
             let loaded = try load(store: store, projectID: projectID, excluding: excluded, lease: lease)
             let index = Index(sources: loaded.sources)
             return RankedCorpus(corpus: index, ranked: index.rank(query), frontier: loaded.frontier,
-                sourceCount: loaded.sources.count, blockCount: index.blocks.count)
+                sourceCount: loaded.sources.count, blockCount: index.blocks.count, indexLabel: rebuildIndexLabel)
         case .persistent:
-            let view = try ExchangeIndexView.open(store: store, projectID: projectID, query: query, excluding: excluded,
-                lease: lease, diagnostics: diagnostics)
-            return RankedCorpus(corpus: view, ranked: view.ranked, frontier: view.frontier,
-                sourceCount: view.sourceCount, blockCount: view.blockCount)
+            do {
+                let view = try ExchangeIndexView.open(store: store, projectID: projectID, query: query, excluding: excluded,
+                    lease: lease, diagnostics: diagnostics)
+                return RankedCorpus(corpus: view, ranked: view.ranked, frontier: view.frontier,
+                    sourceCount: view.sourceCount, blockCount: view.blockCount, indexLabel: persistentIndexLabel)
+            } catch Failure.indexUnavailable {
+                // The index is not built, or too far behind to catch up in a
+                // turn. Build it outside any episode for later turns, and
+                // serve this one from the rebuild, which selects identically
+                // and still refuses projects above its 20,000-source cap.
+                store.scheduleExchangeIndexBuild()
+                diagnostics?.fallback = true
+                var rebuilt = try rankedCorpus(source: .inMemoryRebuild, store: store, projectID: projectID, query: query,
+                    excluded: excluded, lease: lease)
+                rebuilt.indexLabel = fallbackIndexLabel
+                return rebuilt
+            }
         }
     }
 
@@ -520,6 +539,7 @@ enum ExchangeBlockQuery {
         if !query.terms.isEmpty {
             let loaded = try rankedCorpus(source: source, store: store, projectID: projectID, query: query,
                 excluded: excluded, lease: episodeLease, diagnostics: diagnostics)
+            audit["index"] = loaded.indexLabel
             let ranked = loaded.ranked
             let budget = Int(Double(componentPolicy.evidenceTokens) * evidenceTokenFraction)
             if componentPolicy.packsExchangeValueDensity {

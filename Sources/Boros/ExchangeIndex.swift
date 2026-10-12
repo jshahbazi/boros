@@ -41,7 +41,6 @@ final class ExchangeIndexStore {
     /// A turn indexes at most this many unindexed events before it ranks;
     /// more fail closed and require `MemoryStore.buildExchangeIndex()`.
     static let maximumTurnCatchUp = 2_000
-    static let eagerCatchUpLimit = 10_000
 
     enum Value { case integer(Int), text(String), blob(Data), null }
 
@@ -225,18 +224,18 @@ final class ExchangeIndexStore {
         return receipt
     }
 
-    /// Applies events the owner has just committed. If any committed event is
-    /// missing between the watermark and these, it catches up from the store.
+    /// Applies events the owner has just committed, when the index is
+    /// current up to them; otherwise it leaves them to the next build or
+    /// turn catch-up.
     func applyCommitted(_ events: [ExchangeIndexEvent], store: MemoryStore) throws {
         let started = DispatchTime.now().uptimeNanoseconds
         defer { eagerNanoseconds &+= DispatchTime.now().uptimeNanoseconds - started }
         let fresh = events.filter { $0.sequence > watermark }
         guard let first = fresh.first else { return }
-        guard try store.exchangeIndexEventCount(after: watermark, before: first.sequence) == 0 else {
-            let receipt = try catchUp(store: store, maximumEvents: Self.eagerCatchUpLimit)
-            eagerEvents += receipt.events
-            return
-        }
+        // A lagging index (never built, or a build still running) is brought
+        // up to date by `MemoryStore.buildExchangeIndex()` off the append
+        // path, never inside a committing writer's call.
+        guard try store.exchangeIndexEventCount(after: watermark, before: first.sequence) == 0 else { return }
         let writer = try Writer(index: self)
         try transaction {
             for event in fresh { try writer.apply(event) }

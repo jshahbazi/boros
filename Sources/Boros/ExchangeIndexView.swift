@@ -16,13 +16,16 @@ final class ExchangeIndexDiagnostics {
     var recomputedSources = 0
     var windows = 0
     var loadedSources = 0
+    /// The persistent index was unavailable and the rebuild served the turn.
+    var fallback = false
 
     var dictionary: [String: Any] {
         ["catch_up_events": catchUpEvents, "snapshot_milliseconds": snapshotMilliseconds,
          "recompute_milliseconds": recomputeMilliseconds, "rank_milliseconds": rankMilliseconds,
          "window_milliseconds": windowMilliseconds, "posting_rows": postingRows, "posting_entries": postingEntries,
          "block_log_rows": blockLogRows, "matched_blocks": matchedBlocks, "affected_conversations": affectedConversations,
-         "recomputed_sources": recomputedSources, "windows": windows, "loaded_sources": loadedSources]
+         "recomputed_sources": recomputedSources, "windows": windows, "loaded_sources": loadedSources,
+         "fallback": fallback]
     }
 }
 

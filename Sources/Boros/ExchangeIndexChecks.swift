@@ -131,6 +131,9 @@ enum ExchangeIndexChecks {
             query: query, excluded: excluded, lease: nil)
         let persistent = try ExchangeBlockQuery.rankedCorpus(source: .persistent, store: store, projectID: project,
             query: query, excluded: excluded, lease: nil)
+        // A fallback would compare the rebuild with itself.
+        guard persistent.indexLabel == ExchangeBlockQuery.persistentIndexLabel,
+              rebuild.indexLabel == ExchangeBlockQuery.rebuildIndexLabel else { return false }
         guard rebuild.frontier == persistent.frontier, rebuild.sourceCount == persistent.sourceCount,
               rebuild.blockCount == persistent.blockCount, rebuild.ranked.count == persistent.ranked.count else { return false }
         func ids(_ corpus: ExchangeCorpus, _ sources: [Int]) throws -> [String] { try sources.map { try corpus.reference($0).eventID } }
@@ -490,6 +493,88 @@ enum ExchangeIndexChecks {
             && lstat(sidecar.appendingPathComponent(ExchangeIndexStore.fileName).path, &fileStat) == 0 && fileStat.st_mode & 0o777 == 0o600
 
         result.merge(try episodeParity()) { _, latest in latest }
+        result.merge(try fallbackChecks()) { _, latest in latest }
+        return result
+    }
+
+    /// A store with more history than a turn may index and no sidecar, as
+    /// after an upgrade or a restore: the first turn is served by the rebuild
+    /// and selects what the rebuild selects, a build outside the episode
+    /// follows, and a later turn reads the persistent index.
+    private static func fallbackChecks() throws -> [String: Bool] {
+        var result: [String: Bool] = [:]
+        let fixture = try Fixture(label: "fallback")
+        let archive = try fixture.conversation()
+        for index in 0..<1_050 {
+            try fixture.append(archive, .human, "Synthetic quokka habitat question \(index) alpha")
+            try fixture.append(archive, .assistant, "Synthetic habitat reply \(index) beta")
+        }
+        let requests = try fixture.conversation()
+        try fixture.append(requests, .human, "Synthetic earlier quokka question")
+        try fixture.append(requests, .assistant, "Synthetic earlier habitat answer")
+        let clock = Clock(), prompt = "Where is the quokka habitat and the \"alpha beta\" reply?"
+        var ordinal = 0
+        /// One packed turn served by the default index source, compared with
+        /// the rebuild on the same recent snapshot in the same episode.
+        func turn(_ store: MemoryStore) throws -> (label: String?, identical: Bool, delivered: Bool, fallback: Bool) {
+            ordinal += 1
+            var limits = EpisodeLimits(); limits.componentPolicy = .selectedQwenExchangePacked
+            let episodeID = UUID().uuidString, humanID = "synthetic-index-fallback-request-" + String(ordinal)
+            _ = try store.acceptRequestAndBeginEpisode(conversationID: requests.id, turnID: humanID + "-turn",
+                humanEventID: humanID, episodeID: episodeID, text: prompt, limits: limits, clock: clock.now())
+            let lease = EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
+            defer { _ = try? lease.finish(reason: .cancelled) }
+            let recent = try ContextAssembler.prepareRecent(store: store, conversationID: requests.id, projectID: fixture.project,
+                prompt: prompt, system: "Synthetic index host", excludingEventID: humanID, episodeLease: lease,
+                componentPolicy: .selectedQwenExchangePacked)
+            let diagnostics = ExchangeIndexDiagnostics()
+            func prepare(_ source: ExchangeBlockQuery.IndexSource, _ sink: ExchangeIndexDiagnostics?) throws -> ContextSnapshot {
+                ExchangeBlockQuery.diagnosticIndexSource = source
+                defer { ExchangeBlockQuery.diagnosticIndexSource = .persistent }
+                return try ExchangeBlockQuery.prepareEvidence(recent: recent, store: store, conversationID: requests.id,
+                    projectID: fixture.project, prompt: prompt, excludingEventID: humanID, episodeLease: lease,
+                    lexicalQueryUTF8Range: nil, componentPolicy: .selectedQwenExchangePacked, diagnostics: sink)
+            }
+            let served = try prepare(.persistent, diagnostics), rebuilt = try prepare(.inMemoryRebuild, nil)
+            func audit(_ snapshot: ContextSnapshot) throws -> ([String: Any], String?) {
+                let retrieval = try JSONSerialization.jsonObject(with: snapshot.retrievalAuditJSON ?? Data()) as? [String: Any] ?? [:]
+                var value = retrieval["exchange_query"] as? [String: Any] ?? [:]
+                let label = value.removeValue(forKey: "index") as? String
+                return (value, label)
+            }
+            let (left, label) = try audit(served), (right, _) = try audit(rebuilt)
+            let identical = try spans(served.evidence) == spans(rebuilt.evidence)
+                && JSONSerialization.data(withJSONObject: left, options: [.sortedKeys]) == JSONSerialization.data(withJSONObject: right, options: [.sortedKeys])
+                && served.deliveryAudit().count == rebuilt.deliveryAudit().count
+            return (label, identical, !served.evidence.isEmpty, diagnostics.fallback)
+        }
+        func lifecycle(_ store: MemoryStore) throws -> Bool {
+            let absent = !store.exchangeIndexExists
+            let first = try turn(store)
+            let built = store.waitForExchangeIndexBuild()
+            let lag = store.exchangeIndexLag()
+            let second = try turn(store)
+            return absent && first.label == ExchangeBlockQuery.fallbackIndexLabel && first.fallback && first.identical && first.delivered
+                && built && lag == 0 && second.label == ExchangeBlockQuery.persistentIndexLabel && !second.fallback
+                && second.identical && second.delivered
+        }
+        result["exchange_index_fallback_label_has_equal_length"] = ExchangeBlockQuery.fallbackIndexLabel.utf8.count
+            == ExchangeBlockQuery.persistentIndexLabel.utf8.count
+        let largeLifecycle = try lifecycle(fixture.owner)
+        result["exchange_index_unbuilt_large_store_falls_back_identically_then_builds_outside_the_turn"] = fixture.events.count
+            > ExchangeIndexStore.maximumTurnCatchUp && largeLifecycle
+            && fixture.owner.exchangeIndexMaintenanceDiagnostics().map { $0.events > 0 } == true
+
+        // The same after a restore: the archive has no sidecar.
+        let archiveURL = fixture.directory.deletingLastPathComponent().appendingPathComponent("boros-exchange-fallback-archive-" + UUID().uuidString)
+        let restoredURL = fixture.directory.deletingLastPathComponent().appendingPathComponent("boros-exchange-fallback-restored-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: archiveURL); try? FileManager.default.removeItem(at: restoredURL) }
+        _ = try BackupArchive.create(from: fixture.owner, at: archiveURL)
+        _ = try BackupArchive.restore(from: archiveURL, to: restoredURL, authority: .unmanagedNoDeletion)
+        var restored: MemoryStore? = try MemoryStore(directory: restoredURL)
+        result["exchange_index_restored_large_store_falls_back_identically_then_builds_outside_the_turn"] = try lifecycle(restored!)
+        restored!.waitForExchangeIndexBuild()
+        restored = nil
         return result
     }
 

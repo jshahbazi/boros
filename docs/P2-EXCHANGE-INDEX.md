@@ -10,7 +10,7 @@ Each section states whether it describes implemented behavior, measured results,
 
 The three explicit exchange policies (`exchange_lexical`, `exchange_adjacent`, `exchange_packed`) keep their versions, caps, query, ranking formula, packers and audits. They no longer load and verify every project source each turn. They rank from a derived index kept beside the store, and they read sources only when packing touches them. Ordinary Send stays `lexical`, and the exchange policies stay opt-in (they are not selectable in the GUI).
 
-The in-memory rebuild remains in the code as a diagnostic index source (`ExchangeBlockQuery.IndexSource.inMemoryRebuild`). Checks and the harness's two parity arms select it; no product path does. The audit's `index` field records the source: `persistent_sidecar` or `in_memory_per_turn`. The two labels have the same length, so the step 3 audit byte budget, which serializes this audit, is identical for both.
+The in-memory rebuild remains in the code. It serves a turn when the persistent index is not ready (below), and checks and the harness's two parity arms select it as a diagnostic index source (`ExchangeBlockQuery.IndexSource.inMemoryRebuild`). The audit's `index` field records which index served the turn: `persistent_sidecar`, `in_memory_fallback` (the rebuild, because the index was not built or too far behind), or `in_memory_per_turn` (the diagnostic source). The labels have the same length, so the step 3 audit byte budget, which serializes this audit, is identical whichever index served the turn. A separate fallback-reason key would have changed that size, so the reason is carried by the label; there is only one reason.
 
 ### Where the index lives, and why not in the store schema
 
@@ -35,8 +35,10 @@ Blocks are formed exactly as the rebuild forms them: within a conversation, a bl
 ### Maintenance
 
 - **Incremental, after commit.** Every event insertion in the store goes through one function. When the sidecar exists, the store records each inserted event and applies it after the transaction commits, in one sidecar transaction. A rolled-back transaction applies nothing. A failure leaves the watermark behind and does not fail the append.
-- **Catch-up.** Every read first indexes committed events after the watermark. A turn indexes at most 2,000 such events, charged to the turn as a declared source read. More fail closed with `indexUnavailable`; `MemoryStore.buildExchangeIndex()` builds or catches up outside any episode, in owner-locked batches.
-- **Creation.** A store without the sidecar does not pay any maintenance cost. The first exchange-policy turn creates it, within the catch-up limit, or `buildExchangeIndex()` does.
+- **Catch-up within a turn.** Every read first indexes committed events after the watermark. A turn indexes at most 2,000 such events itself, charged to the turn as a declared source read.
+- **Not ready: fallback and background build.** If more than 2,000 events are unindexed (no sidecar yet, as after an upgrade or a restore, or a build still running), the turn is served by the in-memory rebuild, which selects identically and still refuses projects above its 20,000-source cap. The same turn schedules `MemoryStore.scheduleExchangeIndexBuild()`: a build on a private utility queue, outside any episode, in owner-locked batches of 2,000 events (about 0.1 s of lock each). Later turns read the persistent index. Builds coalesce, and a failed build is retried by the next fallback turn.
+- **Opt-in only.** Nothing builds the sidecar until a turn of an exchange policy needs it, so stores whose projects never use one pay no cost. Post-commit maintenance runs only while the index is current; a lagging index is caught up by the build, never inside an append.
+- **Ingest cost for opted-in stores (trade-off).** Once the sidecar exists, every event appended to the store, in any project, is indexed after its commit: 0.25 ms per event at 1,000 events, 0.28 ms at 10,000 and 0.59 ms at 100,000 (measured below). Ingesting 100,000 synthetic events took 118.5 s with maintenance against 27.5 s without (separate processes; the directly measured maintenance share was 59 s). That is the price of keeping turns off the full-history read; a project that does not opt in does not pay it, unless another project in the same store has opted in.
 
 ### What a turn reads
 
@@ -50,7 +52,7 @@ Outside the mutex, the excluded conversations' trailing blocks are rebuilt in me
 
 Packing then reads what it touches. Members and neighbors come from indexed rows in rank-ordered windows (32 blocks, doubling to 4,096). Payloads load lazily, in verified batches that start at 32 ranks and double with each miss. Every loaded source's store metadata must equal its indexed row (ID, project, conversation, role, bytes, digest), or the turn fails closed.
 
-Refusals are errors, never partial results: the turn's view throws `ExchangeBlockQuery.Failure` (`indexUnavailable`, `indexMismatch`, `snapshotLimit`), and the sidecar's own reads throw `ExchangeIndexError.mismatch` on malformed or inconsistent chunks. The term function and the sidecar code (`ExchangeTerms`, `ExchangeIndexStore`) depend only on store-level types, so the scripts that compile a store-only subset of sources add one file.
+Refusals are errors, never partial results: the turn's view throws `ExchangeBlockQuery.Failure` (`indexUnavailable`, which the entry point turns into the rebuild fallback, `indexMismatch`, `snapshotLimit`), and the sidecar's own reads throw `ExchangeIndexError.mismatch` on malformed or inconsistent chunks. The term function and the sidecar code (`ExchangeTerms`, `ExchangeIndexStore`) depend only on store-level types, so the scripts that compile a store-only subset of sources add one file.
 
 ### Metering
 
@@ -63,12 +65,12 @@ Each read is declared to the episode before it runs, as the rebuild's reads were
 | Append, invocation publication, recovery | Indexed after commit when the sidecar exists, else by the next catch-up |
 | Restart | The sidecar is reopened; its watermark event (ID and digest) and the event count through it must match the store, else it is reset and rebuilt |
 | Backup | Not archived; archive inventory unchanged |
-| Restore | The restored store has no sidecar; the next turn or `buildExchangeIndex()` rebuilds it (checked: identical ranking bits) |
+| Restore | The restored store has no sidecar. A turn on up to 2,000 events builds it in-turn; a larger history is served by the rebuild (up to 20,000 sources) while a background build runs, after which turns read the index (both checked, with identical selection) |
 | Deletion or suppression | Not implemented in the store. An event removed outside the store's API changes the count through the watermark, so the sidecar is reset at the next open (checked) |
 | Source changed outside the store's API | A turn that loads it finds its metadata differs from the indexed row and fails closed (checked). A changed source that the turn does not load is not detected per turn; the rebuild verified every source each turn, which is the cost this index removes |
 | Operating-system or stopword change | Term-function identity differs; the sidecar is reset |
 | Project above 200,000 sources | Fails closed (`snapshotLimit`); the rebuild's cap stays 20,000 |
-| More than 2,000 unindexed events at a turn | Fails closed (`indexUnavailable`) |
+| More than 2,000 unindexed events at a turn | Served by the in-memory rebuild with the `in_memory_fallback` label, and a background build is scheduled; above the rebuild's 20,000-source cap the turn fails closed (`snapshotLimit`), as before this change |
 
 ### Two changes shared with the rebuild
 
@@ -77,12 +79,13 @@ Each read is declared to the episode before it runs, as the rebuild's reads were
 
 ### Contracts
 
-`Sources/Boros/ExchangeIndexChecks.swift` adds 24 checks to `--retrieval-strategy-self-test` (303 in that suite):
+`Sources/Boros/ExchangeIndexChecks.swift` adds 27 checks to `--retrieval-strategy-self-test` (306 in that suite):
 
 - **Parity.** Two random synthetic corpora (220 events, interleaved conversations, leading assistant messages, same-role runs, empty and multi-page sources, canonically equivalent Unicode spellings, a second project), 10 queries with quoted anchors and 13 exclusion shapes each (suffixes, block-starting sources, middles, first sources, whole conversations, two conversations, IDs outside the project). For every pair, the two index sources must agree on frontier, source and block counts, every ranked block's members, anchor count and score bits, its neighbors, members' metadata and text, and the step 1, step 2 and step 3 packers' spans, audits and receipts at several budgets. 260 pairs.
 - **Storage.** Eager maintenance and a bulk build store identical statistics; stored statistics equal a rebuild over every source across chunk boundaries (more than three chunks per term and per block log), with growing blocks.
 - **Lifecycle.** Restart and later appends; bounded catch-up and its fail-closed limit; the project size limit; a view's frozen frontier; a foreign sidecar reset; an out-of-band change failing closed; an out-of-band removal resetting the sidecar; backup exclusion and restore rebuild; owner-only permissions.
 - **Determinism and bounds.** Repeated rankings are bit-identical; lower bounds are valid, tight within 12 tokens a page without a source time, and change no packing decision.
+- **Fallback.** A store with 2,102 events and no sidecar, and the same store restored from a backup: the first packed turn is labelled `in_memory_fallback` and selects exactly what the rebuild selects on the same recent snapshot; the background build completes with no lag; the next turn is labelled `persistent_sidecar`, selects identically, and post-commit maintenance resumes. The fallback label has the shared length. The parity checks also assert that the persistent arm was not served by a fallback.
 - **Episodes.** For each exchange policy, the ordinary entry point under a lease, both index sources on the same recent snapshot: identical evidence and conversation IDs, audits identical except the label, equal delivery-audit size, metered with no model, encoder or vector work.
 
 The existing exchange checks now expect the `persistent_sidecar` label. `scripts/test_retrieval_harness.py` and `scripts/test_retrieval_floor.py` add one contract each for the parity scorer and the floor's parity checks.
@@ -192,13 +195,13 @@ Sizes include write-ahead logs. Ingestion with and without the index ran in diff
 
 - **Bounded step 2 visits.** `exchange_adjacent` still visits ranked blocks until its budget is provably full. Block-level cost bounds kept in the block log (identifier lengths, source counts) would let it skip blocks without reading their rows, which would remove the three 100,000-event budget refusals. `exchange_packed` does not need it, and it dominates `exchange_adjacent` on recall.
 - **A shared ranking budget.** Ranking reads every posting of the query terms. With about 100,000 matched blocks it took 64 to 80 ms here; a question whose terms match most of a million-event project would scale linearly. The 200,000-source limit keeps the measured regime; beyond it, impact-ordered postings with a threshold algorithm would bound reads, at the cost of exact tie handling.
-- **Ingest cost.** Maintenance costs 0.25 to 0.6 ms per event (one sidecar transaction per committed insertion). Batching it off the commit path, or a cheaper term dictionary, would reduce it. It runs only once the index exists.
+- **Ingest cost.** Maintenance costs 0.25 to 0.6 ms per event (one sidecar transaction per committed insertion) for every store that has opted in. Batching it off the commit path, or a cheaper term dictionary, would reduce it.
 - **Deletion.** When a deletion or suppression contract exists, the sidecar is a derived copy that it must purge; today it is reset only when the store no longer matches its watermark.
 - **Answer-quality checks** for `exchange_packed` remain the gate for any default change, as before.
 
 ## Recommendation
 
-The persistent index removes the size refusal for the exchange policies without changing what they select. `exchange_packed` now delivers evidence at 100,000 events within both latency gates (0.41 s warm and 0.68 s after restart, p95), at the recall it had: development R2 69 of 90, regression 11 of 12. R2 is still below the 90 percent interim target, and there is no answer-quality evidence, so the policy stays opt-in. `exchange_adjacent` should not be preferred: it is lower on recall, and on common-term questions in very large projects it exhausts the episode budget.
+The persistent index removes the size refusal for the exchange policies without changing what they select. Stores whose history is too long to index in a turn, including restored ones, are served by the rebuild until a background build completes, so no history that the rebuild served before loses evidence. `exchange_packed` now delivers evidence at 100,000 events within both latency gates (0.41 s warm and 0.68 s after restart, p95), at the recall it had: development R2 69 of 90, regression 11 of 12. R2 is still below the 90 percent interim target, and there is no answer-quality evidence, so the policy stays opt-in. `exchange_adjacent` should not be preferred: it is lower on recall, and on common-term questions in very large projects it exhausts the episode budget.
 
 ## Running it
 
