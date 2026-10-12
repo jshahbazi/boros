@@ -27,6 +27,8 @@ Start with the [gate numbers](#gate-numbers), [next work](#6-dependency-ordered-
 
 ## 1. Current position
 
+**Reader choice on the new default, October 12, 2026:** Vertex Sonnet 5.5 against Vertex Gemini 3.8 Flash on the exact `exchange_packed` requests, three replicates, judged blind ([record](READER-CHOICE.md)). On the 72 step 3 retrieval questions Sonnet is accepted 78.7 percent against Gemini's 69.0 under the default judge (+9.7 points, interval +2.8 to +17.1, 14 better and 2 worse) and 76.4 against 66.2 with Sonnet as judge; the declared rule gives Sonnet preferred. The gain is in the preference questions (+28 to +32 points); factual and temporal questions are level. On the 20 BEAM questions Gemini is slightly ahead (10, 10, 9 against 8 or 9 per replicate; two questions, intervals ending at zero). Sonnet costs about three times as much per answer at current billing. No default changed; a hosted reader in the application needs its own egress and disclosure contracts.
+
 **`exchange_packed` answer quality, October 12, 2026:** at the user's request, with a Vertex Gemini 3.8 Flash reader instead of local Qwen, both selection arms answered the same inputs three times and the default Gemini judge graded them blind ([record](EXCHANGE-PACKED-ANSWERS.md)).
 
 - **Step 3 retrieval questions (72).** Mean per-question accept rate 57.9 percent under ordinary Send and 69.0 percent under `exchange_packed`: +11.1 points, 95 percent paired bootstrap interval +2.3 to +20.4, 16 questions better and 7 worse (sign test p = 0.093). Every cohort rose. The rule declared before generation gives **promote**.
@@ -825,6 +827,7 @@ The [official LongMemEval protocol](https://github.com/xiaowu0162/LongMemEval/tr
 | [Design repair plan](DESIGN-REPAIR-PLAN.md) | Stage-split gates (R1, R2, A1, A2, L1, L2), cohorts and dependency-ordered packages P0–P7 |
 | [Offline retrieval harness](RETRIEVAL-HARNESS.md) | P1: case-level R1/R2 on the development and regression cohorts, token parity with mlx-serve, baseline for P2 |
 | [Adversarial judging/retrieval review](reviews/JUDGING-RETRIEVAL-ADVERSARIAL-20261006.md) | Reproduced judging results, concrete primary/neighbor omissions and bounded application amendment |
+| [Reader choice](READER-CHOICE.md) | Sonnet 5.5 against Gemini 3.8 Flash on the `exchange_packed` requests, under both judges and both BEAM graders; the declared rule gives Sonnet preferred, driven by preference questions |
 | [exchange_packed answer quality](EXCHANGE-PACKED-ANSWERS.md) | R1 of the context diagnostic response: ordinary Send against `exchange_packed` with a Vertex Gemini reader on the 72 step 3 retrieval questions and the 20 BEAM questions, the declared decision rule and its promote outcome |
 | [Context diagnostic response](reviews/CONTEXT-DIAGNOSTIC-RESPONSE-20261012.md) | Mechanisms behind the OptChat long-history comparison misses, what P2 already addresses, and the ordered next work: answer-quality evidence for `exchange_packed`, a controlled presentation comparison, and the reader decision |
 | [Synthetic scaling](SCALING.md) | Declared provider-free 1k/10k/100k warm/restart tool, latency results and remaining N5 boundary |
