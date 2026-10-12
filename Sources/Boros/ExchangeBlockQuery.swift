@@ -217,21 +217,9 @@ enum ExchangeBlockQuery {
 
     // MARK: Query
 
-    /// Ported from the investigation engine's term function: case and
-    /// diacritic folding, alphanumeric runs, its stopword list.
-    static func terms(_ text: String) -> [String] {
-        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty && $0.utf8.count <= 128 && !stopwords.contains($0) }
-    }
-
-    /// Identity of `terms(_:)` for the persistent index: its version, the
-    /// stopword list and the operating system whose folding tables it used.
-    /// A stored index with another identity is rebuilt before use.
-    static var termFunctionIdentity: String {
-        "exchange-terms-v1:" + MeteredRetrieval.digest(Data(stopwords.sorted().joined(separator: " ").utf8)).prefix(16)
-            + ":" + ProcessInfo.processInfo.operatingSystemVersionString
-    }
+    /// The shared term function (`ExchangeTerms`, beside the index).
+    static func terms(_ text: String) -> [String] { ExchangeTerms.terms(text) }
+    static var termFunctionIdentity: String { ExchangeTerms.identity }
 
     /// Every content term of the question, plus up to eight complete quoted
     /// spans ("...", curly double quotes, or backticks) as anchor term sets.
@@ -572,5 +560,5 @@ enum ExchangeBlockQuery {
         return result
     }
 
-    static let stopwords = Set("a an and are as at be been being but by can could did do does doing for from had has have having he her here hers him his how i if in into is it its just me more most my no not of on or our ours please s say she should so some t tell than that the their theirs them then there these they this those through to too us was we were what when where which who why will with would you your yours about".split(separator: " ").map(String.init))
+    static var stopwords: Set<String> { ExchangeTerms.stopwords }
 }

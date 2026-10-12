@@ -3429,7 +3429,7 @@ extension MemoryStore {
 
     private func openExchangeIndexLocked(create: Bool) throws -> ExchangeIndexStore {
         if let handle = exchangeIndexHandle { return handle }
-        guard create || ExchangeIndexStore.exists(storeDirectory: directory) else { throw ExchangeBlockQuery.Failure.indexUnavailable }
+        guard create || ExchangeIndexStore.exists(storeDirectory: directory) else { throw ExchangeIndexError.unavailable }
         let handle = try ExchangeIndexStore(storeDirectory: directory)
         try handle.validateBinding(store: self)
         exchangeIndexHandle = handle

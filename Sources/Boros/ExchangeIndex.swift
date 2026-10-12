@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import CSQLite
 import Darwin
 
@@ -165,7 +166,7 @@ final class ExchangeIndexStore {
     private func loadMeta() throws {
         var values: [String: String] = [:]
         for (key, value) in try rows("SELECT key, value FROM meta", [], { (Self.text($0, 0), Self.text($0, 1)) }) { values[key] = value }
-        guard values["format"] == Self.format, values["terms"] == ExchangeBlockQuery.termFunctionIdentity,
+        guard values["format"] == Self.format, values["terms"] == ExchangeTerms.identity,
               let mark = values["watermark"].flatMap(Int.init), mark >= 0 else {
             try reset(); return
         }
@@ -176,7 +177,7 @@ final class ExchangeIndexStore {
     func reset() throws {
         try transaction {
             for table in Self.tables { try run("DELETE FROM " + table) }
-            try writeMeta(["format": Self.format, "terms": ExchangeBlockQuery.termFunctionIdentity,
+            try writeMeta(["format": Self.format, "terms": ExchangeTerms.identity,
                 "watermark": "0", "watermark_event_id": "", "watermark_digest": ""])
         }
         watermark = 0; watermarkEventID = ""; watermarkDigest = ""
@@ -274,14 +275,14 @@ final class ExchangeIndexStore {
 
         func apply(_ event: ExchangeIndexEvent) throws {
             guard event.sequence > watermark, event.byteCount >= 0, event.byteCount == event.text.utf8.count else {
-                throw ExchangeBlockQuery.Failure.indexMismatch
+                throw ExchangeIndexError.mismatch
             }
             let projectKey = Data(event.projectID.utf8), conversationKey = Data(event.conversationID.utf8)
             var project = try projectState(projectKey, event.projectID)
             var conversation: Conversation
             let newBlock: Bool
             if var known = try conversationState(conversationKey, event.conversationID) {
-                guard episodeIdentifierEqual(known.projectID, event.projectID) else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                guard episodeIdentifierEqual(known.projectID, event.projectID) else { throw ExchangeIndexError.mismatch }
                 newBlock = event.role == .human
                 if newBlock { known.openBlock = event.sequence; known.openTerms = [] }
                 conversation = known
@@ -296,7 +297,7 @@ final class ExchangeIndexStore {
             try appendBlockLog(projectKey, event.projectID, project: &project, block: block, newBlock: newBlock,
                 first: conversation.first, bytes: event.byteCount)
             var counts: [String: Int] = [:]
-            for term in ExchangeBlockQuery.terms(event.text) { counts[term, default: 0] += 1 }
+            for term in ExchangeTerms.terms(event.text) { counts[term, default: 0] += 1 }
             for (term, count) in counts {
                 let normalized = term.precomposedStringWithCanonicalMapping
                 var state = try termState(projectKey, event.projectID, normalized)
@@ -388,7 +389,7 @@ final class ExchangeIndexStore {
             ExchangeIndexCoding.append(newBlock ? 0 : 1, to: &tail.payload)
             ExchangeIndexCoding.append(ExchangeIndexCoding.zigzag(block - tail.last), to: &tail.payload)
             if newBlock {
-                guard block >= first else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                guard block >= first else { throw ExchangeIndexError.mismatch }
                 ExchangeIndexCoding.append(UInt64(block - first), to: &tail.payload)
             }
             ExchangeIndexCoding.append(UInt64(bytes), to: &tail.payload)
@@ -480,14 +481,14 @@ final class ExchangeIndexStore {
             while !reader.atEnd {
                 last += ExchangeIndexCoding.unzigzag(try reader.next())
                 let value = Int(try reader.next())
-                guard last > 0, value > 0 else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                guard last > 0, value > 0 else { throw ExchangeIndexError.mismatch }
                 frequency[last, default: 0] += value
                 count += 1
             }
-            guard count == Self.integer(statement, 0) else { throw ExchangeBlockQuery.Failure.indexMismatch }
+            guard count == Self.integer(statement, 0) else { throw ExchangeIndexError.mismatch }
             entries += count
         }
-        guard rowsRead == term.chunks, frequency.count == term.documentFrequency else { throw ExchangeBlockQuery.Failure.indexMismatch }
+        guard rowsRead == term.chunks, frequency.count == term.documentFrequency else { throw ExchangeIndexError.mismatch }
         return (frequency, rowsRead, entries)
     }
 
@@ -506,33 +507,33 @@ final class ExchangeIndexStore {
             while !reader.atEnd {
                 let kind = try reader.next()
                 last += ExchangeIndexCoding.unzigzag(try reader.next())
-                guard last > 0 else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                guard last > 0 else { throw ExchangeIndexError.mismatch }
                 if kind == 0 {
                     let offset = Int(try reader.next()), bytes = Int(try reader.next())
                     created += 1
                     if only?.contains(last) ?? true {
-                        guard blocks[last] == nil, offset <= last else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                        guard blocks[last] == nil, offset <= last else { throw ExchangeIndexError.mismatch }
                         blocks[last] = BlockAttributes(conversationFirst: last - offset, bytes: bytes, sources: 1)
                     }
                 } else if kind == 1 {
                     let bytes = Int(try reader.next())
                     if only?.contains(last) ?? true {
-                        guard var known = blocks[last] else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                        guard var known = blocks[last] else { throw ExchangeIndexError.mismatch }
                         known.bytes += bytes; known.sources += 1; blocks[last] = known
                     }
-                } else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                } else { throw ExchangeIndexError.mismatch }
                 count += 1
             }
-            guard count == Self.integer(statement, 0) else { throw ExchangeBlockQuery.Failure.indexMismatch }
+            guard count == Self.integer(statement, 0) else { throw ExchangeIndexError.mismatch }
         }
-        guard rowsRead == chunks else { throw ExchangeBlockQuery.Failure.indexMismatch }
+        guard rowsRead == chunks else { throw ExchangeIndexError.mismatch }
         return (blocks, rowsRead, created)
     }
 
     private static let sourceColumns = "sequence, event_id, project_id, conversation_id, role, byte_count, digest, block"
 
     private static func sourceRow(_ statement: OpaquePointer) throws -> SourceRow {
-        guard let role = MemoryRole(rawValue: text(statement, 4)) else { throw ExchangeBlockQuery.Failure.indexMismatch }
+        guard let role = MemoryRole(rawValue: text(statement, 4)) else { throw ExchangeIndexError.mismatch }
         return SourceRow(sequence: integer(statement, 0), eventID: text(statement, 1), projectID: text(statement, 2),
             conversationID: text(statement, 3), role: role, byteCount: integer(statement, 5), digest: text(statement, 6),
             block: integer(statement, 7))
@@ -710,6 +711,32 @@ final class ExchangeIndexStore {
     }
 }
 
+enum ExchangeIndexError: Error { case unavailable, mismatch }
+
+/// The exchange term function, shared by the index and the per-turn query
+/// (`ExchangeBlockQuery.terms`). It lives here so the store and its
+/// maintenance compile without the retrieval layer.
+enum ExchangeTerms {
+    /// Ported from the investigation engine's term function: case and
+    /// diacritic folding, alphanumeric runs, its stopword list.
+    static func terms(_ text: String) -> [String] {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty && $0.utf8.count <= 128 && !stopwords.contains($0) }
+    }
+
+    /// Identity of `terms(_:)` for a stored index: its version, the stopword
+    /// list and the operating system whose folding tables it used. A stored
+    /// index with another identity is rebuilt before use.
+    static var identity: String {
+        let words = Data(stopwords.sorted().joined(separator: " ").utf8)
+        let digest = SHA256.hash(data: words).map { String(format: "%02x", $0) }.joined()
+        return "exchange-terms-v1:" + digest.prefix(16) + ":" + ProcessInfo.processInfo.operatingSystemVersionString
+    }
+
+    static let stopwords = Set("a an and are as at be been being but by can could did do does doing for from had has have having he her here hers him his how i if in into is it its just me more most my no not of on or our ours please s say she should so some t tell than that the their theirs them then there these they this those through to too us was we were what when where which who why will with would you your yours about".split(separator: " ").map(String.init))
+}
+
 /// One committed store event as the index consumes it.
 struct ExchangeIndexEvent {
     let sequence: Int
@@ -740,7 +767,7 @@ enum ExchangeIndexCoding {
         mutating func next() throws -> UInt64 {
             var value: UInt64 = 0, shift: UInt64 = 0
             while true {
-                guard offset < bytes.count, shift <= 63 else { throw ExchangeBlockQuery.Failure.indexMismatch }
+                guard offset < bytes.count, shift <= 63 else { throw ExchangeIndexError.mismatch }
                 let byte = bytes[offset]; offset += 1
                 value |= UInt64(byte & 0x7F) << shift
                 if byte & 0x80 == 0 { return value }
