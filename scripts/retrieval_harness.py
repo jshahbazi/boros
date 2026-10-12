@@ -43,8 +43,9 @@ TEMPLATE = (ROOT / "Tests/qwen38-chat-template.jinja").read_text()
 HARNESS_SOURCE = "Tests/Evaluation/DeliveryHarness.swift"
 EXCLUDED_SOURCES = ("BonsaiPlayground.swift",)
 # A cached baseline store is reused only while the code that writes stores and
-# the semantic sidecar is unchanged. Retrieval and packing changes reuse it.
-INGESTION_SOURCES = ("MemoryStore.swift", "SemanticIndex.swift", "BackgroundIndexBudget.swift",
+# the semantic and exchange index sidecars is unchanged. Retrieval and packing
+# changes reuse it.
+INGESTION_SOURCES = ("MemoryStore.swift", "SemanticIndex.swift", "ExchangeIndex.swift", "BackgroundIndexBudget.swift",
     "BackgroundIndexWorker.swift", "BackgroundIndexJournal.swift", "EventSourceTime.swift", "SourceTimeSchema.swift",
     "EpisodeAccountingJournal.swift", "ContextComponentJournal.swift", "AuthoritySchemaFive.swift",
     "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "AuthoritySchemaNine.swift")
