@@ -70,6 +70,20 @@ class Comparison(unittest.TestCase):
         run["exchange_index_parity"]["exchange_packed"]["audit"] = 12
         self.assertEqual(check(run)[1], [])
 
+    def test_ordinary_send_must_equal_exchange_packed_in_every_compared_history(self):
+        run = report(hybrid=(8, 8, 14, 14), lexical=(9, 9, 15, 15))
+        run["ordinary_send_equivalence"] = {"compared": 12, "histories": 12, "delivery": 12, "candidates": 12,
+                                            "tokens": 11, "policy_recorded": 12}
+        checks, failed, notes = check(run)
+        self.assertEqual(checks, 1 + 2 * (2 + 4) + 4)
+        self.assertEqual(failed, ["ordinary_send.equivalence.tokens"])
+        self.assertIn("exchange_packed", notes[0])
+        run["ordinary_send_equivalence"]["tokens"] = 12
+        self.assertEqual(check(run)[1], [])
+        run["ordinary_send_equivalence"] = {"compared": 0, "histories": 12, "delivery": 0, "candidates": 0,
+                                            "tokens": 0, "policy_recorded": 0}
+        self.assertEqual(len(check(run)[1]), 4)
+
     def test_arm_in_floor_but_missing_from_run_fails(self):
         _, failed, _ = check(report(hybrid=(8, 8, 14, 14)))
         self.assertEqual(failed, ["lexical.missing_arm"])

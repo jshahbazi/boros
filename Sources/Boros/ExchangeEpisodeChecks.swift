@@ -2,11 +2,14 @@ import Foundation
 import CSQLite
 import Darwin
 
-/// Journal contract for the explicit P2 exchange policies. Each case runs the
-/// actual component preparation against the declared synthetic tokenizer,
-/// records the prepared request as a cancelled invocation, and validates it
-/// with the unchanged `ContextComponentJournal.validate` and episode journal
-/// validators. Only fixed synthetic sources enter the store.
+/// Journal contract for the P2 exchange policies. Each case runs the actual
+/// component preparation against the declared synthetic tokenizer, records
+/// the prepared request as a cancelled invocation, and validates it with the
+/// unchanged `ContextComponentJournal.validate` and episode journal
+/// validators. The last case freezes the ordinary Send default on a store
+/// whose unindexed project is above the in-memory rebuild's limit, so the
+/// turn is served by the labelled v1 lexical fallback. Only fixed synthetic
+/// sources enter the store.
 enum ExchangeEpisodeChecks {
     static func runIntegration(baseURL: String, completion: @escaping ([String: Bool]) -> Void) {
         let suite = Suite(baseURL: baseURL, completion: completion)
@@ -15,7 +18,8 @@ enum ExchangeEpisodeChecks {
 
     private static let policies: [(String, ContextComponentPolicy)] = [
         ("exchange_lexical", .selectedQwenExchange), ("exchange_adjacent", .selectedQwenExchangeAdjacent),
-        ("exchange_packed", .selectedQwenExchangePacked)]
+        ("exchange_packed", .selectedQwenExchangePacked), (defaultFallbackCase, .currentSelectedQwen)]
+    static let defaultFallbackCase = "default_v1_lexical_fallback"
 
     private final class Suite {
         let baseURL: String, completion: ([String: Bool]) -> Void
@@ -59,6 +63,23 @@ enum ExchangeEpisodeChecks {
                 .appendingPathComponent("boros-exchange-episode-" + UUID().uuidString)
             store = try MemoryStore(directory: directory)
             chat = try store.createConversation(projectID: "synthetic-exchange-episode", title: "Synthetic exchange episode")
+            if name == ExchangeEpisodeChecks.defaultFallbackCase {
+                // More unindexed events than a turn indexes itself, and more
+                // bytes than the in-memory rebuild loads; no sidecar exists.
+                let filler = try store.createConversation(projectID: chat.projectID, title: "Synthetic exchange filler")
+                for index in 0..<(ExchangeIndexStore.maximumTurnCatchUp + 10) {
+                    _ = try store.append(conversationID: filler.id, role: index % 2 == 0 ? .human : .assistant,
+                        text: "Synthetic filler \(index)", status: .complete, turnID: "exchange-filler-\(index)",
+                        eventID: "exchange-filler-\(index)")
+                }
+                let large = String(repeating: ". ", count: 2_000_000)
+                var bytes = 0, index = 0
+                while bytes <= ExchangeBlockQuery.maximumSourceBytes {
+                    _ = try store.append(conversationID: filler.id, role: .assistant, text: large, status: .complete,
+                        turnID: "exchange-bulk-\(index)", eventID: "exchange-bulk-\(index)")
+                    bytes += large.utf8.count; index += 1
+                }
+            }
             for block in 0..<4 {
                 let archive = try store.createConversation(projectID: chat.projectID, title: "Synthetic exchange archive \(block)")
                 let texts: [(MemoryRole, String)] = [(.assistant, "Synthetic opening note \(block)"),
@@ -108,21 +129,37 @@ enum ExchangeEpisodeChecks {
                 guard let proof = prepared.receipt.componentProof else { throw ProviderAdmissionError.countMismatch }
                 let context = try JSONSerialization.jsonObject(with: prepared.snapshot.deliveryAudit()) as? [String: Any] ?? [:]
                 let retrieval = context["retrieval"] as? [String: Any] ?? [:]
-                checks[prefix + "_frozen_policy_counted_and_delivered"] = try state.limits.componentPolicy == policy
-                    && proof.policyVersion == policy.version && proof.reductionVersion == policy.reductionVersion
-                    && proof.policyDigest == EndpointRequest.digest(try policy.canonicalData())
-                    && !prepared.snapshot.evidence.isEmpty && proof.evidence.tokens <= policy.evidenceTokens
-                    && retrieval["exchange_query"] is [String: Any] && retrieval["mode"] as? String == name
-                    && prepared.snapshot.selectionAudit?.version == "context-exchange-v1"
-                // The synthetic tokenizer counts 5,000 tokens per historical
-                // source, so the 12,000-token cap forces counted reductions.
-                let reduced = prepared.snapshot.selectionAudit?.evidenceTokenExcludedCount ?? 0
-                checks[prefix + "_counted_reduction_removes_single_spans"] = reduced > 0 && prepared.snapshot.evidence.count == 2
-                if policy.packsExchangeValueDensity {
-                    let receipts = (retrieval["exchange_query"] as? [String: Any])?["reduction_receipts"] as? [[Any]] ?? []
-                    checks[prefix + "_every_counted_removal_has_a_receipt"] = receipts.count == reduced
-                        && receipts.allSatisfy { $0.count == 3 && $0[2] as? String == "token" }
-                        && retrieval["selection_trace"] == nil
+                if name == ExchangeEpisodeChecks.defaultFallbackCase {
+                    let fallback = retrieval["exchange_fallback"] as? [String: Any]
+                    checks[prefix + "_frozen_default_counted_and_delivered_by_labelled_v1_selection"] = try policy == .selectedQwenExchangePacked
+                        && state.limits.componentPolicy == policy
+                        && proof.policyVersion == policy.version && proof.reductionVersion == policy.reductionVersion
+                        && proof.policyDigest == EndpointRequest.digest(try policy.canonicalData())
+                        && !prepared.snapshot.evidence.isEmpty && proof.evidence.tokens <= policy.evidenceTokens
+                        && retrieval["mode"] as? String == ExchangeBlockQuery.lexicalFallbackMode
+                        && fallback?["reason"] as? String == ExchangeBlockQuery.unindexedLimitFallbackReason
+                        && fallback?["frozen_policy"] as? String == policy.version
+                        && retrieval["exchange_query"] == nil && retrieval["manifest_id"] == nil
+                        && prepared.snapshot.selectionAudit?.version == ContextComponentPolicy.exchangeSelectionAuditVersion
+                    _ = store.waitForExchangeIndexBuild()
+                    checks[prefix + "_turn_scheduled_the_background_build"] = store.exchangeIndexExists && store.exchangeIndexLag() == 0
+                } else {
+                    checks[prefix + "_frozen_policy_counted_and_delivered"] = try state.limits.componentPolicy == policy
+                        && proof.policyVersion == policy.version && proof.reductionVersion == policy.reductionVersion
+                        && proof.policyDigest == EndpointRequest.digest(try policy.canonicalData())
+                        && !prepared.snapshot.evidence.isEmpty && proof.evidence.tokens <= policy.evidenceTokens
+                        && retrieval["exchange_query"] is [String: Any] && retrieval["mode"] as? String == name
+                        && prepared.snapshot.selectionAudit?.version == "context-exchange-v1"
+                    // The synthetic tokenizer counts 5,000 tokens per historical
+                    // source, so the 12,000-token cap forces counted reductions.
+                    let reduced = prepared.snapshot.selectionAudit?.evidenceTokenExcludedCount ?? 0
+                    checks[prefix + "_counted_reduction_removes_single_spans"] = reduced > 0 && prepared.snapshot.evidence.count == 2
+                    if policy.packsExchangeValueDensity {
+                        let receipts = (retrieval["exchange_query"] as? [String: Any])?["reduction_receipts"] as? [[Any]] ?? []
+                        checks[prefix + "_every_counted_removal_has_a_receipt"] = receipts.count == reduced
+                            && receipts.allSatisfy { $0.count == 3 && $0[2] as? String == "token" }
+                            && retrieval["selection_trace"] == nil
+                    }
                 }
                 stage = "invocation"
                 let work = try lease.prepare(kind: .answer,

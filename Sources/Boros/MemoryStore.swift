@@ -3478,8 +3478,10 @@ extension MemoryStore {
     /// any episode, in owner-locked batches of 2,000 events (about 0.1 s of
     /// lock each at the measured rate). Called when an exchange-policy turn
     /// finds the index unavailable, so stores that never use an exchange
-    /// policy never build or maintain one. Coalesces while a build runs; a
-    /// failed build is retried by the next such turn.
+    /// policy never build or maintain one. Since exchange_packed became the
+    /// ordinary Send default (October 12, 2026), that is the first ordinary
+    /// Send of any store with more than 2,000 unindexed events. Coalesces
+    /// while a build runs; a failed build is retried by the next such turn.
     func scheduleExchangeIndexBuild() {
         let start: Bool = (try? locked { () -> Bool in
             guard !exchangeIndexBuildScheduled else { return false }

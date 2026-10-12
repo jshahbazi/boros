@@ -91,13 +91,17 @@ enum NeighborhoodExpansionChecks {
             "neighborhood_versioned_audit_contains_no_source_payload": bidirectional.audit["version"] as? String == BoundedNeighborhoodExpansion.version
                 && [human, prior, assistant].allSatisfy { auditBytes.range(of: Data($0.text.utf8)) == nil }
         ]
+        // The ordinary default moved to exchange_packed on October 12, 2026
+        // (measured answer quality); v1/16 stays exact and the bounded
+        // neighborhood is neither default.
         let defaultPolicy = try ContextComponentPolicy.currentSelectedQwen.validated()
-        let defaultPolicyBytes = try defaultPolicy.canonicalData()
-        let historicalPolicyBytes = try ContextComponentPolicy.selectedQwen.canonicalData()
-        result["neighborhood_default_remains_exact_historical_v1_sixteen_spans_pending_answer_quality_evidence"] =
-            defaultPolicy == .selectedQwen && defaultPolicyBytes == historicalPolicyBytes
-            && defaultPolicy.version == "selected-model-context-components-v1" && defaultPolicy.evidenceSpans == 16
-            && defaultPolicy.reductionVersion == "whole-source-geometric-v1" && !defaultPolicy.usesBoundedNeighborhood
+        let historicalPolicy = try ContextComponentPolicy.selectedQwen.validated()
+        let historicalRoundTrip = try JSONDecoder().decode(ContextComponentPolicy.self, from: historicalPolicy.canonicalData())
+        result["neighborhood_v1_remains_exact_historical_sixteen_spans_and_default_is_exchange_packed"] =
+            defaultPolicy == .selectedQwenExchangePacked && !defaultPolicy.usesBoundedNeighborhood
+            && historicalRoundTrip == historicalPolicy
+            && historicalPolicy.version == "selected-model-context-components-v1" && historicalPolicy.evidenceSpans == 16
+            && historicalPolicy.reductionVersion == "whole-source-geometric-v1" && !historicalPolicy.usesBoundedNeighborhood
         let experimentalPolicy = try ContextComponentPolicy.selectedQwenNeighborhood.validated()
         result["neighborhood_explicit_v2_policy_remains_available_without_changing_default"] =
             experimentalPolicy.version == "selected-model-context-components-v2" && experimentalPolicy.evidenceSpans == 48

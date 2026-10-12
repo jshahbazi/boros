@@ -193,6 +193,33 @@ class Contracts(unittest.TestCase):
         self.assertEqual(summary["exchange_packed"]["evidence"], 0)
         self.assertTrue(set(harness.PARITY_ARMS) <= set(harness.ARMS))
 
+    def test_ordinary_send_equivalence_is_with_the_default_exchange_packed_arm(self):
+        def attempt_with(mode, policy, evidence, received=False, extra=None):
+            return {"preparation_completed": True, "recent_source_ids": ["r1"], "prompt_tokens": 10,
+                    "components": {"evidence_tokens": 5, "policyVersion": policy}, "evidence": evidence,
+                    "retrieval": {"mode": mode}, "preparation_received_semantic_index": received,
+                    "exchange": {"index": harness.PERSISTENT_INDEX_LABEL, "candidates": [[0, []]], **(extra or {})}}
+        evidence = [{"event_id": "e1", "offset": 0, "bytes": 4}]
+        packed = attempt_with("exchange_packed", harness.ORDINARY_SEND_POLICY, evidence)
+        ordinary = attempt_with("exchange_packed", harness.ORDINARY_SEND_POLICY, evidence)
+        # The v1 lexical arm no longer defines ordinary Send.
+        lexical = {"preparation_completed": True, "recent_source_ids": ["r1"], "evidence": evidence,
+                   "retrieval": {"mode": "lexical", "semantic_retrieval": "disabled_by_policy"}}
+        self.assertEqual(harness.ordinary_send_equivalence({"ordinary_send": ordinary, "exchange_packed": packed, "lexical": lexical}),
+                         {key: True for key in harness.ORDINARY_SEND_EQUIVALENCE_KEYS})
+        self.assertIsNone(harness.ordinary_send_equivalence({"ordinary_send": ordinary, "lexical": lexical}))
+        v1 = attempt_with("lexical", "selected-model-context-components-v1", evidence)
+        self.assertFalse(harness.ordinary_send_equivalence({"ordinary_send": v1, "exchange_packed": packed})["policy_recorded"])
+        received = attempt_with("exchange_packed", harness.ORDINARY_SEND_POLICY, evidence, received=True)
+        self.assertFalse(harness.ordinary_send_equivalence({"ordinary_send": received, "exchange_packed": packed})["policy_recorded"])
+        reordered = attempt_with("exchange_packed", harness.ORDINARY_SEND_POLICY, evidence + [{"event_id": "e2", "offset": 0, "bytes": 1}])
+        other = attempt_with("exchange_packed", harness.ORDINARY_SEND_POLICY, [{"event_id": "e2", "offset": 0, "bytes": 1}] + evidence)
+        self.assertFalse(harness.ordinary_send_equivalence({"ordinary_send": reordered, "exchange_packed": other})["delivery"])
+        audited = attempt_with("exchange_packed", harness.ORDINARY_SEND_POLICY, evidence, extra={"matched_block_count": 2})
+        self.assertFalse(harness.ordinary_send_equivalence({"ordinary_send": audited, "exchange_packed": packed})["candidates"])
+        self.assertEqual(harness.ORDINARY_SEND_EQUIVALENT_ARM, "exchange_packed")
+        self.assertIn(harness.ORDINARY_SEND_ARM, harness.ARMS)
+
 
 if __name__ == "__main__":
     result = unittest.TextTestRunner(stream=io.StringIO()).run(unittest.defaultTestLoader.loadTestsFromTestCase(Contracts))

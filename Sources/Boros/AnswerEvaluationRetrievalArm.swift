@@ -2,10 +2,15 @@ import Foundation
 
 /// Retrieval configuration of one `--answer-evaluation` attempt.
 ///
-/// Without `--retrieval-arm`, each attempt runs its declared strategy exactly
-/// as before: `recent_only`, or `hybrid` (explicit fused retrieval: the runner
-/// builds the history's semantic index before acceptance and passes it with
-/// the coordinator's default `.enabled` policy).
+/// Every attempt freezes the coordinator's component policy unless
+/// `--component-policy` pins one: `exchange_packed` since October 12, 2026
+/// (`ContextComponentPolicy.currentSelectedQwen`). Without `--retrieval-arm`,
+/// each attempt runs its declared strategy: `recent_only`, or `hybrid` (the
+/// runner builds the history's semantic index before acceptance and passes
+/// it with the coordinator's default `.enabled` policy). Under the default
+/// exchange policy a `hybrid` attempt selects through the exchange index and
+/// does not read that semantic index; fused retrieval needs the pinned
+/// `--component-policy selected-model-context-components-v1`.
 ///
 /// `--retrieval-arm ordinary_send` runs each declared `hybrid` attempt in the
 /// ordinary Send configuration of the selected-Qwen GUI path
@@ -13,9 +18,11 @@ import Foundation
 /// host obtains its index through `ApplicationSemanticMaintenance.openIndex`,
 /// which opens nothing under `SemanticRetrievalPolicy.ordinarySend`, and the
 /// coordinator receives `semanticRetrieval: .ordinarySend`. No semantic index
-/// is built or passed, selection is lexical, and the retrieval audit records
-/// `"semantic_retrieval": "disabled_by_policy"`. This is the retrieval harness
-/// `ordinary_send` arm, which selects exactly what its `lexical` arm selects.
+/// is built or passed. Under the default policy selection is exchange_packed
+/// (the retrieval harness `ordinary_send` arm, which selects exactly what its
+/// `exchange_packed` arm selects); under a pinned v1 policy it is lexical,
+/// the audit records `"semantic_retrieval": "disabled_by_policy"`, and it
+/// selects what the harness `lexical` arm selects.
 /// Declared `recent_only` attempts are unchanged by the flag.
 enum AnswerEvaluationRetrievalArm: String, CaseIterable {
     case recentOnly = "recent_only"

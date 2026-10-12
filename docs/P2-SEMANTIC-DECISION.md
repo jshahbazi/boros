@@ -216,6 +216,8 @@ The two fusion wins point at P2 step 3, wider windows and cost-aware packing, ra
 
 **User decision, October 8, 2026.** The user accepted recommendations 1 and 4: semantic retrieval is off for ordinary Send, and the application no longer runs background semantic indexing. This section describes **implemented** code and **measured** confirmation; the earlier sections remain the evidence.
 
+**Update, October 12, 2026 (implemented).** The semantic decision still holds: ordinary Send receives no semantic index, and nothing indexes semantically in the background. The lexical selection described below was selected-Qwen GUI Send's selection from October 8 to October 12, 2026. Since then that path freezes the `exchange_packed` component policy ([evidence](EXCHANGE-PACKED-ANSWERS.md), [implementation](IMPLEMENTATION.md#retrieval-and-context-boundary)). Its exchange selection has no semantic stage and records `"mode": "exchange_packed"`, not the `disabled_by_policy` field, and shows no status notice. Native-profile GUI Send keeps the lexical path below unchanged, and a selected-Qwen turn under a pinned v1 policy still records `disabled_by_policy`. The harness `ordinary_send` arm is now compared with `exchange_packed`; `lexical` stays the v1/16 arm.
+
 ### What changed (implemented)
 
 - **One named policy.** `SemanticRetrievalPolicy.ordinarySend` in `Sources/Boros/SemanticRetrievalPolicy.swift` is `.disabledByPolicy`. It governs both decisions below. Setting it to `.enabled` restores fused retrieval on ordinary Send and background semantic maintenance together.

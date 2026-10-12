@@ -82,7 +82,20 @@ enum DeliveryHarness {
         return (end - question.prompt.utf8.count)..<end
     }
     static func project(_ id: String) -> String { "retrieval-harness:" + id }
-    /// P2 arms: explicit experimental exchange policies, no semantic index.
+    /// The episode limits each arm passes to the coordinator. `ordinary_send`
+    /// passes nil, so the coordinator freezes the ordinary Send default
+    /// exactly as GUI Send does (`currentSelectedQwen`: exchange_packed since
+    /// October 12, 2026). Every other arm pins its policy: the P2 arms their
+    /// exchange policy, and the strategy arms (`recent_only`, `lexical`,
+    /// `hybrid`, `global_*`, the `declared_sources` control) v1/16, under
+    /// which their recorded numbers and floors were measured.
+    static func armLimits(_ arm: String) -> EpisodeLimits? {
+        if arm == "ordinary_send" { return nil }
+        if let exchange = exchangeLimits(arm) { return exchange }
+        var limits = EpisodeLimits(); limits.componentPolicy = .selectedQwen
+        return limits
+    }
+    /// P2 arms: explicit exchange policies, no semantic index.
     static func exchangeLimits(_ arm: String) -> EpisodeLimits? {
         var limits = EpisodeLimits()
         switch arm {
@@ -285,7 +298,7 @@ enum DeliveryHarness {
             let value = AnswerAttemptCoordinator(store: owner, conversationID: conversationID,
                 projectID: project(question.project_id), prompt: effectivePrompt(question),
                 settings: input.configuration.settings, semanticIndex: semantic,
-                retrievalStrategy: arm == "recent_only" ? .recentOnly : .hybrid, limits: exchangeLimits(arm),
+                retrievalStrategy: arm == "recent_only" ? .recentOnly : .hybrid, limits: armLimits(arm),
                 lexicalQueryUTF8Range: queryRange(question), semanticQueryUTF8Range: queryRange(question),
                 evidenceSourceIDs: arm == "declared_sources" ? input.declared_source_ids : nil,
                 semanticSearch: globalArms[arm].map { SemanticSearchSelection($0) } ?? .shipped,

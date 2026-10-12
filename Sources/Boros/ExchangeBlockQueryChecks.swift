@@ -12,14 +12,20 @@ enum ExchangeBlockQueryChecks {
     private static func checks() throws -> [String: Bool] {
         var result: [String: Bool] = [:]
 
-        // Policies: the shipped default is unchanged and the new ones are explicit.
-        let v1 = try ContextComponentPolicy.currentSelectedQwen.validated()
+        // Policies: the ordinary default is exchange_packed (user decision,
+        // October 12, 2026); v1/16 stays exact and selectable, and the step 1
+        // and 2 policies stay explicit.
+        let v1 = try ContextComponentPolicy.selectedQwen.validated()
+        let current = try ContextComponentPolicy.currentSelectedQwen.validated()
         let exchange = try ContextComponentPolicy.selectedQwenExchange.validated()
         let adjacent = try ContextComponentPolicy.selectedQwenExchangeAdjacent.validated()
-        result["exchange_query_default_policy_remains_exact_v1_sixteen_spans"] = v1 == .selectedQwen
+        let v1RoundTrip = try JSONDecoder().decode(ContextComponentPolicy.self, from: v1.canonicalData())
+        result["exchange_query_default_is_exchange_packed_and_v1_sixteen_spans_remains_exact"] = current == .selectedQwenExchangePacked
+            && current.version == "selected-model-context-components-v3-exchange-packed" && current.packsExchangeValueDensity
             && v1.version == "selected-model-context-components-v1" && v1.evidenceSpans == 16
             && v1.reductionVersion == "whole-source-geometric-v1" && !v1.usesExchangeQuery
             && !v1.packsAdjacentExchanges && v1.selectionAuditVersion == "context-geometric-v1"
+            && v1RoundTrip == v1
         result["exchange_query_policies_are_explicit_versioned_and_distinct"] = exchange.usesExchangeQuery && adjacent.usesExchangeQuery
             && !exchange.packsAdjacentExchanges && adjacent.packsAdjacentExchanges
             && exchange != adjacent && exchange != v1 && adjacent != v1
@@ -118,10 +124,10 @@ enum ExchangeBlockQueryChecks {
         let mismatchRefused = (try? ExchangeBlockQuery.prepareEvidence(recent: refusalRecent, store: fixture.store,
             conversationID: fixture.requests.id, projectID: fixture.project, prompt: prompt, excludingEventID: refusalID,
             episodeLease: refusalLease, lexicalQueryUTF8Range: nil, componentPolicy: .selectedQwenExchangeAdjacent)) == nil
-        let defaultRefused = (try? ExchangeBlockQuery.prepareEvidence(recent: refusalRecent, store: fixture.store,
+        let v1PolicyRefused = (try? ExchangeBlockQuery.prepareEvidence(recent: refusalRecent, store: fixture.store,
             conversationID: fixture.requests.id, projectID: fixture.project, prompt: prompt, excludingEventID: refusalID,
             episodeLease: refusalLease, lexicalQueryUTF8Range: nil, componentPolicy: .selectedQwen)) == nil
-        result["exchange_query_entry_points_refuse_mismatched_policies"] = v1Refused && mismatchRefused && defaultRefused
+        result["exchange_query_entry_points_refuse_mismatched_policies"] = v1Refused && mismatchRefused && v1PolicyRefused
         let delivered = step1.snapshot.evidence.map(\.eventID)
         let retrieval = try JSONSerialization.jsonObject(with: step1.snapshot.retrievalAuditJSON ?? Data()) as? [String: Any] ?? [:]
         let exchangeAudit = retrieval["exchange_query"] as? [String: Any] ?? [:]
@@ -224,11 +230,11 @@ enum ExchangeBlockQueryChecks {
         var result: [String: Bool] = [:]
         let packed = try ContextComponentPolicy.selectedQwenExchangePacked.validated()
         let decoded = try JSONDecoder().decode(ContextComponentPolicy.self, from: packed.canonicalData())
-        result["exchange_packed_policy_is_explicit_versioned_and_not_default"] = packed.usesExchangeQuery
+        result["exchange_packed_policy_is_versioned_and_the_ordinary_default"] = packed.usesExchangeQuery
             && packed.packsAdjacentExchanges && packed.packsExchangeValueDensity && decoded == packed
             && packed.version == "selected-model-context-components-v3-exchange-packed" && packed.evidenceSpans == 48
             && packed.evidenceTokens == 12_000 && packed.selectionAuditVersion == "context-exchange-v1"
-            && packed != .selectedQwenExchangeAdjacent && ContextComponentPolicy.currentSelectedQwen == .selectedQwen
+            && packed != .selectedQwenExchangeAdjacent && ContextComponentPolicy.currentSelectedQwen == packed
             && !ContextComponentPolicy.selectedQwenExchangeAdjacent.packsExchangeValueDensity
         result["exchange_packed_parameters_are_declared"] = Packing.candidateBlockDepth == 32 && Packing.memberWeight == 1.0
             && Packing.neighborWeight == 0.5 && Packing.admissionHeadroomBytes == 5_120

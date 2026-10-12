@@ -87,7 +87,8 @@ def measured(report):
             denominators[arm] = {"cases": int(values["r2_delivered_recall"]["cases"]),
                                  "turns": int(values["turn_delivered_whole"]["cases"])}
         return {"manifest_sha256": report["cohort"]["manifest_sha256"], "arms": arms, "denominators": denominators,
-                "exchange_index_parity": report.get("exchange_index_parity")}
+                "exchange_index_parity": report.get("exchange_index_parity"),
+                "ordinary_send_equivalence": report.get("ordinary_send_equivalence")}
     except (KeyError, TypeError, ValueError):
         raise FloorError("harness report has an unexpected shape")
 
@@ -124,6 +125,17 @@ def compare(floor, run):
             if parity["compared"] == 0 or parity[key] != parity["compared"]:
                 failed.append(f"{arm}.exchange_index_parity.{key}")
                 notes.append(f"{arm}: persistent index {key} matched the rebuild in {parity[key]} of {parity['compared']} histories")
+    # Ordinary Send freezes the default component policy, exchange_packed since
+    # October 12, 2026: every compared history must deliver, rank, count and
+    # record exactly what the exchange_packed arm does.
+    equivalence = run.get("ordinary_send_equivalence")
+    if equivalence is not None:
+        for key in harness.ORDINARY_SEND_EQUIVALENCE_KEYS:
+            checks += 1
+            if not equivalence.get("compared") or equivalence.get(key) != equivalence["compared"]:
+                failed.append(f"ordinary_send.equivalence.{key}")
+                notes.append(f"ordinary_send: {key} matched {harness.ORDINARY_SEND_EQUIVALENT_ARM} in "
+                             f"{equivalence.get(key)} of {equivalence.get('compared')} histories")
     for arm in sorted(set(run["arms"]) - set(floor["arms"])):
         notes.append(f"{arm}: arm has no floor entry (reported, not failed): "
                      + ", ".join(f"{name}={number}" for name, number in run["arms"][arm].items()))
