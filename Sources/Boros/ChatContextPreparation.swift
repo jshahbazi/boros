@@ -147,64 +147,19 @@ enum ChatContextPreparation {
             if retrievalStrategy == .recentOnly {
                 return try recentOnlySnapshot(recent)
             }
-            // Explicit experimental P2 exchange policies select through
-            // ExchangeBlockQuery; this ranked path never runs under them.
+            // The P2 exchange policies, including the ordinary Send default,
+            // select through ExchangeBlockQuery; this ranked path never runs
+            // under them (their v1 fallback calls v1LexicalEvidence).
             guard !componentPolicy.usesExchangeQuery else { throw ContextError.sourceMismatch }
             let formulation = HistoricalQueryFormulation.formulate(lexicalInput)
             let lexical = formulation.query
             let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
             func lexicalSnapshot(fallback: Bool) throws -> ContextSnapshot {
-                let hits: [MemoryHit]
-                var raw: MeteredLexicalReport?
-                var frontier = 0
-                if let lexical {
-                    if let episodeLease {
-                        let report = try MeteredRetrieval.lexicalSearch(store: store, query: lexical, projectID: projectID,
-                            limit: ContextAssembler.componentMaximumEvidenceSpans, matching: .anyTerm,
-                            excludingSourceIDs: excluded, lease: episodeLease, nested: true)
-                        try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
-                        raw = report; hits = report.hits; frontier = report.sourceFrontier
-                    } else {
-                        frontier = try store.sourceFrontier(projectID: projectID)
-                        hits = try store.search(query: lexical, projectID: projectID, limit: ContextAssembler.componentMaximumEvidenceSpans,
-                            matching: .anyTerm, throughSequence: frontier, excludingSourceIDs: excluded)
-                    }
-                } else { hits = [] }
-                let completed = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: projectID,
-                    primaryHits: hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
-                    episodeLease: episodeLease, operationIsNested: true)
-                let expanded = try expandPrimaries(store: store, projectID: projectID, hits: completed.hits,
-                    frontier: frontier, exclusions: excluded, lease: episodeLease, policy: componentPolicy)
-                var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
-                    projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
-                    maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
-                    componentPolicy: componentPolicy, historicalProvenance: componentPolicy.usesBoundedNeighborhood
-                        ? BoundedNeighborhoodExpansion.provenance(for: expanded) : nil)
-                var fields: [String: Any] = ["mode": fallback ? "lexical_fallback" : "lexical", "semantic_available": false]
-                fields["primary_completion"] = completed.audit
-                fields["exchange_expansion"] = expanded.audit
-                if fallback { fields["failure"] = "semantic_search_failed" }
-                if semanticRetrieval == .disabledByPolicy {
-                    fields[SemanticRetrievalPolicy.auditField] = SemanticRetrievalPolicy.disabledByPolicy.rawValue
-                }
-                if let raw {
-                    fields["raw_work_version"] = "raw_work_v1"; fields["source_frontier"] = raw.sourceFrontier
-                    fields["raw_work_charged"] = raw.rawWorkCharged; fields["inspected_candidates"] = raw.inspectedCandidates
-                    fields["candidate_window_full"] = raw.candidateWindowFull; fields["candidate_window_complete"] = raw.candidateWindowComplete
-                    fields["continuation_available"] = raw.continuation != nil
-                }
-                try appendAudit(to: &result, fields: fields)
-                try appendQueryTrace(to: &result, formulation: formulation, prompt: prompt, input: lexicalInput, range: lexicalQueryUTF8Range,
-                    semanticInput: semanticInput, semanticRange: semanticQueryUTF8Range)
-                // Under the ordinary Send policy lexical selection is intended,
-                // so only a bounded candidate window warrants a notice.
-                result.retrievalNotice = fallback ? "Semantic recall failed; archive recall used lexical search."
-                    : semanticRetrieval == .disabledByPolicy ? nil
-                    : "Archive recall used lexical search; semantic recall is unavailable."
-                if let raw, !raw.candidateWindowComplete || raw.candidateWindowFull {
-                    result.retrievalNotice = "Archive recall inspected a bounded lexical candidate window; additional evidence may remain."
-                }
-                return result
+                try lexicalEvidence(recent: recent, store: store, conversationID: conversationID, projectID: projectID,
+                    prompt: prompt, excludingEventID: excludingEventID, episodeLease: episodeLease, formulation: formulation,
+                    lexicalInput: lexicalInput, lexicalQueryUTF8Range: lexicalQueryUTF8Range, semanticInput: semanticInput,
+                    semanticQueryUTF8Range: semanticQueryUTF8Range, componentPolicy: componentPolicy,
+                    semanticRetrieval: semanticRetrieval, fallback: fallback)
             }
             guard let semanticIndex = admittedIndex else { return try lexicalSnapshot(fallback: false) }
             let report: SemanticSearchReport
@@ -275,6 +230,94 @@ enum ChatContextPreparation {
             }
             return result
         }
+    }
+
+    /// The v1 lexical selection: scoped any-term search over the bounded
+    /// query, short-primary completion and the policy's expansion, assembled
+    /// under `componentPolicy`. Ordinary v1 Send runs it through
+    /// `prepareEvidence`; an exchange-policy turn that the exchange index
+    /// cannot serve runs it through `v1LexicalEvidence`. The caller holds one
+    /// metered operation.
+    private static func lexicalEvidence(recent: ContextSnapshot, store: MemoryStore, conversationID: String,
+        projectID: String, prompt: String, excludingEventID: String, episodeLease: EpisodeLease?,
+        formulation: HistoricalQueryFormulation.Result, lexicalInput: String, lexicalQueryUTF8Range: Range<Int>?,
+        semanticInput: String, semanticQueryUTF8Range: Range<Int>?, componentPolicy: ContextComponentPolicy,
+        semanticRetrieval: SemanticRetrievalPolicy, fallback: Bool) throws -> ContextSnapshot {
+        let lexical = formulation.query
+        let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
+        let hits: [MemoryHit]
+        var raw: MeteredLexicalReport?
+        var frontier = 0
+        if let lexical {
+            if let episodeLease {
+                let report = try MeteredRetrieval.lexicalSearch(store: store, query: lexical, projectID: projectID,
+                    limit: ContextAssembler.componentMaximumEvidenceSpans, matching: .anyTerm,
+                    excludingSourceIDs: excluded, lease: episodeLease, nested: true)
+                try MeteredRetrieval.requireCompleteReadCoverage(lease: episodeLease, resourceLimited: report.continuation != nil)
+                raw = report; hits = report.hits; frontier = report.sourceFrontier
+            } else {
+                frontier = try store.sourceFrontier(projectID: projectID)
+                hits = try store.search(query: lexical, projectID: projectID, limit: ContextAssembler.componentMaximumEvidenceSpans,
+                    matching: .anyTerm, throughSequence: frontier, excludingSourceIDs: excluded)
+            }
+        } else { hits = [] }
+        let completed = try MeteredExchangeExpansion.completeShortPrimaries(store: store, projectID: projectID,
+            primaryHits: hits, sourceFrontier: frontier, excludingSourceIDs: excluded,
+            episodeLease: episodeLease, operationIsNested: true)
+        let expanded = try expandPrimaries(store: store, projectID: projectID, hits: completed.hits,
+            frontier: frontier, exclusions: excluded, lease: episodeLease, policy: componentPolicy)
+        var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
+            projectID: projectID, excludingEventID: excludingEventID, historicalHits: expanded.hits,
+            maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
+            componentPolicy: componentPolicy, historicalProvenance: componentPolicy.usesBoundedNeighborhood
+                ? BoundedNeighborhoodExpansion.provenance(for: expanded) : nil)
+        var fields: [String: Any] = ["mode": fallback ? "lexical_fallback" : "lexical", "semantic_available": false]
+        fields["primary_completion"] = completed.audit
+        fields["exchange_expansion"] = expanded.audit
+        if fallback { fields["failure"] = "semantic_search_failed" }
+        if semanticRetrieval == .disabledByPolicy {
+            fields[SemanticRetrievalPolicy.auditField] = SemanticRetrievalPolicy.disabledByPolicy.rawValue
+        }
+        if let raw {
+            fields["raw_work_version"] = "raw_work_v1"; fields["source_frontier"] = raw.sourceFrontier
+            fields["raw_work_charged"] = raw.rawWorkCharged; fields["inspected_candidates"] = raw.inspectedCandidates
+            fields["candidate_window_full"] = raw.candidateWindowFull; fields["candidate_window_complete"] = raw.candidateWindowComplete
+            fields["continuation_available"] = raw.continuation != nil
+        }
+        try appendAudit(to: &result, fields: fields)
+        try appendQueryTrace(to: &result, formulation: formulation, prompt: prompt, input: lexicalInput, range: lexicalQueryUTF8Range,
+            semanticInput: semanticInput, semanticRange: semanticQueryUTF8Range)
+        // Under the ordinary Send policy lexical selection is intended,
+        // so only a bounded candidate window warrants a notice.
+        result.retrievalNotice = fallback ? "Semantic recall failed; archive recall used lexical search."
+            : semanticRetrieval == .disabledByPolicy ? nil
+            : "Archive recall used lexical search; semantic recall is unavailable."
+        if let raw, !raw.candidateWindowComplete || raw.candidateWindowFull {
+            result.retrievalNotice = "Archive recall inspected a bounded lexical candidate window; additional evidence may remain."
+        }
+        return result
+    }
+
+    /// Exchange-policy fallback (ExchangeBlockQuery.lexicalFallback): the same
+    /// query, search, completion and v1/16 exchange expansion that
+    /// `selectedQwen` selects with, assembled under the episode's frozen
+    /// exchange policy so its caps, reduction and journal validation hold.
+    /// No semantic index is read. The caller holds the metered operation.
+    static func v1LexicalEvidence(recent: ContextSnapshot, store: MemoryStore, conversationID: String,
+        projectID: String, prompt: String, excludingEventID: String, episodeLease: EpisodeLease?,
+        lexicalQueryUTF8Range: Range<Int>?, componentPolicy: ContextComponentPolicy) throws -> ContextSnapshot {
+        guard try componentPolicy.validated().usesExchangeQuery, !componentPolicy.usesBoundedNeighborhood else {
+            throw ContextError.sourceMismatch
+        }
+        if let frozen = try episodeLease?.checkActive(projectID: projectID).limits.componentPolicy, frozen != componentPolicy {
+            throw EpisodeBudgetError.invalid
+        }
+        let input = try HistoricalQueryFormulation.input(prompt, utf8Range: lexicalQueryUTF8Range)
+        return try lexicalEvidence(recent: recent, store: store, conversationID: conversationID, projectID: projectID,
+            prompt: prompt, excludingEventID: excludingEventID, episodeLease: episodeLease,
+            formulation: HistoricalQueryFormulation.formulate(input), lexicalInput: input,
+            lexicalQueryUTF8Range: lexicalQueryUTF8Range, semanticInput: input, semanticQueryUTF8Range: nil,
+            componentPolicy: componentPolicy, semanticRetrieval: .enabled, fallback: false)
     }
 
     private static func expandPrimaries(store: MemoryStore, projectID: String, hits: [MemoryHit], frontier: Int,

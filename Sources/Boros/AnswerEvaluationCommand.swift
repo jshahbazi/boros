@@ -796,10 +796,13 @@ enum AnswerEvaluationCommand {
                                 item["preparation_mode_receipt_validated"] = true
                             }
                             if arm == .ordinarySend {
-                                // The receipt must show the policy withheld the index.
+                                // The receipt must show the frozen policy's ordinary
+                                // selection and no semantic manifest: exchange_packed
+                                // (or its labelled v1 lexical fallback) by default; for
+                                // a pinned v1 policy, lexical with the index withheld.
                                 let retrieval = audit["retrieval"] as? [String: Any]
-                                guard retrieval?[SemanticRetrievalPolicy.auditField] as? String == SemanticRetrievalPolicy.disabledByPolicy.rawValue,
-                                      retrieval?["mode"] as? String == "lexical", retrieval?["manifest_id"] == nil else { throw Failure.invalid }
+                                guard try AnswerEvaluationCommand.ordinarySendReceiptValid(retrieval,
+                                    policy: limits?.componentPolicy ?? .currentSelectedQwen) else { throw Failure.invalid }
                                 item["retrieval_arm_receipt_validated"] = true
                             }
                             item["preparation"] = ["request_sha256": preparation.requestDigest,
@@ -1964,6 +1967,27 @@ extension AnswerEvaluationCommand {
     /// refusal before any output exists, per-attempt resolution, and the
     /// ordinary Send host index. Selection equivalence with the retrieval
     /// harness is checked across binaries by scripts/test_ordinary_send_arm.py.
+    /// The ordinary Send arm's receipt for the attempt's frozen component
+    /// policy. Exchange policies select without any semantic stage (mode
+    /// `exchange_*`, or the labelled `v1_lexical_fallback` when the exchange
+    /// index cannot serve the project); v1 and v2 select lexically and record
+    /// that the ordinary Send policy withheld the index.
+    static func ordinarySendReceiptValid(_ retrieval: [String: Any]?, policy: ContextComponentPolicy) throws -> Bool {
+        guard let retrieval, retrieval["manifest_id"] == nil else { return false }
+        let mode = retrieval["mode"] as? String
+        guard try policy.validated().usesExchangeQuery else {
+            return mode == "lexical"
+                && retrieval[SemanticRetrievalPolicy.auditField] as? String == SemanticRetrievalPolicy.disabledByPolicy.rawValue
+        }
+        if mode == ExchangeBlockQuery.lexicalFallbackMode {
+            let fallback = retrieval["exchange_fallback"] as? [String: Any]
+            return fallback?["version"] as? String == ExchangeBlockQuery.lexicalFallbackVersion
+                && fallback?["frozen_policy"] as? String == policy.version
+        }
+        return mode == ExchangeBlockQuery.retrievalMode(policy) && retrieval["exchange_query"] is [String: Any]
+            && retrieval["semantic_available"] as? Bool == false
+    }
+
     private static func retrievalArmChecks(baseURL: String) throws -> [String: Bool] {
         var checks = try framingOptionChecks()
         let base = ["--answer-evaluation", "/synthetic/input.json", "--output-directory", "/synthetic/output"]
@@ -1989,6 +2013,26 @@ extension AnswerEvaluationCommand {
         checks["retrieval_arm_selectable_only_while_policy_disables_semantic"] = AnswerEvaluationRetrievalArm.ordinarySendSelectable
             == (SemanticRetrievalPolicy.ordinarySend == .disabledByPolicy)
             && AnswerEvaluationRetrievalArm.selectable == [.ordinarySend]
+        // The arm's receipt follows the attempt's frozen policy: the default
+        // exchange_packed (or its labelled fallback), or a pinned v1 policy.
+        let packed = ContextComponentPolicy.selectedQwenExchangePacked
+        let exchangeReceipt: [String: Any] = ["mode": "exchange_packed", "semantic_available": false, "exchange_query": [:] as [String: Any]]
+        let fallbackReceipt: [String: Any] = ["mode": ExchangeBlockQuery.lexicalFallbackMode, "semantic_available": false,
+            "exchange_fallback": ["version": ExchangeBlockQuery.lexicalFallbackVersion, "frozen_policy": packed.version]]
+        let lexicalReceipt: [String: Any] = ["mode": "lexical", "semantic_available": false,
+            SemanticRetrievalPolicy.auditField: SemanticRetrievalPolicy.disabledByPolicy.rawValue]
+        var manifestReceipt = exchangeReceipt; manifestReceipt["manifest_id"] = "synthetic-manifest"
+        let accepted = try [ordinarySendReceiptValid(exchangeReceipt, policy: packed),
+            ordinarySendReceiptValid(fallbackReceipt, policy: packed),
+            ordinarySendReceiptValid(lexicalReceipt, policy: .selectedQwen)]
+        let refused = try [ordinarySendReceiptValid(lexicalReceipt, policy: packed),
+            ordinarySendReceiptValid(exchangeReceipt, policy: .selectedQwen),
+            ordinarySendReceiptValid(exchangeReceipt, policy: .selectedQwenExchangeAdjacent),
+            ordinarySendReceiptValid(fallbackReceipt, policy: .selectedQwenExchangeAdjacent),
+            ordinarySendReceiptValid(manifestReceipt, policy: packed),
+            ordinarySendReceiptValid(nil, policy: packed)]
+        checks["retrieval_arm_receipt_follows_frozen_policy"] = ContextComponentPolicy.currentSelectedQwen == packed
+            && accepted.allSatisfy { $0 } && refused.allSatisfy { !$0 }
 
         // Resolution: without the flag every attempt keeps its declared
         // strategy, the coordinator default policy and the explicit build.

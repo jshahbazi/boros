@@ -1026,9 +1026,11 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate, NSMenu
     private func sendSharedAttempt(prompt: String, settings: GenerationSettings, store: MemoryStore, chat: StoredConversation) {
         let attempt = AnswerAttemptCoordinator(store: store, conversationID: chat.id, projectID: projectID,
             prompt: prompt, settings: settings, conversation: conversation, semanticIndex: semanticIndex,
-            // Ordinary Send: lexical selection by user decision, October 8,
-            // 2026 (docs/P2-SEMANTIC-DECISION.md). The harness `ordinary_send`
-            // arm constructs this same configuration.
+            // Ordinary Send: no semantic index by user decision, October 8,
+            // 2026 (docs/P2-SEMANTIC-DECISION.md), and the coordinator's
+            // default component policy, exchange_packed since October 12,
+            // 2026 (docs/EXCHANGE-PACKED-ANSWERS.md). The harness
+            // `ordinary_send` arm constructs this same configuration.
             semanticRetrieval: .ordinarySend,
             runner: runner, onStage: { [weak self] stage, preparation in
                 guard let self, self.generating else { return }

@@ -1,6 +1,7 @@
 import Foundation
 
-/// Optional timing and volume sink for diagnostics; product paths pass nil.
+/// Optional timing and volume sink for diagnostics. Product turns pass a
+/// private sink that `ExchangeBlockQuery.select` reads only for `fallback`.
 /// Contains counts and durations only.
 final class ExchangeIndexDiagnostics {
     var catchUpEvents = 0

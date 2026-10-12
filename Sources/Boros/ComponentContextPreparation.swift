@@ -189,7 +189,7 @@ final class ComponentContextPreparationOperation {
                                 self.countRecent(reduced, prepareEvidence: prepareEvidence)
                             } else if prepareEvidence, self.policy.usesExchangeQuery, self.evidenceSourceIDs == nil,
                                       self.retrievalStrategy == .hybrid {
-                                // Explicit experimental P2 policies only.
+                                // P2 exchange policies, including the ordinary Send default.
                                 let candidate = try ExchangeBlockQuery.prepareEvidence(recent: snapshot, store: self.store,
                                     conversationID: self.conversationID, projectID: self.projectID, prompt: self.prompt,
                                     excludingEventID: self.humanEventID, episodeLease: self.lease,

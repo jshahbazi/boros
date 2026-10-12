@@ -103,10 +103,17 @@ enum AnswerAttemptCoordinatorChecks {
         deinit { try? FileManager.default.removeItem(at: directory) }
         var prefix: String { "answer_coordinator_" + kind.rawValue }
 
+        /// The semantic-range case pins v1/16, whose lexical selection traces
+        /// both query ranges; every other case freezes the ordinary default
+        /// (exchange_packed since October 12, 2026).
+        var expectedPolicy: ContextComponentPolicy { kind == .semanticRange ? .selectedQwen : .currentSelectedQwen }
+
         func start() {
+            var pinned = EpisodeLimits(); pinned.componentPolicy = .selectedQwen
             let operation = AnswerAttemptCoordinator(store: store, conversationID: chat.id,
                 projectID: kind == .wrongScope ? "synthetic-other-scope" : chat.projectID, prompt: prompt,
                 settings: settings, retrievalStrategy: (kind == .lexicalRange || kind == .semanticRange || kind == .declaredSources) ? .hybrid : .recentOnly,
+                limits: kind == .semanticRange ? pinned : nil,
                 lexicalQueryUTF8Range: (kind == .lexicalRange || kind == .semanticRange)
                     ? (prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count)..<prompt.utf8.count : nil,
                 semanticQueryUTF8Range: kind == .semanticRange
@@ -151,7 +158,7 @@ enum AnswerAttemptCoordinatorChecks {
                 let accepted = try operation.accept()
                 checks[prefix + "_accepted_original_chat_scope"] = accepted.projectID == chat.projectID
                     && accepted.humanEventID == operation.identifiers.humanEventID && !accepted.origin.isLocalRead
-                checks[prefix + "_selected_policy_frozen"] = accepted.limits.componentPolicy == .currentSelectedQwen
+                checks[prefix + "_selected_policy_frozen"] = accepted.limits.componentPolicy == expectedPolicy
                 checks[prefix + "_complete_human_capture_before_preparation"] = try store.events(conversationID: chat.id)
                     .contains { $0.id == operation.identifiers.humanEventID && $0.text == prompt && $0.status == .complete }
                 if kind == .concurrentAcceptanceStop {
@@ -243,8 +250,9 @@ enum AnswerAttemptCoordinatorChecks {
                     }
                     if kind == .lexicalRange || kind == .semanticRange {
                         let audit = try JSONSerialization.jsonObject(with: preparation.contextAudit) as! [String: Any]
-                        let retrieval = audit["retrieval"] as! [String: Any]
-                        let trace = retrieval["selection_trace"] as! [String: Any]
+                        let retrieval = audit["retrieval"] as? [String: Any] ?? [:]
+                        // exchange_packed replaces the v1 trace with its packing audit.
+                        let trace = retrieval["selection_trace"] as? [String: Any] ?? [:]
                         if kind == .semanticRange {
                             checks[prefix + "_semantic_range_reaches_component_and_persisted_audit"] =
                                 trace["semantic_input_sha256"] as? String == EndpointRequest.digest(Data("Recall cobaltfixture café κ.".utf8))
@@ -252,11 +260,25 @@ enum AnswerAttemptCoordinatorChecks {
                                 && trace["semantic_input_offset"] as? Int == prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count
                                 && trace["semantic_input_version"] as? String == "accepted-prompt-utf8-range-v1"
                         }
-                        checks[prefix + "_exact_accepted_query_range_and_full_prompt_provenance"] =
-                            trace["lexical_input_sha256"] as? String == EndpointRequest.digest(Data("Recall cobaltfixture café κ.".utf8))
-                            && trace["accepted_prompt_sha256"] as? String == EndpointRequest.digest(Data(prompt.utf8))
-                            && trace["lexical_input_bytes"] as? Int == "Recall cobaltfixture café κ.".utf8.count
-                            && trace["lexical_input_offset"] as? Int == prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count
+                        if kind == .semanticRange {
+                            checks[prefix + "_exact_accepted_query_range_and_full_prompt_provenance"] =
+                                trace["lexical_input_sha256"] as? String == EndpointRequest.digest(Data("Recall cobaltfixture café κ.".utf8))
+                                && trace["accepted_prompt_sha256"] as? String == EndpointRequest.digest(Data(prompt.utf8))
+                                && trace["lexical_input_bytes"] as? Int == "Recall cobaltfixture café κ.".utf8.count
+                                && trace["lexical_input_offset"] as? Int == prompt.utf8.count - "Recall cobaltfixture café κ.".utf8.count
+                        } else {
+                            // The default exchange selection queries only the
+                            // declared range: its term digest excludes the date line.
+                            func termsDigest(_ text: String) -> String {
+                                MeteredRetrieval.digest(Data(ExchangeBlockQuery.query(text).terms.sorted().joined(separator: "\n").utf8))
+                            }
+                            let exchange = retrieval["exchange_query"] as? [String: Any]
+                            checks[prefix + "_default_exchange_selection_queries_only_the_accepted_range"] =
+                                retrieval["mode"] as? String == "exchange_packed"
+                                && exchange?["query_terms_sha256"] as? String == termsDigest("Recall cobaltfixture café κ.")
+                                && termsDigest("Recall cobaltfixture café κ.") != termsDigest(prompt)
+                                && preparation.admission.componentProof?.policyVersion == ContextComponentPolicy.selectedQwenExchangePacked.version
+                        }
                         checks[prefix + "_historical_needle_delivered_without_metadata_terms"] =
                             (audit["historical_sources"] as? [[String: Any]])?.contains { $0["event_id"] as? String == "range-archive-event" } == true
                     }

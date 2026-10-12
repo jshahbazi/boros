@@ -8,6 +8,8 @@ Each section states whether it describes implemented behavior, measured results,
 
 One new, explicitly versioned component policy. It is not a default. `ContextComponentPolicy.currentSelectedQwen` remains `selectedQwen` (v1/16), and ordinary Send is unchanged.
 
+**Update, October 12, 2026 (implemented).** By user decision on measured answer quality ([EXCHANGE-PACKED-ANSWERS.md](EXCHANGE-PACKED-ANSWERS.md)), this policy is now `ContextComponentPolicy.currentSelectedQwen`, the ordinary Send default, and ranks from the [persistent exchange index](P2-EXCHANGE-INDEX.md). Its version, caps, packer and audits are unchanged. The statements in this record that it is not a default describe October 8, 2026. The default switch, its index lifecycle and its v1 lexical fallback are in [IMPLEMENTATION.md](IMPLEMENTATION.md#retrieval-and-context-boundary).
+
 | Policy | Version | Harness arm |
 |---|---|---|
 | Step 3 | `selected-model-context-components-v3-exchange-packed` | `exchange_packed` |

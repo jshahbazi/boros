@@ -21,7 +21,8 @@ protocol ExchangeCorpus {
     func minimumCost(_ source: Int, selectionVersion: String) throws -> (spans: Int, tokens: Int)
 }
 
-/// Experimental P2 ordinary-path selection (explicit policies only).
+/// P2 ordinary-path selection. `exchange_packed` is the ordinary Send default
+/// since October 12, 2026; the step 1 and 2 policies are explicit only.
 ///
 /// Step 1 ranks complete human-led exchange blocks against every content term
 /// of the question with inverse-document-frequency weights, ported from the
@@ -62,6 +63,16 @@ enum ExchangeBlockQuery {
     /// behind. Same length as the other labels, so this audit's size, which
     /// step 3 budgets, does not depend on which index served the turn.
     static let fallbackIndexLabel = "in_memory_fallback"
+    /// Retrieval audit `mode` of a turn that neither index could serve
+    /// because the project is above a size limit (`lexicalFallback`): the
+    /// turn selects with the v1 lexical selection instead of failing.
+    static let lexicalFallbackMode = "v1_lexical_fallback"
+    static let lexicalFallbackVersion = "exchange-v1-lexical-fallback-v1"
+    /// The persistent index was not ready, and the project is above the
+    /// in-memory rebuild's limits (`maximumSources`, `maximumSourceBytes`).
+    static let unindexedLimitFallbackReason = "index_not_ready_project_above_rebuild_limit"
+    /// The project is above the persistent index's `persistentMaximumSources`.
+    static let indexLimitFallbackReason = "project_above_persistent_index_limit"
     static let maximumQueryTerms = 256
     static let maximumAnchors = 8
     /// Ranked blocks reported by identifier for offline diagnosis.
@@ -458,7 +469,7 @@ enum ExchangeBlockQuery {
 
     // MARK: Ordinary-path entry
 
-    /// Evidence entry for explicit exchange policies, called by component
+    /// Evidence entry for the exchange policies, called by component
     /// preparation in place of ChatContextPreparation.prepareEvidence (which
     /// refuses these policies). Same preconditions, one metered operation,
     /// the same recent snapshot, exclusions, lease and assembler checks as v1.
@@ -512,7 +523,8 @@ enum ExchangeBlockQuery {
                 // The index is not built, or too far behind to catch up in a
                 // turn. Build it outside any episode for later turns, and
                 // serve this one from the rebuild, which selects identically
-                // and still refuses projects above its 20,000-source cap.
+                // and refuses projects above its 20,000-source cap; `select`
+                // then serves the turn with `lexicalFallback`.
                 store.scheduleExchangeIndexBuild()
                 diagnostics?.fallback = true
                 var rebuilt = try rankedCorpus(source: .inMemoryRebuild, store: store, projectID: projectID, query: query,
@@ -537,8 +549,18 @@ enum ExchangeBlockQuery {
             "index": source == .persistent ? persistentIndexLabel : rebuildIndexLabel]
         var hits: [MemoryHit] = []
         if !query.terms.isEmpty {
-            let loaded = try rankedCorpus(source: source, store: store, projectID: projectID, query: query,
-                excluded: excluded, lease: episodeLease, diagnostics: diagnostics)
+            let tracker = diagnostics ?? ExchangeIndexDiagnostics()
+            let loaded: RankedCorpus
+            do {
+                loaded = try rankedCorpus(source: source, store: store, projectID: projectID, query: query,
+                    excluded: excluded, lease: episodeLease, diagnostics: tracker)
+            } catch Failure.snapshotLimit where source == .persistent {
+                // Product path only; the diagnostic rebuild source still refuses.
+                return try lexicalFallback(recent: recent, store: store, conversationID: conversationID,
+                    projectID: projectID, prompt: prompt, excludingEventID: excludingEventID, episodeLease: episodeLease,
+                    lexicalQueryUTF8Range: lexicalQueryUTF8Range, componentPolicy: componentPolicy,
+                    reason: tracker.fallback ? unindexedLimitFallbackReason : indexLimitFallbackReason)
+            }
             audit["index"] = loaded.indexLabel
             let ranked = loaded.ranked
             let budget = Int(Double(componentPolicy.evidenceTokens) * evidenceTokenFraction)
@@ -570,13 +592,49 @@ enum ExchangeBlockQuery {
             maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
             componentPolicy: componentPolicy, historicalProvenance: nil)
         var retrieval = try result.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-        retrieval["mode"] = componentPolicy.packsExchangeValueDensity ? "exchange_packed"
-            : componentPolicy.packsAdjacentExchanges ? "exchange_adjacent" : "exchange_lexical"
+        retrieval["mode"] = retrievalMode(componentPolicy)
         retrieval["semantic_available"] = false
         retrieval["exchange_query"] = audit
         result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: retrieval, options: [.sortedKeys])
         result.retrievalManifestID = nil; result.retrievalManifestJSON = nil
         result.retrievalNotice = "Archive recall ranked complete exchanges lexically over the whole question; semantic recall was not used."
+        return result
+    }
+
+    /// Retrieval audit `mode` of a turn that the policy's exchange selection served.
+    static func retrievalMode(_ policy: ContextComponentPolicy) -> String {
+        policy.packsExchangeValueDensity ? "exchange_packed"
+            : policy.packsAdjacentExchanges ? "exchange_adjacent" : "exchange_lexical"
+    }
+
+    /// A turn that neither exchange index can serve because the project is
+    /// above a size limit: the in-memory rebuild's 20,000 sources or 32 MiB
+    /// while the persistent index is not ready (a large store's first turns
+    /// after the default switch, an upgrade or a restore, until the build
+    /// scheduled by `rankedCorpus` completes), or the persistent index's
+    /// 200,000 sources. Before this fallback such a turn failed. It selects
+    /// with the v1 lexical selection (`selectedQwen`'s query, search,
+    /// completion and v1/16 expansion), which the v1 default served at any
+    /// project size, assembled under the episode's frozen exchange policy:
+    /// its caps, single-span reduction, selection audit version and journal
+    /// validation are unchanged. Integrity refusals (`indexMismatch`,
+    /// `sourceMismatch`) still fail closed.
+    private static func lexicalFallback(recent: ContextSnapshot, store: MemoryStore, conversationID: String,
+        projectID: String, prompt: String, excludingEventID: String, episodeLease: EpisodeLease?,
+        lexicalQueryUTF8Range: Range<Int>?, componentPolicy: ContextComponentPolicy, reason: String) throws -> ContextSnapshot {
+        var result = try ChatContextPreparation.v1LexicalEvidence(recent: recent, store: store, conversationID: conversationID,
+            projectID: projectID, prompt: prompt, excludingEventID: excludingEventID, episodeLease: episodeLease,
+            lexicalQueryUTF8Range: lexicalQueryUTF8Range, componentPolicy: componentPolicy)
+        var retrieval = try result.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        retrieval["mode"] = lexicalFallbackMode
+        retrieval["semantic_available"] = false
+        retrieval["exchange_fallback"] = ["version": lexicalFallbackVersion, "reason": reason,
+            "frozen_policy": componentPolicy.version, "selection_policy": ContextComponentPolicy.selectedQwen.version]
+        result.retrievalAuditJSON = try JSONSerialization.data(withJSONObject: retrieval, options: [.sortedKeys])
+        result.retrievalManifestID = nil; result.retrievalManifestJSON = nil
+        result.retrievalNotice = reason == unindexedLimitFallbackReason
+            ? "Archive recall used lexical search for this turn; the exchange index for this history is still being built."
+            : "Archive recall used lexical search; this project is larger than the exchange index supports."
         return result
     }
 
