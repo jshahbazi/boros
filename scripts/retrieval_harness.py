@@ -56,8 +56,15 @@ GLOBAL_ARMS = ("global_hybrid", "global_fill")
 # withholds it by user decision (docs/P2-SEMANTIC-DECISION.md, Decision). It
 # must select exactly what `lexical` selects.
 ORDINARY_SEND_ARM = "ordinary_send"
+# Persistent exchange index parity (docs/P2-EXCHANGE-INDEX.md): each pair runs one
+# policy over the persistent index (the shipped path) and over the per-turn
+# in-memory rebuild it replaced. Selection and delivery must be identical.
+PARITY_PAIRS = (("exchange_adjacent", "exchange_adjacent_rebuild"), ("exchange_packed", "exchange_packed_rebuild"))
+PARITY_ARMS = tuple(rebuild for _, rebuild in PARITY_PAIRS)
+PERSISTENT_INDEX_LABEL = "persistent_sidecar"
+REBUILD_INDEX_LABEL = "in_memory_per_turn"
 ARMS = ("recent_only", "lexical", "hybrid", ORDINARY_SEND_ARM, "exchange_lexical", "exchange_adjacent",
-        "exchange_packed") + GLOBAL_ARMS
+        "exchange_packed") + GLOBAL_ARMS + PARITY_ARMS
 PRIMARY_ARM = ORDINARY_SEND_ARM
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
@@ -595,6 +602,48 @@ def ordinary_send_equivalence(attempts):
                 and ordinary.get("preparation_received_semantic_index") is False}
 
 
+def exchange_index_parity(attempts):
+    """Content-free comparison of each persistent-index arm with its rebuild arm:
+    identical recent context and delivered byte ranges in order, identical
+    exchange audits apart from the equal-length index label, identical component
+    token counts, and the expected labels. Differing audit keys are named only."""
+    result = {}
+    for persistent, rebuild in PARITY_PAIRS:
+        left, right = attempts.get(persistent), attempts.get(rebuild)
+        if not left or not right or not left.get("preparation_completed") or not right.get("preparation_completed"):
+            result[persistent] = None
+            continue
+
+        def ranges(attempt):
+            return [(item["event_id"], item["offset"], item["bytes"]) for item in attempt.get("evidence", [])]
+
+        def audit(attempt):
+            value = dict(attempt.get("exchange") or {})
+            return value, value.pop("index", None)
+
+        left_audit, left_label = audit(left)
+        right_audit, right_label = audit(right)
+        result[persistent] = {
+            "evidence": left.get("recent_source_ids") == right.get("recent_source_ids") and ranges(left) == ranges(right),
+            "audit": left_audit == right_audit,
+            "tokens": left.get("components") == right.get("components") and left.get("prompt_tokens") == right.get("prompt_tokens"),
+            "labels": left_label == PERSISTENT_INDEX_LABEL and right_label == REBUILD_INDEX_LABEL,
+            "differing_audit_keys": sorted(key for key in set(left_audit) | set(right_audit)
+                                           if left_audit.get(key) != right_audit.get(key))}
+    return result
+
+
+def exchange_index_parity_summary(rows):
+    summary = {}
+    for persistent, _rebuild in PARITY_PAIRS:
+        compared = [row["exchange_index_parity"][persistent] for row in rows
+                    if (row.get("exchange_index_parity") or {}).get(persistent) is not None]
+        summary[persistent] = {"histories": len(rows), "compared": len(compared)} | {
+            key: sum(bool(item[key]) for item in compared) for key in ("evidence", "audit", "tokens", "labels")} | {
+            "differing_audit_keys": sorted({key for item in compared for key in item["differing_audit_keys"]})}
+    return summary
+
+
 def global_semantic_summary(rows):
     """Latency and population of the explicitly selected global search arms."""
     result = {}
@@ -669,12 +718,13 @@ def run(args):
                 "process_failure": selection.get("process_failure"),
                 "harness_wall_milliseconds": selection.get("wall_milliseconds"),
                 "cache_reused": cache.get("reused"), "ingest_milliseconds": cache.get("ingest_milliseconds"),
-                "semantic": cache.get("semantic"),
+                "semantic": cache.get("semantic"), "exchange_index": cache.get("exchange_index"),
                 "runner_started": any(item.get("runner_started") for item in attempts.values())
                     or any(item.get("runner_started") for item in ((control or {}).get("attempts") or [])),
                 "arms": {arm: score_attempt(attempts.get(arm), case) for arm in ARMS},
                 "diagnostics": {arm: diagnostic(attempts.get(arm)) for arm in ARMS if arm != "recent_only"},
-                "ordinary_send_equivalence": ordinary_send_equivalence(attempts)})
+                "ordinary_send_equivalence": ordinary_send_equivalence(attempts),
+                "exchange_index_parity": exchange_index_parity(attempts)})
         parity = endpoint.parity(args.live_tokenizer)
     finally:
         endpoint.stop()
@@ -695,7 +745,9 @@ def run(args):
                  "exchange_adjacent": "explicit P2 step 1+2 policy selected-model-context-components-v3-exchange-adjacent; no semantic index",
                  "exchange_packed": "explicit P2 step 3 policy selected-model-context-components-v3-exchange-packed; no semantic index",
                  "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
-                 "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)"},
+                 "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)",
+                 "exchange_adjacent_rebuild": "exchange_adjacent over the per-turn in-memory rebuild (parity arm; the policy reads the persistent index)",
+                 "exchange_packed_rebuild": "exchange_packed over the per-turn in-memory rebuild (parity arm; the policy reads the persistent index)"},
         "definitions": {
             "r1": f"every annotated positive turn is delivered, in recent context, or among the first {DECLARED_CANDIDATE_DEPTH} ranked candidates traced before span and token limits",
             "r1_exchange_packed": f"every annotated positive turn is in recent context or among the candidate units (sources of the top {PACKED_CANDIDATE_BLOCK_DEPTH} ranked exchange blocks and their adjacent opposite-role neighbors) recorded before packing",
@@ -707,6 +759,9 @@ def run(args):
         "implementation": implementation,
         "summary": summary, "known_misses": known_miss_rows(rows),
         "global_semantic": global_semantic_summary(rows),
+        "exchange_index_parity": exchange_index_parity_summary(rows),
+        "exchange_index_build": {"milliseconds_p50": percentile([(row.get("exchange_index") or {}).get("milliseconds") for row in rows], 0.5),
+                                 "milliseconds_max": max([(row.get("exchange_index") or {}).get("milliseconds") or 0 for row in rows], default=None)},
         "ordinary_send_equivalence": {key: sum(bool((row["ordinary_send_equivalence"] or {}).get(key)) for row in rows)
             for key in ("delivery", "candidates", "policy_recorded")} | {"compared": sum(row["ordinary_send_equivalence"] is not None for row in rows),
                                                                        "histories": len(rows)},
@@ -730,6 +785,7 @@ def run(args):
         print(json.dumps({"arm": arm, "r1": values["r1_candidate_recall"], "r2": values["r2_delivered_recall"],
                           "turns_whole": values["turn_delivered_whole"], "failures": values["failures"]}, sort_keys=True))
     print(json.dumps({"ordinary_send_equivalence": report["ordinary_send_equivalence"]}, sort_keys=True))
+    print(json.dumps({"exchange_index_parity": report["exchange_index_parity"]}, sort_keys=True))
     print(json.dumps({"feasibility": summary["feasibility"], "parity": parity, "endpoint": endpoint.counters}, sort_keys=True))
     print("Metadata-only report: " + str(output))
     return report

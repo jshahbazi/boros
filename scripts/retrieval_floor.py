@@ -86,7 +86,8 @@ def measured(report):
             arms[arm] = {name: int(values[key][field]) for name, (key, field) in MEASURES.items()}
             denominators[arm] = {"cases": int(values["r2_delivered_recall"]["cases"]),
                                  "turns": int(values["turn_delivered_whole"]["cases"])}
-        return {"manifest_sha256": report["cohort"]["manifest_sha256"], "arms": arms, "denominators": denominators}
+        return {"manifest_sha256": report["cohort"]["manifest_sha256"], "arms": arms, "denominators": denominators,
+                "exchange_index_parity": report.get("exchange_index_parity")}
     except (KeyError, TypeError, ValueError):
         raise FloorError("harness report has an unexpected shape")
 
@@ -115,6 +116,14 @@ def compare(floor, run):
             if run["arms"][arm][name] < minimums[name]:
                 failed.append(f"{arm}.{name}")
                 notes.append(f"{arm}: {name} is {run['arms'][arm][name]}, floor is {minimums[name]}")
+    # Persistent exchange index: every compared history must select and deliver
+    # exactly what the per-turn rebuild does (docs/P2-EXCHANGE-INDEX.md).
+    for arm, parity in sorted((run.get("exchange_index_parity") or {}).items()):
+        for key in ("evidence", "audit", "tokens", "labels"):
+            checks += 1
+            if parity["compared"] == 0 or parity[key] != parity["compared"]:
+                failed.append(f"{arm}.exchange_index_parity.{key}")
+                notes.append(f"{arm}: persistent index {key} matched the rebuild in {parity[key]} of {parity['compared']} histories")
     for arm in sorted(set(run["arms"]) - set(floor["arms"])):
         notes.append(f"{arm}: arm has no floor entry (reported, not failed): "
                      + ", ".join(f"{name}={number}" for name, number in run["arms"][arm].items()))

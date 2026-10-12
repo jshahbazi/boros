@@ -60,6 +60,16 @@ class Comparison(unittest.TestCase):
         _, failed, _ = check(report(hybrid=(7, 8, 13, 14), lexical=(9, 9, 15, 15)))
         self.assertEqual(sorted(failed), ["hybrid.r1_cases", "hybrid.r1_turns"])
 
+    def test_exchange_index_parity_must_match_every_compared_history(self):
+        run = report(hybrid=(8, 8, 14, 14), lexical=(9, 9, 15, 15))
+        run["exchange_index_parity"] = {"exchange_packed": {"compared": 12, "evidence": 12, "audit": 11, "tokens": 12,
+                                                            "labels": 12, "differing_audit_keys": ["source_frontier"]}}
+        checks, failed, _ = check(run)
+        self.assertEqual(checks, 1 + 2 * (2 + 4) + 4)
+        self.assertEqual(failed, ["exchange_packed.exchange_index_parity.audit"])
+        run["exchange_index_parity"]["exchange_packed"]["audit"] = 12
+        self.assertEqual(check(run)[1], [])
+
     def test_arm_in_floor_but_missing_from_run_fails(self):
         _, failed, _ = check(report(hybrid=(8, 8, 14, 14)))
         self.assertEqual(failed, ["lexical.missing_arm"])

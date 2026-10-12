@@ -138,7 +138,7 @@ enum ExchangeBlockQueryChecks {
             && step1.snapshot.selectionAudit?.version == "context-exchange-v1" && step1.snapshot.evidenceProvenance == nil
             && retrieval["mode"] as? String == "exchange_lexical" && retrieval["semantic_available"] as? Bool == false
             && exchangeAudit["version"] as? String == ExchangeBlockQuery.version
-            && exchangeAudit["index"] as? String == "in_memory_per_turn"
+            && exchangeAudit["index"] as? String == ExchangeBlockQuery.persistentIndexLabel
         result["exchange_query_audit_contains_no_source_payload_or_question"] = ![prompt, target.text, reply.text, weak.text]
             .contains { auditBytes.range(of: Data($0.utf8)) != nil }
         result["exchange_query_uses_no_model_encoder_or_vector_work"] = step1.after.charged.modelCalls == step1.before.charged.modelCalls
@@ -248,7 +248,7 @@ enum ExchangeBlockQueryChecks {
         func id(_ unit: Packing.Unit) -> String { index.sources[unit.source].reference.eventID }
         let version = ContextSourceFraming.currentSelectionVersion
         let ranked = index.rank(ExchangeBlockQuery.query("zebra habitat"))
-        let units = Packing.candidates(index: index, ranked: ranked)
+        let units = try Packing.candidates(index: index, ranked: ranked)
         let top = units.first?.units.map { $0.kind + ":" + id($0) }
         result["exchange_packed_candidate_units_are_chronological_with_neighbors"] = top == ["p:p0", "l:h1", "r:a1", "n:h2"]
             && units.count == min(ranked.count, Packing.candidateBlockDepth)
@@ -289,7 +289,7 @@ enum ExchangeBlockQueryChecks {
             auditBudget: 100_000, selectionVersion: version)
         result["exchange_packed_quoted_anchor_members_are_mandatory_and_first"] = anchored.blocks.first?.anchors == 1
             && anchored.hits.prefix(2).map(\.eventID) == ["k1", "k1a"] && anchored.codes[0].contains("D")
-        let audit = Packing.audit(plan: tight, index: index, matchedBlocks: ranked.count, tokenBudget: 900,
+        let audit = try Packing.audit(plan: tight, index: index, matchedBlocks: ranked.count, tokenBudget: 900,
             auditBudget: 100_000, maximumSpans: 48)
         let auditBytes = try JSONSerialization.data(withJSONObject: audit)
         result["exchange_packed_candidate_audit_is_compact_and_content_free"] = auditBytes.range(of: Data("zebra".utf8)) == nil
