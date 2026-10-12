@@ -109,6 +109,14 @@ Apple query embeddings and native GGUF/Bonsai input tokens remain unobservable. 
 
 Literal and FTS5 lexical search identify original events and expose exact source reads. A private [semantic sidecar](SEMANTIC-RETRIEVAL.md) adds a pinned installed Apple English sentence encoder, resumable jobs, complete-source SHA-256 sealing, explicit coverage holes and replayable manifests. Since October 8, 2026, only explicit evaluation and experiment paths build or query it (see below). The optional summary tree remains gated by measured comparisons.
 
+**Persistent exchange index (implemented October 12, 2026).** The opt-in exchange policies (`exchange_adjacent`, `exchange_packed`) rank from a derived sidecar, `<store>/exchange-index/index.sqlite3` (`Sources/Boros/ExchangeIndex.swift`, `ExchangeIndexView.swift`).
+
+- **Upkeep.** The sidecar is maintained after each committed append once it exists. It is excluded from backups and rebuilt in the background.
+- **Before it is ready.** A turn falls back to the per-turn in-memory rebuild, up to 20,000 sources, with identical selection and audit label `in_memory_fallback`. The turn also schedules `MemoryStore.scheduleExchangeIndexBuild()`.
+- **Fails closed** on a project count or newest-event mismatch, on a loaded source changed outside the store, and above 200,000 sources per project.
+
+See [the record](P2-EXCHANGE-INDEX.md). Ordinary Send does not use it.
+
 **Ordinary Send retrieves lexically (implemented October 8, 2026, by user decision).** `SemanticRetrievalPolicy.ordinarySend` (`Sources/Boros/SemanticRetrievalPolicy.swift`) is `.disabledByPolicy`. Three paths pass it: selected-Qwen GUI Send through `AnswerAttemptCoordinator`, native-profile GUI Send through `ChatContextPreparation.prepare`, and that path's UI self-test observation. Their preparation never receives a semantic index. It selects up to eight unique alphanumeric terms after removing common English filler words, then retrieves scoped any-term lexical matches. Primary completion and the v1/16 exchange expansion follow. This is exactly the retrieval harness `lexical` arm (development R2 60/90, regression 9/12), and the harness `ordinary_send` arm checks that equivalence. Recent/current sources are excluded in SQL before candidate limits. No query embedding or vector read occurs.
 
 The retrieval audit records `"semantic_retrieval": "disabled_by_policy"` with `"mode": "lexical"`, and the status line carries no "semantic recall is unavailable" notice. The evidence and the reversal point are in [the step 4 decision](P2-SEMANTIC-DECISION.md#decision). Explicit paths keep fused retrieval when they pass an index with the default `.enabled` policy:
