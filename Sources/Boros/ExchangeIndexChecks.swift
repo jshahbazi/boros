@@ -494,6 +494,7 @@ enum ExchangeIndexChecks {
 
         result.merge(try episodeParity()) { _, latest in latest }
         result.merge(try fallbackChecks()) { _, latest in latest }
+        result.merge(try oversizedFallbackChecks()) { _, latest in latest }
         return result
     }
 
@@ -575,6 +576,130 @@ enum ExchangeIndexChecks {
         result["exchange_index_restored_large_store_falls_back_identically_then_builds_outside_the_turn"] = try lifecycle(restored!)
         restored!.waitForExchangeIndexBuild()
         restored = nil
+        return result
+    }
+
+    /// The ordinary Send default on a store with no sidecar whose project is
+    /// above the in-memory rebuild's 32 MiB limit, as on a large store's first
+    /// turns after the default switch, an upgrade or a restore. Before the
+    /// fallback such a turn failed (`snapshotLimit`). It now selects exactly
+    /// what the v1/16 policy selects on an identical copy of the store, under
+    /// the frozen exchange policy and with the fallback label; the background
+    /// build still runs, the next turn reads the persistent index, and
+    /// post-commit maintenance resumes. The diagnostic rebuild source still
+    /// refuses, so parity arms are unchanged.
+    private static func oversizedFallbackChecks() throws -> [String: Bool] {
+        var result: [String: Bool] = [:]
+        let policy = ContextComponentPolicy.currentSelectedQwen
+        let fixture = try Fixture(label: "oversized")
+        let filler = try fixture.conversation()
+        // More events than a turn indexes itself, so the turn needs the rebuild.
+        for index in 0..<(ExchangeIndexStore.maximumTurnCatchUp / 2 + 25) {
+            try fixture.append(filler, .human, "Synthetic filler question \(index)")
+            try fixture.append(filler, .assistant, "Synthetic filler reply \(index)")
+        }
+        // Above the rebuild's byte limit with payloads that hold no terms.
+        let bulk = try fixture.conversation(), large = String(repeating: ". ", count: 2_000_000)
+        var bulkBytes = 0
+        while bulkBytes <= ExchangeBlockQuery.maximumSourceBytes {
+            try fixture.append(bulk, .assistant, large); bulkBytes += large.utf8.count
+        }
+        let needles = try fixture.conversation()
+        try fixture.append(needles, .human, "Synthetic quokka habitat survey question")
+        try fixture.append(needles, .assistant, "Synthetic habitat survey answer about the quokka")
+        let requests = try fixture.conversation()
+        // An identical copy for the v1/16 comparison turn.
+        fixture.close()
+        let copyURL = fixture.directory.deletingLastPathComponent()
+            .appendingPathComponent("boros-exchange-oversized-v1-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: copyURL) }
+        try FileManager.default.copyItem(at: fixture.directory, to: copyURL)
+        try fixture.reopen()
+        var copy: MemoryStore? = try MemoryStore(directory: copyURL)
+        let clock = Clock(), prompt = "Where was the quokka habitat survey?", humanID = "synthetic-oversized-request"
+        func accept(_ store: MemoryStore, _ frozen: ContextComponentPolicy, _ human: String) throws -> EpisodeLease {
+            var limits = EpisodeLimits(); limits.componentPolicy = frozen
+            let episodeID = UUID().uuidString
+            _ = try store.acceptRequestAndBeginEpisode(conversationID: requests.id, turnID: human + "-turn",
+                humanEventID: human, episodeID: episodeID, text: prompt, limits: limits, clock: clock.now())
+            return EpisodeLease(ledger: store, episodeID: episodeID, clock: clock)
+        }
+        func retrieval(_ snapshot: ContextSnapshot) throws -> [String: Any] {
+            try JSONSerialization.jsonObject(with: snapshot.retrievalAuditJSON ?? Data("{}".utf8)) as? [String: Any] ?? [:]
+        }
+
+        // v1/16 on the copy: ordinary Send's selection before October 12, 2026.
+        let v1Lease = try accept(copy!, .selectedQwen, humanID)
+        let v1Recent = try ContextAssembler.prepareRecent(store: copy!, conversationID: requests.id, projectID: fixture.project,
+            prompt: prompt, system: "Synthetic index host", excludingEventID: humanID, episodeLease: v1Lease,
+            componentPolicy: .selectedQwen)
+        let v1 = try ChatContextPreparation.prepareEvidence(recent: v1Recent, store: copy!, conversationID: requests.id,
+            projectID: fixture.project, prompt: prompt, excludingEventID: humanID, episodeLease: v1Lease,
+            componentPolicy: .selectedQwen, semanticRetrieval: .ordinarySend)
+        _ = try v1Lease.finish(reason: .cancelled)
+        copy = nil
+
+        // The default on the original store.
+        let absent = !fixture.owner.exchangeIndexExists
+        let lease = try accept(fixture.owner, policy, humanID)
+        let recent = try ContextAssembler.prepareRecent(store: fixture.owner, conversationID: requests.id, projectID: fixture.project,
+            prompt: prompt, system: "Synthetic index host", excludingEventID: humanID, episodeLease: lease, componentPolicy: policy)
+        ExchangeBlockQuery.diagnosticIndexSource = .inMemoryRebuild
+        var rebuildRefused = false
+        do {
+            _ = try ExchangeBlockQuery.prepareEvidence(recent: recent, store: fixture.owner, conversationID: requests.id,
+                projectID: fixture.project, prompt: prompt, excludingEventID: humanID, episodeLease: lease,
+                lexicalQueryUTF8Range: nil, componentPolicy: policy)
+        } catch ExchangeBlockQuery.Failure.snapshotLimit { rebuildRefused = true }
+        ExchangeBlockQuery.diagnosticIndexSource = .persistent
+        let before = try lease.checkActive()
+        let served = try ExchangeBlockQuery.prepareEvidence(recent: recent, store: fixture.owner, conversationID: requests.id,
+            projectID: fixture.project, prompt: prompt, excludingEventID: humanID, episodeLease: lease,
+            lexicalQueryUTF8Range: nil, componentPolicy: policy)
+        let after = try lease.checkActive()
+        _ = try lease.finish(reason: .cancelled)
+        let audit = try retrieval(served), fallback = audit["exchange_fallback"] as? [String: Any]
+        result["exchange_index_default_is_the_policy_these_lifecycle_checks_exercise"] = policy == .selectedQwenExchangePacked
+        result["exchange_index_unbuilt_project_above_rebuild_limit_was_refused_by_the_rebuild"] = rebuildRefused && absent
+            && fixture.events.reduce(0) { $0 + $1.byteCount } > ExchangeBlockQuery.maximumSourceBytes
+            && fixture.events.count > ExchangeIndexStore.maximumTurnCatchUp
+        result["exchange_index_unbuilt_oversized_turn_falls_back_to_v1_selection_identically"] = try !served.evidence.isEmpty
+            && spans(served.evidence) == spans(v1.evidence) && served.recentSourceIDs == v1.recentSourceIDs
+            && served.evidence.contains { $0.excerpt.contains("quokka") }
+            && served.deliveryAudit().count > 0
+        result["exchange_index_v1_fallback_is_labelled_under_the_frozen_policy"] = audit["mode"] as? String == ExchangeBlockQuery.lexicalFallbackMode
+            && fallback?["version"] as? String == ExchangeBlockQuery.lexicalFallbackVersion
+            && fallback?["reason"] as? String == ExchangeBlockQuery.unindexedLimitFallbackReason
+            && fallback?["frozen_policy"] as? String == policy.version
+            && fallback?["selection_policy"] as? String == ContextComponentPolicy.selectedQwen.version
+            && audit["exchange_query"] == nil && audit["manifest_id"] == nil && audit["semantic_available"] as? Bool == false
+            && served.selectionAudit?.version == ContextComponentPolicy.exchangeSelectionAuditVersion
+            && served.selectionAudit?.maximumEvidenceSpans == policy.evidenceSpans
+            && (served.retrievalNotice ?? "").contains("still being built")
+            && after.limits.componentPolicy == policy && after.charged.modelCalls == before.charged.modelCalls
+            && after.charged.vectorBytes == before.charged.vectorBytes && after.charged.encoderInputBytes == before.charged.encoderInputBytes
+            && after.charged.metadataRows > before.charged.metadataRows
+
+        // The fallback turn scheduled the build; the next turn reads the index.
+        let built = fixture.owner.waitForExchangeIndexBuild()
+        let lag = fixture.owner.exchangeIndexLag()
+        let nextID = humanID + "-next"
+        let nextLease = try accept(fixture.owner, policy, nextID)
+        let nextRecent = try ContextAssembler.prepareRecent(store: fixture.owner, conversationID: requests.id, projectID: fixture.project,
+            prompt: prompt, system: "Synthetic index host", excludingEventID: nextID, episodeLease: nextLease, componentPolicy: policy)
+        let next = try ExchangeBlockQuery.prepareEvidence(recent: nextRecent, store: fixture.owner, conversationID: requests.id,
+            projectID: fixture.project, prompt: prompt, excludingEventID: nextID, episodeLease: nextLease,
+            lexicalQueryUTF8Range: nil, componentPolicy: policy)
+        _ = try nextLease.finish(reason: .cancelled)
+        let nextAudit = try retrieval(next)
+        let maintainedBefore = fixture.owner.exchangeIndexMaintenanceDiagnostics()?.events ?? 0
+        try fixture.append(needles, .human, "Synthetic quokka follow-up after the build")
+        let maintainedAfter = fixture.owner.exchangeIndexMaintenanceDiagnostics()?.events ?? 0
+        result["exchange_index_oversized_store_builds_outside_the_turn_then_serves_the_default"] = built && lag == 0
+            && fixture.owner.exchangeIndexExists && nextAudit["mode"] as? String == "exchange_packed"
+            && (nextAudit["exchange_query"] as? [String: Any])?["index"] as? String == ExchangeBlockQuery.persistentIndexLabel
+            && nextAudit["exchange_fallback"] == nil && !next.evidence.isEmpty && next.retrievalNotice == nil
+            && maintainedAfter == maintainedBefore + 1 && fixture.owner.exchangeIndexLag() == 0
         return result
     }
 

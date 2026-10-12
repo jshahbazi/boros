@@ -266,7 +266,11 @@ extension ExchangeBlockQuery {
                     exchange["delivery_audit_bytes_before_admission"] = measured
                     result.retrievalAuditJSON = try retrieval(exchange, from: result)
                     result.retrievalManifestID = nil; result.retrievalManifestJSON = nil
-                    result.retrievalNotice = "Archive recall ranked complete exchanges lexically over the whole question and packed them by relevance per cost; semantic recall was not used."
+                    // As the October 8, 2026 lexical decision did, the ordinary
+                    // Send default shows no notice for its intended selection;
+                    // an explicit policy names itself.
+                    result.retrievalNotice = componentPolicy == .currentSelectedQwen ? nil
+                        : "Archive recall ranked complete exchanges lexically over the whole question and packed them by relevance per cost; semantic recall was not used."
                     return result
                 }
                 // Remove the last planned source (all of its pages).

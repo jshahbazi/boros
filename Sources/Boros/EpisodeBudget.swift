@@ -122,9 +122,11 @@ struct ContextComponentPolicy: Codable, Equatable {
     var reductionVersion = "whole-source-geometric-v1"
     var rendererVersion = "qwen38-attributed-text-v1"
 
+    /// v1/16: the ordinary Send default until October 12, 2026. It remains
+    /// selectable (`--component-policy selected-model-context-components-v1`),
+    /// and its stored episodes, journals and archives remain valid.
     static let selectedQwen = ContextComponentPolicy()
     /// Explicit experimental fixtures retain this separately versioned policy.
-    /// Ordinary selected-model episodes use the measured v1 default below.
     static let selectedQwenNeighborhood: ContextComponentPolicy = {
         var value = ContextComponentPolicy()
         value.version = "selected-model-context-components-v2"
@@ -132,10 +134,9 @@ struct ContextComponentPolicy: Codable, Equatable {
         value.reductionVersion = "primary-first-neighbor-geometric-v1"
         return value
     }()
-    /// Explicit experimental P2 policies: the whole question ranks complete
-    /// human-led exchange blocks (step 1); the adjacent variant also packs
-    /// each block's opposite-role neighbors beside it (step 2). Neither is a
-    /// default; ordinary Send keeps v1 until the offline gate justifies it.
+    /// Explicit P2 policies: the whole question ranks complete human-led
+    /// exchange blocks (step 1); the adjacent variant also packs each block's
+    /// opposite-role neighbors beside it (step 2). Neither is a default.
     static let selectedQwenExchange: ContextComponentPolicy = {
         var value = ContextComponentPolicy()
         value.version = "selected-model-context-components-v3-exchange"
@@ -148,19 +149,26 @@ struct ContextComponentPolicy: Codable, Equatable {
         value.version = "selected-model-context-components-v3-exchange-adjacent"
         return value
     }()
-    /// Explicit experimental P2 step 3 policy: the step 1 and 2 ranking and
-    /// neighbors, but a declared candidate window packed by relevance per
-    /// estimated cost with quoted-anchor blocks protected and an omission
-    /// receipt for every candidate unit. Not a default.
+    /// P2 step 3 policy: the step 1 and 2 ranking and neighbors, but a
+    /// declared candidate window packed by relevance per estimated cost with
+    /// quoted-anchor blocks protected and an omission receipt for every
+    /// candidate unit. The ordinary Send default since October 12, 2026.
     static let selectedQwenExchangePacked: ContextComponentPolicy = {
         var value = selectedQwenExchange
         value.version = "selected-model-context-components-v3-exchange-packed"
         return value
     }()
     static let exchangeSelectionAuditVersion = "context-exchange-v1"
-    // The wider candidate frontier remains experimental pending answer-quality
-    // evidence that justifies changing ordinary Send and public evaluation.
-    static let currentSelectedQwen = selectedQwen
+    /// The policy ordinary selected-Qwen Send freezes, and the default of
+    /// unpinned public evaluation (`AnswerEvaluationCommand`). User decision,
+    /// October 12, 2026, on measured answer quality: on the 72 step 3
+    /// retrieval questions (Gemini 3.8 Flash reader, three replicates) the
+    /// mean per-question accept rate rose from 57.9 to 69.0 percent against
+    /// v1/16, paired 95 percent interval +2.3 to +20.4 points
+    /// (docs/EXCHANGE-PACKED-ANSWERS.md). A turn that the exchange index
+    /// cannot serve falls back to the v1 lexical selection with an audit
+    /// label (`ExchangeBlockQuery.lexicalFallbackMode`).
+    static let currentSelectedQwen = selectedQwenExchangePacked
 
     var usesBoundedNeighborhood: Bool { self == Self.selectedQwenNeighborhood }
     var usesExchangeQuery: Bool {

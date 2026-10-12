@@ -54,9 +54,16 @@ INGESTION_SOURCES = ("MemoryStore.swift", "SemanticIndex.swift", "ExchangeIndex.
 GLOBAL_ARMS = ("global_hybrid", "global_fill")
 # `ordinary_send` constructs the GUI Send configuration literally: the history's
 # semantic index passed through SemanticRetrievalPolicy.ordinarySend, which
-# withholds it by user decision (docs/P2-SEMANTIC-DECISION.md, Decision). It
-# must select exactly what `lexical` selects.
+# withholds it by user decision (docs/P2-SEMANTIC-DECISION.md, Decision), and no
+# pinned component policy, so the coordinator freezes the ordinary Send default
+# (ContextComponentPolicy.currentSelectedQwen). Since October 12, 2026 that is
+# exchange_packed (docs/EXCHANGE-PACKED-ANSWERS.md), and the arm must select
+# exactly what `exchange_packed` selects. Every other arm pins its policy;
+# `lexical` remains the v1/16 arm that ordinary Send matched before.
 ORDINARY_SEND_ARM = "ordinary_send"
+ORDINARY_SEND_POLICY = "selected-model-context-components-v3-exchange-packed"
+ORDINARY_SEND_EQUIVALENT_ARM = "exchange_packed"
+ORDINARY_SEND_EQUIVALENCE_KEYS = ("delivery", "candidates", "tokens", "policy_recorded")
 # Persistent exchange index parity (docs/P2-EXCHANGE-INDEX.md): each pair runs one
 # policy over the persistent index (the shipped path) and over the per-turn
 # in-memory rebuild it replaced. Selection and delivery must be identical.
@@ -585,21 +592,24 @@ def diagnostic(attempt):
 
 
 def ordinary_send_equivalence(attempts):
-    """Content-free comparison of the ordinary Send arm with the lexical arm:
-    identical recent context, delivered byte ranges and traced candidates, and
-    a preparation that received no index and recorded the policy."""
-    ordinary, lexical = attempts.get(ORDINARY_SEND_ARM), attempts.get("lexical")
-    if not ordinary or not lexical or not ordinary.get("preparation_completed") or not lexical.get("preparation_completed"):
+    """Content-free comparison of the ordinary Send arm with the arm of the policy
+    ordinary Send freezes (exchange_packed): identical recent context, delivered
+    byte ranges in order, exchange audit (candidate units, ranked blocks and the
+    index label), component token counts, and a preparation that received no index
+    and froze and recorded the default policy."""
+    ordinary, packed = attempts.get(ORDINARY_SEND_ARM), attempts.get(ORDINARY_SEND_EQUIVALENT_ARM)
+    if not ordinary or not packed or not ordinary.get("preparation_completed") or not packed.get("preparation_completed"):
         return None
+
     def ranges(attempt):
-        return sorted((item["event_id"], item["offset"], item["bytes"]) for item in attempt.get("evidence", []))
-    def candidates(attempt):
-        return [(item.get("event_id"), item.get("rank"), item.get("offset"), item.get("bytes")) for item in attempt.get("candidates", [])]
-    return {"delivery": ordinary.get("recent_source_ids") == lexical.get("recent_source_ids") and ranges(ordinary) == ranges(lexical),
-            "candidates": candidates(ordinary) == candidates(lexical)
-                and bool(ordinary.get("trace_omitted")) == bool(lexical.get("trace_omitted")),
-            "policy_recorded": (ordinary.get("retrieval") or {}).get("semantic_retrieval") == "disabled_by_policy"
-                and (ordinary.get("retrieval") or {}).get("mode") == "lexical"
+        return [(item["event_id"], item["offset"], item["bytes"]) for item in attempt.get("evidence", [])]
+
+    return {"delivery": ordinary.get("recent_source_ids") == packed.get("recent_source_ids") and ranges(ordinary) == ranges(packed),
+            "candidates": ordinary.get("exchange") is not None and ordinary.get("exchange") == packed.get("exchange"),
+            "tokens": ordinary.get("components") == packed.get("components")
+                and ordinary.get("prompt_tokens") == packed.get("prompt_tokens"),
+            "policy_recorded": (ordinary.get("retrieval") or {}).get("mode") == ORDINARY_SEND_EQUIVALENT_ARM
+                and (ordinary.get("components") or {}).get("policyVersion") == ORDINARY_SEND_POLICY
                 and ordinary.get("preparation_received_semantic_index") is False}
 
 
@@ -737,14 +747,16 @@ def run(args):
         "stage_measured": "R1 candidate recall and R2 delivered recall; no answers, judges or end-to-end quality",
         "cohort": cohort, "configuration": {key: value for key, value in configuration.items() if key not in ("endpoint", "system")}
             | {"system_sha256": digest(configuration["system"].encode())},
-        "component_policy": "ContextComponentPolicy.currentSelectedQwen (v1/16)",
+        "component_policy": {ORDINARY_SEND_ARM: "ContextComponentPolicy.currentSelectedQwen, unpinned (" + ORDINARY_SEND_POLICY + ")",
+                             "recent_only, lexical, hybrid, global_hybrid, global_fill, declared-source control": "selected-model-context-components-v1 (v1/16), pinned",
+                             "exchange arms": "their explicit P2 policy, pinned"},
         "arms": {"recent_only": "recent_only strategy",
-                 "lexical": "hybrid strategy without a semantic index; the selection ordinary Send uses since October 8, 2026",
-                 "hybrid": "hybrid strategy with the history's semantic index (explicit fused retrieval; ordinary Send until October 8, 2026)",
-                 ORDINARY_SEND_ARM: "ordinary Send as the GUI constructs it: the history's semantic index passed through SemanticRetrievalPolicy.ordinarySend, which withholds it",
+                 "lexical": "hybrid strategy without a semantic index under v1/16; the selection ordinary Send used from October 8 to October 12, 2026",
+                 "hybrid": "hybrid strategy with the history's semantic index under v1/16 (explicit fused retrieval; ordinary Send until October 8, 2026)",
+                 ORDINARY_SEND_ARM: "ordinary Send as the GUI constructs it: the history's semantic index passed through SemanticRetrievalPolicy.ordinarySend, which withholds it, and the coordinator's default component policy",
                  "exchange_lexical": "explicit P2 step 1 policy selected-model-context-components-v3-exchange; no semantic index",
                  "exchange_adjacent": "explicit P2 step 1+2 policy selected-model-context-components-v3-exchange-adjacent; no semantic index",
-                 "exchange_packed": "explicit P2 step 3 policy selected-model-context-components-v3-exchange-packed; no semantic index",
+                 "exchange_packed": "P2 step 3 policy selected-model-context-components-v3-exchange-packed, pinned; no semantic index; the ordinary Send default since October 12, 2026",
                  "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
                  "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)",
                  "exchange_adjacent_rebuild": "exchange_adjacent over the per-turn in-memory rebuild (parity arm; the policy reads the persistent index)",
@@ -764,7 +776,7 @@ def run(args):
         "exchange_index_build": {"milliseconds_p50": percentile([(row.get("exchange_index") or {}).get("milliseconds") for row in rows], 0.5),
                                  "milliseconds_max": max([(row.get("exchange_index") or {}).get("milliseconds") or 0 for row in rows], default=None)},
         "ordinary_send_equivalence": {key: sum(bool((row["ordinary_send_equivalence"] or {}).get(key)) for row in rows)
-            for key in ("delivery", "candidates", "policy_recorded")} | {"compared": sum(row["ordinary_send_equivalence"] is not None for row in rows),
+            for key in ORDINARY_SEND_EQUIVALENCE_KEYS} | {"compared": sum(row["ordinary_send_equivalence"] is not None for row in rows),
                                                                        "histories": len(rows)},
         "semantic_index": {"histories": len(semantic),
             "construction_failures": sum(bool(item.get("failure")) for item in semantic),
