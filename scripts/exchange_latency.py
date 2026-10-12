@@ -2,9 +2,11 @@
 """P2 latency diagnostic for the explicit exchange policies on the public synthetic scaling corpus.
 
 It generates the deterministic development scaling fixture, compiles every application source except the app
-entry point with Tests/Evaluation/ExchangeLatencyHarness.swift, and runs a warm profile (ingest, then probes) and a
-restart profile (reopen, then probes) per scale. No model server, tokenizer or provider is involved. Output is
-metadata only: counts, statuses and timings. Token counting and admission are not part of the measured path.
+entry point with Tests/Evaluation/ExchangeLatencyHarness.swift, and runs per scale: a warm profile (ingest without
+an exchange index, build the persistent index for the existing store, then probes), a restart profile (reopen,
+then probes) and a maintained profile (ingest into a fresh store whose index exists from the start, so each append
+is indexed incrementally). No model server, tokenizer or provider is involved. Output is metadata only: counts,
+statuses, sizes and timings. Token counting and admission are not part of the measured path.
 """
 from __future__ import annotations
 
@@ -59,9 +61,14 @@ def distribution(values):
 
 
 def summarize(raw: dict) -> dict:
+    if raw["mode"] == "maintained":
+        return {key: raw[key] for key in ("event_count", "source_bytes", "ingestion_milliseconds", "maintained_events",
+                                          "maintenance_milliseconds", "store_bytes", "index_bytes")} | {
+            "maintenance_microseconds_per_event": round(1000 * raw["maintenance_milliseconds"] / max(1, raw["maintained_events"]), 1)}
     probes = raw["probes"]
     result = {"event_count": raw["event_count"], "source_bytes": raw["source_bytes"],
               "store_open_milliseconds": raw["store_open_milliseconds"], "ingestion_milliseconds": raw["ingestion_milliseconds"],
+              "index_build": raw["index_build"], "store_bytes": raw["store_bytes"], "index_bytes": raw["index_bytes"],
               "limits": raw["limits"], "policies": {}}
     for name in POLICIES:
         rows = [probe[name] for probe in probes]
@@ -73,6 +80,14 @@ def summarize(raw: dict) -> dict:
             entry["evidence_milliseconds"] = distribution([row.get("evidence_milliseconds") for row in rows])
             entry["memory_path_milliseconds"] = distribution([row["recent_milliseconds"] + row.get("evidence_milliseconds", 0) for row in rows])
             entry["indexed_source_count"] = distribution([row.get("indexed_source_count") for row in rows])
+            entry["charged_metadata_rows"] = distribution([row.get("charged_metadata_rows") for row in rows])
+            entry["charged_raw_source_bytes"] = distribution([row.get("charged_raw_source_bytes") for row in rows])
+            entry["index_labels"] = sorted({str(row.get("index")) for row in rows})
+            stages = [row.get("persistent") or {} for row in rows]
+            entry["persistent_stages"] = {key: distribution([stage.get(key) for stage in stages]) for key in (
+                "snapshot_milliseconds", "recompute_milliseconds", "rank_milliseconds", "window_milliseconds",
+                "catch_up_events", "posting_rows", "posting_entries", "block_log_rows", "matched_blocks",
+                "affected_conversations", "recomputed_sources", "windows", "loaded_sources")}
         result["policies"][name] = entry
     stages = [probe["uncapped_stages"] for probe in probes]
     result["uncapped_stages"] = {key: distribution([stage[key] for stage in stages]) for key in stages[0]}
@@ -89,11 +104,12 @@ def main():
         raise SystemExit("Output directory must be new and under this checkout's .build.")
     output.mkdir(parents=True, mode=0o700)
     binary, implementation = compile_harness(output)
-    report = {"version": "boros-exchange-latency-v1", "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+    report = {"version": "boros-exchange-latency-v2", "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
               "implementation": implementation, "policies": list(POLICIES), "scales": {},
               "limitations": ["one synthetic history per scale; nine probes per profile", "token counting, admission and generation excluded",
                               "probes run sequentially in one process; operating-system cache uncontrolled after restart",
-                              "uncapped stages are a diagnostic without lease or snapshot cap, not a shipped path"]}
+                              "uncapped stages are the replaced in-memory rebuild without lease or snapshot cap, a diagnostic only",
+                              "the maintained profile measures ingestion in a separate process; its maintenance time is measured directly"]}
     for scale in args.scales:
         directory = output / str(scale)
         runtime = directory / "runtime"
@@ -101,7 +117,7 @@ def main():
         fixtures = directory / "fixtures.json"
         fixtures.write_bytes(canonical_json(generate("development", scale_events=scale)))
         report["scales"][str(scale)] = {"fixture_sha256": digest(fixtures.read_bytes())}
-        for mode in ("warm", "restart"):
+        for mode in ("warm", "restart", "maintained"):
             raw_path = directory / (mode + ".json")
             started = time.monotonic()
             process = subprocess.run([str(binary), mode, str(fixtures), str(runtime), str(raw_path)], capture_output=True, timeout=1800)
@@ -114,6 +130,8 @@ def main():
         fixtures.unlink()
     (output / "report.json").write_bytes(canonical_json(report) + b"\n")
     for scale, value in report["scales"].items():
+        print(json.dumps({"scale": scale, "build": (value.get("warm") or {}).get("index_build"),
+                          "maintained": value.get("maintained")}, sort_keys=True))
         for mode in ("warm", "restart"):
             entry = value.get(mode) or {}
             print(json.dumps({"scale": scale, "mode": mode, "policies": {name: {k: entry["policies"][name].get(k) for k in (

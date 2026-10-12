@@ -20,7 +20,8 @@ import Foundation
 /// records only the body's SHA-256 and size.
 @main
 enum DeliveryHarness {
-    static let ingestionVersion = "delivery-harness-ingest-v1"
+    /// v2: the cached baseline also holds the built exchange index sidecar.
+    static let ingestionVersion = "delivery-harness-ingest-v2"
 
     struct Event: Decodable {
         let id: String
@@ -88,9 +89,16 @@ enum DeliveryHarness {
         case "exchange_lexical": limits.componentPolicy = .selectedQwenExchange
         case "exchange_adjacent": limits.componentPolicy = .selectedQwenExchangeAdjacent
         case "exchange_packed": limits.componentPolicy = .selectedQwenExchangePacked
+        case "exchange_adjacent_rebuild": limits.componentPolicy = .selectedQwenExchangeAdjacent
+        case "exchange_packed_rebuild": limits.componentPolicy = .selectedQwenExchangePacked
         default: return nil
         }
         return limits
+    }
+    /// Parity arms: the same policy over the per-turn in-memory rebuild
+    /// instead of the persistent exchange index (docs/P2-EXCHANGE-INDEX.md).
+    static func indexSource(_ arm: String) -> ExchangeBlockQuery.IndexSource {
+        arm.hasSuffix("_rebuild") ? .inMemoryRebuild : .persistent
     }
     /// P2 step 4 arms: the hybrid strategy with an explicitly selected
     /// semantic population and fusion (GlobalSemanticSearch.swift).
@@ -198,6 +206,11 @@ enum DeliveryHarness {
                 }
                 record["ingest_milliseconds"] = milliseconds(since: ingestStart)
                 record["events"] = input.events.count
+                // The exchange arms read the persistent index; every attempt
+                // copies the baseline with it already built.
+                let indexStart = DispatchTime.now().uptimeNanoseconds
+                let built = try owner.buildExchangeIndex()
+                record["exchange_index"] = ["events": built.events, "milliseconds": milliseconds(since: indexStart)]
                 let semanticStart = DispatchTime.now().uptimeNanoseconds
                 var semantic: [String: Any] = ["performed": false]
                 if input.arms.contains("hybrid") || input.declared_source_ids != nil {
@@ -267,6 +280,7 @@ enum DeliveryHarness {
             var captured: AnswerAttemptPreparation?
             var item: [String: Any] = ["arm": arm]
             let conversationID = conversations[key(question.project_id, question.conversation_key)]!
+            ExchangeBlockQuery.diagnosticIndexSource = indexSource(arm)
             var coordinatorRef: AnswerAttemptCoordinator?
             let value = AnswerAttemptCoordinator(store: owner, conversationID: conversationID,
                 projectID: project(question.project_id), prompt: effectivePrompt(question),

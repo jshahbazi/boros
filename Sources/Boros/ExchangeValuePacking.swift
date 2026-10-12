@@ -80,20 +80,20 @@ extension ExchangeBlockQuery {
 
         /// Candidate units of the top ranked blocks, in chronological order
         /// within each block: previous neighbor, lead, replies, next neighbor.
-        static func candidates(index: Index, ranked: [RankedBlock]) -> [(anchors: Int, units: [Unit])] {
-            ranked.prefix(candidateBlockDepth).enumerated().map { rank, entry in
-                let block = index.blocks[entry.block], mandatory = entry.anchorMatches > 0
+        static func candidates(index: ExchangeCorpus, ranked: [RankedBlock]) throws -> [(anchors: Int, units: [Unit])] {
+            try ranked.prefix(candidateBlockDepth).enumerated().map { rank, entry in
+                let sources = try index.members(entry.block), mandatory = entry.anchorMatches > 0
                 var units: [Unit] = []
-                if let first = block.sources.first, let candidate = index.previous[first],
-                   index.sources[candidate].reference.role != index.sources[first].reference.role {
+                if let first = sources.first, let candidate = try index.previous(first),
+                   try index.role(candidate) != (try index.role(first)) {
                     units.append(Unit(rank: rank, kind: "p", source: candidate, value: entry.score * neighborWeight, mandatory: false))
                 }
-                for (position, source) in block.sources.enumerated() {
+                for (position, source) in sources.enumerated() {
                     units.append(Unit(rank: rank, kind: position == 0 ? "l" : "r", source: source,
                         value: entry.score * memberWeight, mandatory: mandatory))
                 }
-                if let last = block.sources.last, let candidate = index.next[last],
-                   index.sources[candidate].reference.role != index.sources[last].reference.role {
+                if let last = sources.last, let candidate = try index.next(last),
+                   try index.role(candidate) != (try index.role(last)) {
                     units.append(Unit(rank: rank, kind: "n", source: candidate, value: entry.score * neighborWeight, mandatory: false))
                 }
                 return (entry.anchorMatches, units)
@@ -103,14 +103,14 @@ extension ExchangeBlockQuery {
         /// Mandatory members first in rank order, then every other unit by
         /// value per normalized cost. A reply or neighbor needs its block's
         /// lead delivered; one that outranks its lead waits for that lead.
-        static func plan(index: Index, ranked: [RankedBlock], maximumSpans: Int, tokenBudget: Int,
+        static func plan(index: ExchangeCorpus, ranked: [RankedBlock], maximumSpans: Int, tokenBudget: Int,
                          auditBudget: Int, selectionVersion: String) throws -> Plan {
-            let blocks = candidates(index: index, ranked: ranked)
+            let blocks = try candidates(index: index, ranked: ranked)
             var codes = blocks.map { Array(repeating: "?", count: $0.units.count) }
             var costs: [Int: (spans: [MemoryHit], tokens: Int, audit: Int)] = [:]
             func cost(_ source: Int) throws -> (spans: [MemoryHit], tokens: Int, audit: Int) {
                 if let known = costs[source] { return known }
-                let spans = pages(index.sources[source])
+                let spans = try pages(index, source)
                 var tokens = 0, audit = 0
                 for span in spans {
                     tokens += try estimatedTokens(span, selectionVersion: selectionVersion)
@@ -122,7 +122,7 @@ extension ExchangeBlockQuery {
             func attempt(_ rank: Int, _ position: Int, mandatory: Bool) throws {
                 let unit = blocks[rank].units[position]
                 if delivered[unit.source] != nil { codes[rank][position] = "U"; return }
-                if index.sources[unit.source].reference.byteCount == 0 { codes[rank][position] = "Z"; return }
+                if try index.byteCount(unit.source) == 0 { codes[rank][position] = "Z"; return }
                 let value = try cost(unit.source)
                 let reason = spanCount + value.spans.count > maximumSpans ? "S"
                     : tokens + value.tokens > tokenBudget ? "T" : auditBytes + value.audit > auditBudget ? "A" : nil
@@ -194,13 +194,13 @@ extension ExchangeBlockQuery {
         /// Content-free audit of the candidate window. Codes are one
         /// character, so a placeholder plan has the final serialized size up
         /// to numeric fields.
-        static func audit(plan: Plan, index: Index, matchedBlocks: Int, tokenBudget: Int, auditBudget: Int?,
-                          maximumSpans: Int) -> [String: Any] {
+        static func audit(plan: Plan, index: ExchangeCorpus, matchedBlocks: Int, tokenBudget: Int, auditBudget: Int?,
+                          maximumSpans: Int) throws -> [String: Any] {
             var counts: [String: Int] = [:]
             for row in plan.codes { for code in row { counts[code, default: 0] += 1 } }
-            let candidates: [[Any]] = plan.blocks.enumerated().map { rank, block in
-                [block.anchors, block.units.enumerated().map { position, unit in
-                    [candidateID(index.sources[unit.source].reference.eventID), unit.kind, plan.codes[rank][position]]
+            let candidates: [[Any]] = try plan.blocks.enumerated().map { rank, block in
+                [block.anchors, try block.units.enumerated().map { position, unit in
+                    [candidateID(try index.eventID(unit.source)), unit.kind, plan.codes[rank][position]]
                 }]
             }
             return ["packing_version": version, "candidate_block_depth": candidateBlockDepth,
@@ -223,7 +223,7 @@ extension ExchangeBlockQuery {
         /// planned source is removed with an `A` receipt and delivery repeats.
         static func select(recent: ContextSnapshot, binding: ContextSelectionBinding, store: MemoryStore,
             conversationID: String, projectID: String, excludingEventID: String, episodeLease: EpisodeLease?,
-            componentPolicy: ContextComponentPolicy, index: Index, ranked: [RankedBlock], tokenBudget: Int,
+            componentPolicy: ContextComponentPolicy, index: ExchangeCorpus, ranked: [RankedBlock], tokenBudget: Int,
             baseAudit: [String: Any]) throws -> ContextSnapshot {
             func retrieval(_ exchange: [String: Any], from snapshot: ContextSnapshot) throws -> Data {
                 var value = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
@@ -234,11 +234,12 @@ extension ExchangeBlockQuery {
             }
             // Size probe: the delivery audit with no historical sources and
             // a placeholder candidate audit of the final shape.
-            let placeholder = Plan(hits: [], owners: [], blocks: candidates(index: index, ranked: ranked),
-                codes: candidates(index: index, ranked: ranked).map { Array(repeating: "?", count: $0.units.count) },
+            let placeholderBlocks = try candidates(index: index, ranked: ranked)
+            let placeholder = Plan(hits: [], owners: [], blocks: placeholderBlocks,
+                codes: placeholderBlocks.map { Array(repeating: "?", count: $0.units.count) },
                 estimatedTokens: tokenBudget, estimatedAuditBytes: deliveryAuditLimitBytes)
             var probe = recent
-            probe.retrievalAuditJSON = try retrieval(audit(plan: placeholder, index: index, matchedBlocks: ranked.count,
+            probe.retrievalAuditJSON = try retrieval(try audit(plan: placeholder, index: index, matchedBlocks: ranked.count,
                 tokenBudget: tokenBudget, auditBudget: deliveryAuditLimitBytes, maximumSpans: componentPolicy.evidenceSpans), from: recent)
             let base = try probe.deliveryAudit().count
             let auditBudget = max(0, deliveryAuditLimitBytes - admissionHeadroomBytes - probeSlackBytes - base)
@@ -250,7 +251,7 @@ extension ExchangeBlockQuery {
                     projectID: projectID, excludingEventID: excludingEventID, historicalHits: plan.hits,
                     maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
                     componentPolicy: componentPolicy, historicalProvenance: nil)
-                var exchange = audit(plan: plan, index: index, matchedBlocks: ranked.count, tokenBudget: tokenBudget,
+                var exchange = try audit(plan: plan, index: index, matchedBlocks: ranked.count, tokenBudget: tokenBudget,
                     auditBudget: auditBudget, maximumSpans: componentPolicy.evidenceSpans)
                 exchange["verification_trimmed_source_count"] = trimmed
                 exchange["delivery_audit_bytes_before_admission"] = 0

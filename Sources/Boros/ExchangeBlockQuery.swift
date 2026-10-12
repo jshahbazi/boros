@@ -1,24 +1,67 @@
 import Foundation
 
+/// Source access for the exchange packers. Source handles increase with
+/// store sequence within one corpus, so handle order is chronological order.
+/// `Index` (the per-turn in-memory rebuild) and `ExchangeIndexView` (the
+/// persistent sidecar) both conform; the packers see no difference.
+protocol ExchangeCorpus {
+    /// Members of a ranked block, chronological.
+    func members(_ block: Int) throws -> [Int]
+    /// Complete metadata and text; the persistent index loads these lazily.
+    func reference(_ source: Int) throws -> MemorySourceReference
+    func text(_ source: Int) throws -> String
+    /// Same-conversation predecessor/successor among the corpus's sources.
+    func previous(_ source: Int) throws -> Int?
+    func next(_ source: Int) throws -> Int?
+    /// Indexed metadata, available without loading the source.
+    func role(_ source: Int) throws -> MemoryRole
+    func byteCount(_ source: Int) throws -> Int
+    func eventID(_ source: Int) throws -> String
+    /// Lower bounds on the source's page count and estimated tokens.
+    func minimumCost(_ source: Int, selectionVersion: String) throws -> (spans: Int, tokens: Int)
+}
+
 /// Experimental P2 ordinary-path selection (explicit policies only).
 ///
 /// Step 1 ranks complete human-led exchange blocks against every content term
 /// of the question with inverse-document-frequency weights, ported from the
 /// investigation engine's block search. Quoted anchors are mandatory: blocks
-/// that contain every term of more quoted anchors rank first. The index is
-/// rebuilt in memory for each turn from one fixed source frontier; nothing is
-/// persisted. Step 2 additionally packs each selected block's adjacent
-/// opposite-role messages beside it when the estimated budget allows.
+/// that contain every term of more quoted anchors rank first. Step 2
+/// additionally packs each selected block's adjacent opposite-role messages
+/// beside it when the estimated budget allows.
+///
+/// Ranking statistics come from the persistent exchange index
+/// (`ExchangeIndex.swift`), a derived sidecar maintained as sources are
+/// added. The original per-turn in-memory rebuild over one fixed frontier is
+/// retained as `Index` for parity checks and diagnostic harness arms. Both
+/// share one scoring function and the same packers, so the same store
+/// contents select the same evidence.
 ///
 /// Delivered spans are exact store pages that the assembler re-reads and
 /// verifies. Audits contain identifiers, counts and digests, never text.
 enum ExchangeBlockQuery {
     static let version = "exchange-block-query-v1"
-    static let scoringVersion = "idf-term-coverage-sqrt-byte-cost-v1"
+    /// v2: the same score, with matched terms summed in sorted order (see
+    /// `rank`). The version string keeps its length, so audit sizes, which
+    /// step 3 budgets, are unchanged.
+    static let scoringVersion = "idf-term-coverage-sqrt-byte-cost-v2"
     static let blockPackingVersion = "exchange-block-greedy-v1"
     static let adjacentPackingVersion = "exchange-adjacent-greedy-v1"
+    /// In-memory rebuild only: it reads and verifies every source per turn.
     static let maximumSources = 20_000
     static let maximumSourceBytes = 32 * 1_048_576
+    /// Persistent index: sources in one project. Latency is measured to
+    /// 100,000 events (docs/P2-EXCHANGE-INDEX.md); larger projects fail closed.
+    static let persistentMaximumSources = 200_000
+    /// The audit's `index` labels have equal UTF-8 length, so the step 3
+    /// audit byte budget, which serializes this audit, is identical for both.
+    static let rebuildIndexLabel = "in_memory_per_turn"
+    static let persistentIndexLabel = "persistent_sidecar"
+    /// The in-memory rebuild served the turn because the persistent index was
+    /// not built or more than `ExchangeIndexStore.maximumTurnCatchUp` events
+    /// behind. Same length as the other labels, so this audit's size, which
+    /// step 3 budgets, does not depend on which index served the turn.
+    static let fallbackIndexLabel = "in_memory_fallback"
     static let maximumQueryTerms = 256
     static let maximumAnchors = 8
     /// Ranked blocks reported by identifier for offline diagnosis.
@@ -33,7 +76,18 @@ enum ExchangeBlockQuery {
     static let contentBytesPerToken = 3.2
     static let evidenceTokenFraction = 1.0
 
-    enum Failure: Error { case snapshotLimit, sourceMismatch }
+    enum Failure: Error { case snapshotLimit, sourceMismatch, indexUnavailable, indexMismatch }
+
+    enum IndexSource: String { case persistent, inMemoryRebuild }
+    private static let indexSourceLock = NSLock()
+    private static var indexSourceValue = IndexSource.persistent
+    /// Diagnostic only. Parity checks and the harness's `*_rebuild` arms
+    /// select the in-memory rebuild; product paths keep the default. The
+    /// choice is recorded in the audit's `index` field.
+    static var diagnosticIndexSource: IndexSource {
+        get { indexSourceLock.lock(); defer { indexSourceLock.unlock() }; return indexSourceValue }
+        set { indexSourceLock.lock(); indexSourceValue = newValue; indexSourceLock.unlock() }
+    }
 
     struct Query: Equatable {
         let terms: Set<String>
@@ -59,7 +113,7 @@ enum ExchangeBlockQuery {
     }
 
     /// Per-turn, in-memory exchange index over one fixed frontier.
-    struct Index {
+    struct Index: ExchangeCorpus {
         let sources: [Source]
         let blocks: [Block]
         /// Same-conversation predecessor/successor source index, if any.
@@ -104,39 +158,73 @@ enum ExchangeBlockQuery {
         }
 
         func idf(_ term: String) -> Double {
-            log(1 + (Double(blocks.count) + 0.5) / (Double(documentFrequency[term, default: 0]) + 0.5))
+            ExchangeBlockQuery.idf(blockCount: blocks.count, documentFrequency: documentFrequency[term, default: 0])
         }
 
         /// Blocks matching at least one query term, best first. Blocks that
         /// contain every term of more quoted anchors always rank first; ties
         /// prefer the later block, as the investigation search does.
         func rank(_ query: Query) -> [RankedBlock] {
-            var ranked: [RankedBlock] = []
-            for (index, block) in blocks.enumerated() {
-                let matches = query.terms.filter { block.frequency[$0, default: 0] > 0 }
-                guard !matches.isEmpty else { continue }
-                let relevance = matches.reduce(0.0) { $0 + idf($1) * (1 + min(2, log(Double(block.frequency[$1]!)))) }
-                let anchors = query.anchors.filter { anchor in anchor.allSatisfy { block.frequency[$0, default: 0] > 0 } }.count
-                ranked.append(RankedBlock(block: index, anchorMatches: anchors,
-                    score: relevance / sqrt(1 + Double(block.bytes) / 512)))
-            }
-            return ranked.sorted {
-                if $0.anchorMatches != $1.anchorMatches { return $0.anchorMatches > $1.anchorMatches }
-                if $0.score != $1.score { return $0.score > $1.score }
-                return $0.block > $1.block
-            }
+            ExchangeBlockQuery.rank(query, blockCount: blocks.count, bytes: { blocks[$0].bytes },
+                frequency: { blocks[$0].frequency[$1, default: 0] }, idf: idf)
+        }
+
+        func members(_ block: Int) throws -> [Int] { blocks[block].sources }
+        func reference(_ source: Int) throws -> MemorySourceReference { sources[source].reference }
+        func text(_ source: Int) throws -> String { sources[source].text }
+        func previous(_ source: Int) throws -> Int? { previous[source] }
+        func next(_ source: Int) throws -> Int? { next[source] }
+        func role(_ source: Int) throws -> MemoryRole { sources[source].reference.role }
+        func byteCount(_ source: Int) throws -> Int { sources[source].reference.byteCount }
+        func eventID(_ source: Int) throws -> String { sources[source].reference.eventID }
+        func minimumCost(_ source: Int, selectionVersion: String) throws -> (spans: Int, tokens: Int) {
+            let reference = sources[source].reference
+            return try ExchangeBlockQuery.minimumCost(eventID: reference.eventID, conversationID: reference.conversationID,
+                role: reference.role, byteCount: reference.byteCount, digest: reference.digest, selectionVersion: selectionVersion)
+        }
+    }
+
+    // MARK: Shared scoring
+
+    static func idf(blockCount: Int, documentFrequency: Int) -> Double {
+        log(1 + (Double(blockCount) + 0.5) / (Double(documentFrequency) + 0.5))
+    }
+
+    /// The one ranking used by both index sources. Blocks are positions
+    /// `0..<blockCount` in corpus order (conversation first appearance, then
+    /// chronological), which decides equal scores.
+    ///
+    /// Matched terms are summed in sorted term order. Until the persistent
+    /// index (October 2026) they were summed in the iteration order of a
+    /// filtered `Set`, which Swift seeds per instance, so the last bits of a
+    /// score, and the order of blocks whose scores differed only there, could
+    /// change between calls on the same contents. A fixed order makes equal
+    /// statistics give bit-identical scores on every call and for both
+    /// index sources.
+    static func rank(_ query: Query, blockCount: Int, bytes: (Int) -> Int, frequency: (Int, String) -> Int,
+                     idf: (String) -> Double) -> [RankedBlock] {
+        var ranked: [RankedBlock] = []
+        let ordered = query.terms.sorted()
+        for index in 0..<blockCount {
+            let matches = ordered.filter { frequency(index, $0) > 0 }
+            guard !matches.isEmpty else { continue }
+            let relevance = matches.reduce(0.0) { $0 + idf($1) * (1 + min(2, log(Double(frequency(index, $1))))) }
+            let anchors = query.anchors.filter { anchor in anchor.allSatisfy { frequency(index, $0) > 0 } }.count
+            ranked.append(RankedBlock(block: index, anchorMatches: anchors,
+                score: relevance / sqrt(1 + Double(bytes(index)) / 512)))
+        }
+        return ranked.sorted {
+            if $0.anchorMatches != $1.anchorMatches { return $0.anchorMatches > $1.anchorMatches }
+            if $0.score != $1.score { return $0.score > $1.score }
+            return $0.block > $1.block
         }
     }
 
     // MARK: Query
 
-    /// Ported from the investigation engine's term function: case and
-    /// diacritic folding, alphanumeric runs, its stopword list.
-    static func terms(_ text: String) -> [String] {
-        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty && $0.utf8.count <= 128 && !stopwords.contains($0) }
-    }
+    /// The shared term function (`ExchangeTerms`, beside the index).
+    static func terms(_ text: String) -> [String] { ExchangeTerms.terms(text) }
+    static var termFunctionIdentity: String { ExchangeTerms.identity }
 
     /// Every content term of the question, plus up to eight complete quoted
     /// spans ("...", curly double quotes, or backticks) as anchor term sets.
@@ -167,7 +255,7 @@ enum ExchangeBlockQuery {
         return Query(terms: all, anchors: anchors)
     }
 
-    // MARK: Loading
+    // MARK: Loading (in-memory rebuild)
 
     /// One complete scoped snapshot through a fixed frontier, excluding the
     /// accepted request and recent sources. Payloads are prefunded as one
@@ -217,8 +305,10 @@ enum ExchangeBlockQuery {
     // MARK: Packing
 
     /// Exact store-page boundaries: at most 4,096 bytes, ending on a scalar.
-    static func pages(_ source: Source) -> [MemoryHit] {
-        let bytes = Array(source.text.utf8), reference = source.reference
+    static func pages(_ source: Source) -> [MemoryHit] { pages(reference: source.reference, text: source.text) }
+
+    static func pages(reference: MemorySourceReference, text: String) -> [MemoryHit] {
+        let bytes = Array(text.utf8)
         var hits: [MemoryHit] = [], offset = 0
         while offset < bytes.count {
             var end = min(bytes.count, offset + MemoryStore.maximumPageBytes)
@@ -232,6 +322,44 @@ enum ExchangeBlockQuery {
         }
         return hits
     }
+
+    static func pages(_ corpus: ExchangeCorpus, _ source: Int) throws -> [MemoryHit] {
+        pages(reference: try corpus.reference(source), text: try corpus.text(source))
+    }
+
+    /// A lower bound on `pages` and on the sum of `estimatedTokens` over
+    /// them, from indexed metadata only. Each page carries at least the
+    /// framing with the shortest capture status, a seconds-precision capture
+    /// time, offset 0 and no source time (`null`; a present source time is a
+    /// six-key object, longer); the pages' excerpts sum to the source bytes.
+    /// The header interpolates identifiers and numbers without escaping, so
+    /// its length is a fixed part per (version, role) plus their lengths.
+    /// The packers use the bound only to reject a source whose exact cost
+    /// could not fit either, so decisions are unchanged.
+    static func minimumCost(eventID: String, conversationID: String, role: MemoryRole, byteCount: Int, digest: String,
+                            selectionVersion: String) throws -> (spans: Int, tokens: Int) {
+        guard byteCount > 0 else { return (0, 0) }
+        let pages = (byteCount + MemoryStore.maximumPageBytes - 1) / MemoryStore.maximumPageBytes
+        let estimateVersion = ContextSourceFraming.quotesSources(selectionVersion)
+            ? ContextSourceFraming.currentSelectionVersion : selectionVersion
+        let key = estimateVersion + "\u{0}" + role.rawValue
+        framingLock.lock()
+        var fixed = fixedFraming[key]
+        framingLock.unlock()
+        if fixed == nil {
+            let header = try ContextSourceFraming.evidenceHeader(eventID: "", conversationID: "", role: role.rawValue,
+                status: CaptureStatus.failed.rawValue, createdAt: "2000-01-01T00:00:00Z", digest: String(repeating: "0", count: 64),
+                offset: 0, totalBytes: 0, selectionVersion: estimateVersion, sourceTime: nil)
+            fixed = header.utf8.count + ContextSourceFraming.evidenceFooter.utf8.count + ContextSourceFraming.evidenceSeparator.utf8.count
+            framingLock.lock(); fixedFraming[key] = fixed; framingLock.unlock()
+        }
+        guard digest.utf8.count == 64 else { throw Failure.sourceMismatch }
+        let framing = fixed! + eventID.utf8.count + conversationID.utf8.count + String(byteCount).utf8.count - 1
+        let bound = Double(pages * framing) / headerBytesPerToken + Double(byteCount) / contentBytesPerToken
+        return (pages, max(0, Int(bound.rounded(.down)) - 1))
+    }
+    private static let framingLock = NSLock()
+    private static var fixedFraming: [String: Int] = [:]
 
     static func estimatedTokens(_ hit: MemoryHit, selectionVersion: String) throws -> Int {
         // V4 estimates deliberately use the V3 header bytes: the framing
@@ -255,19 +383,30 @@ enum ExchangeBlockQuery {
     /// With `adjacent`, each included block is followed by its neighbors in
     /// chronological order beside it: the opposite-role message before its
     /// first source and after its last, each added only if it still fits.
-    static func pack(index: Index, ranked: [RankedBlock], maximumSpans: Int, tokenBudget: Int,
-                     adjacent: Bool, selectionVersion: String) throws -> Packing {
+    /// `lowerBounds: false` exists for the check that bounds never change a
+    /// decision; every caller uses the default.
+    static func pack(index: ExchangeCorpus, ranked: [RankedBlock], maximumSpans: Int, tokenBudget: Int,
+                     adjacent: Bool, selectionVersion: String, lowerBounds: Bool = true) throws -> Packing {
         var included = Set<Int>(), hits: [MemoryHit] = [], tokens = 0
         var selectedBlocks = 0, skippedBlocks = 0, neighbors = 0, skippedNeighbors = 0
         var costs: [Int: (spans: [MemoryHit], tokens: Int)] = [:]
         func cost(_ source: Int) throws -> (spans: [MemoryHit], tokens: Int) {
             if let known = costs[source] { return known }
-            let spans = pages(index.sources[source])
+            let spans = try pages(index, source)
             let value = (spans, try spans.reduce(0) { $0 + (try estimatedTokens($1, selectionVersion: selectionVersion)) })
             costs[source] = value
             return value
         }
         func fits(_ sources: [Int]) throws -> Bool {
+            // A lower bound that already exceeds a budget rejects without
+            // reading sources; otherwise the exact cost decides.
+            var minimumSpans = 0, minimumTokens = 0
+            for source in sources where lowerBounds && !included.contains(source) {
+                if let known = costs[source] { minimumSpans += known.spans.count; minimumTokens += known.tokens; continue }
+                let bound = try index.minimumCost(source, selectionVersion: selectionVersion)
+                minimumSpans += bound.spans; minimumTokens += bound.tokens
+            }
+            guard hits.count + minimumSpans <= maximumSpans, tokens + minimumTokens <= tokenBudget else { return false }
             var spans = 0, estimate = 0
             for source in sources where !included.contains(source) {
                 let value = try cost(source); spans += value.spans.count; estimate += value.tokens
@@ -284,18 +423,18 @@ enum ExchangeBlockQuery {
         for (rank, entry) in ranked.enumerated() {
             // Past the audited ranks, stop once no further span could fit.
             if rank >= auditedBlocks && (hits.count >= maximumSpans || tokenBudget - tokens < 128) { break }
-            let block = index.blocks[entry.block]
-            let members = block.sources.filter { !included.contains($0) && index.sources[$0].reference.byteCount > 0 }
+            let blockSources = try index.members(entry.block)
+            let members = try blockSources.filter { try !included.contains($0) && index.byteCount($0) > 0 }
             var disposition = "included"
             if members.isEmpty { disposition = "already_delivered" }
             else if try fits(members) {
                 // Neighbors are placed beside the block in chronological order.
                 var before: Int?, after: Int?
-                if adjacent, let first = block.sources.first, let last = block.sources.last {
-                    if let candidate = index.previous[first], index.sources[candidate].reference.role != index.sources[first].reference.role,
-                       index.sources[candidate].reference.byteCount > 0, !included.contains(candidate) { before = candidate }
-                    if let candidate = index.next[last], index.sources[candidate].reference.role != index.sources[last].reference.role,
-                       index.sources[candidate].reference.byteCount > 0, !included.contains(candidate) { after = candidate }
+                if adjacent, let first = blockSources.first, let last = blockSources.last {
+                    if let candidate = try index.previous(first), try index.role(candidate) != (try index.role(first)),
+                       try index.byteCount(candidate) > 0, !included.contains(candidate) { before = candidate }
+                    if let candidate = try index.next(last), try index.role(candidate) != (try index.role(last)),
+                       try index.byteCount(candidate) > 0, !included.contains(candidate) { after = candidate }
                 }
                 if let candidate = before {
                     if try fits(members + [candidate]) { try add([candidate]); neighbors += 1 } else { skippedNeighbors += 1 }
@@ -306,7 +445,7 @@ enum ExchangeBlockQuery {
                 }
             } else { disposition = "estimated_budget"; skippedBlocks += 1 }
             if rank < auditedBlocks {
-                auditedRanks.append(["rank": rank, "event_ids": block.sources.map { index.sources[$0].reference.eventID },
+                auditedRanks.append(["rank": rank, "event_ids": try blockSources.map { try index.eventID($0) },
                     "anchor_matches": entry.anchorMatches, "disposition": disposition])
             }
         }
@@ -326,7 +465,8 @@ enum ExchangeBlockQuery {
     /// It never reads a semantic index.
     static func prepareEvidence(recent: ContextSnapshot, store: MemoryStore, conversationID: String,
         projectID: String, prompt: String, excludingEventID: String, episodeLease: EpisodeLease?,
-        lexicalQueryUTF8Range: Range<Int>?, componentPolicy: ContextComponentPolicy) throws -> ContextSnapshot {
+        lexicalQueryUTF8Range: Range<Int>?, componentPolicy: ContextComponentPolicy,
+        diagnostics: ExchangeIndexDiagnostics? = nil) throws -> ContextSnapshot {
         let active = try episodeLease?.checkActive(projectID: projectID)
         guard try componentPolicy.validated().usesExchangeQuery else { throw ContextError.sourceMismatch }
         if let frozen = active?.limits.componentPolicy, frozen != componentPolicy { throw EpisodeBudgetError.invalid }
@@ -339,44 +479,87 @@ enum ExchangeBlockQuery {
                   recent.selectionAudit?.version == componentPolicy.selectionAuditVersion else { throw ContextError.sourceMismatch }
             return try select(recent: recent, binding: binding, store: store, conversationID: conversationID, projectID: projectID,
                 prompt: prompt, excludingEventID: excludingEventID, episodeLease: episodeLease,
-                lexicalQueryUTF8Range: lexicalQueryUTF8Range, componentPolicy: componentPolicy)
+                lexicalQueryUTF8Range: lexicalQueryUTF8Range, componentPolicy: componentPolicy, diagnostics: diagnostics)
+        }
+    }
+
+    /// A ranked corpus for one turn, from either index source.
+    struct RankedCorpus {
+        let corpus: ExchangeCorpus
+        let ranked: [RankedBlock]
+        let frontier: Int
+        let sourceCount: Int
+        let blockCount: Int
+        var indexLabel: String
+    }
+
+    static func rankedCorpus(source: IndexSource, store: MemoryStore, projectID: String, query: Query,
+                             excluded: ExactSourceIDs, lease: EpisodeLease?,
+                             diagnostics: ExchangeIndexDiagnostics? = nil) throws -> RankedCorpus {
+        switch source {
+        case .inMemoryRebuild:
+            let loaded = try load(store: store, projectID: projectID, excluding: excluded, lease: lease)
+            let index = Index(sources: loaded.sources)
+            return RankedCorpus(corpus: index, ranked: index.rank(query), frontier: loaded.frontier,
+                sourceCount: loaded.sources.count, blockCount: index.blocks.count, indexLabel: rebuildIndexLabel)
+        case .persistent:
+            do {
+                let view = try ExchangeIndexView.open(store: store, projectID: projectID, query: query, excluding: excluded,
+                    lease: lease, diagnostics: diagnostics)
+                return RankedCorpus(corpus: view, ranked: view.ranked, frontier: view.frontier,
+                    sourceCount: view.sourceCount, blockCount: view.blockCount, indexLabel: persistentIndexLabel)
+            } catch Failure.indexUnavailable {
+                // The index is not built, or too far behind to catch up in a
+                // turn. Build it outside any episode for later turns, and
+                // serve this one from the rebuild, which selects identically
+                // and still refuses projects above its 20,000-source cap.
+                store.scheduleExchangeIndexBuild()
+                diagnostics?.fallback = true
+                var rebuilt = try rankedCorpus(source: .inMemoryRebuild, store: store, projectID: projectID, query: query,
+                    excluded: excluded, lease: lease)
+                rebuilt.indexLabel = fallbackIndexLabel
+                return rebuilt
+            }
         }
     }
 
     private static func select(recent: ContextSnapshot, binding: ContextSelectionBinding, store: MemoryStore,
         conversationID: String, projectID: String, prompt: String, excludingEventID: String, episodeLease: EpisodeLease?,
-        lexicalQueryUTF8Range: Range<Int>?, componentPolicy: ContextComponentPolicy) throws -> ContextSnapshot {
+        lexicalQueryUTF8Range: Range<Int>?, componentPolicy: ContextComponentPolicy,
+        diagnostics: ExchangeIndexDiagnostics?) throws -> ContextSnapshot {
         let input = try HistoricalQueryFormulation.input(prompt, utf8Range: lexicalQueryUTF8Range)
         let query = Self.query(input)
         let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
+        let source = diagnosticIndexSource
         var audit: [String: Any] = ["version": version, "scoring_version": scoringVersion,
             "query_term_count": query.terms.count, "quoted_anchor_count": query.anchors.count,
             "query_terms_sha256": MeteredRetrieval.digest(Data(query.terms.sorted().joined(separator: "\n").utf8)),
-            "index": "in_memory_per_turn"]
+            "index": source == .persistent ? persistentIndexLabel : rebuildIndexLabel]
         var hits: [MemoryHit] = []
         if !query.terms.isEmpty {
-            let loaded = try load(store: store, projectID: projectID, excluding: excluded, lease: episodeLease)
-            let index = Index(sources: loaded.sources)
-            let ranked = index.rank(query)
+            let loaded = try rankedCorpus(source: source, store: store, projectID: projectID, query: query,
+                excluded: excluded, lease: episodeLease, diagnostics: diagnostics)
+            audit["index"] = loaded.indexLabel
+            let ranked = loaded.ranked
             let budget = Int(Double(componentPolicy.evidenceTokens) * evidenceTokenFraction)
             if componentPolicy.packsExchangeValueDensity {
                 // P2 step 3: declared candidate window, value-density packing.
                 audit["source_frontier"] = loaded.frontier
-                audit["indexed_source_count"] = loaded.sources.count
-                audit["block_count"] = index.blocks.count
+                audit["indexed_source_count"] = loaded.sourceCount
+                audit["block_count"] = loaded.blockCount
                 audit["matched_block_count"] = ranked.count
                 audit["anchor_matched_block_count"] = ranked.filter { $0.anchorMatches > 0 }.count
                 return try ValuePacking.select(recent: recent, binding: binding, store: store, conversationID: conversationID,
                     projectID: projectID, excludingEventID: excludingEventID, episodeLease: episodeLease,
-                    componentPolicy: componentPolicy, index: index, ranked: ranked, tokenBudget: budget, baseAudit: audit)
+                    componentPolicy: componentPolicy, index: loaded.corpus, ranked: ranked, tokenBudget: budget, baseAudit: audit)
             }
-            let packing = try pack(index: index, ranked: ranked, maximumSpans: componentPolicy.evidenceSpans,
+            let packing = try pack(index: loaded.corpus, ranked: ranked, maximumSpans: componentPolicy.evidenceSpans,
                 tokenBudget: budget, adjacent: componentPolicy.packsAdjacentExchanges, selectionVersion: binding.version)
             hits = packing.hits
             audit.merge(packing.audit) { _, new in new }
             audit["source_frontier"] = loaded.frontier
-            audit["indexed_source_count"] = loaded.sources.count
-            audit["block_count"] = index.blocks.count
+            audit["indexed_source_count"] = loaded.sourceCount
+            audit["block_count"] = loaded.blockCount
             audit["matched_block_count"] = ranked.count
             audit["anchor_matched_block_count"] = ranked.filter { $0.anchorMatches > 0 }.count
         } else {
@@ -397,5 +580,5 @@ enum ExchangeBlockQuery {
         return result
     }
 
-    private static let stopwords = Set("a an and are as at be been being but by can could did do does doing for from had has have having he her here hers him his how i if in into is it its just me more most my no not of on or our ours please s say she should so some t tell than that the their theirs them then there these they this those through to too us was we were what when where which who why will with would you your yours about".split(separator: " ").map(String.init))
+    static var stopwords: Set<String> { ExchangeTerms.stopwords }
 }

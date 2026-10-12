@@ -171,6 +171,28 @@ class Contracts(unittest.TestCase):
                  "arms": {arm: scored for arm in harness.ARMS}} for qid in (*harness.KNOWN_MISSES, "other")]
         self.assertEqual(set(harness.known_miss_rows(rows)), set(harness.KNOWN_MISSES))
 
+    def test_exchange_index_parity_compares_delivery_audits_and_labels(self):
+        def attempt_with(label, evidence, extra=None):
+            return {"preparation_completed": True, "recent_source_ids": ["r1"], "prompt_tokens": 10,
+                    "components": {"evidence_tokens": 5}, "evidence": evidence,
+                    "exchange": {"index": label, "matched_block_count": 3, **(extra or {})}}
+        evidence = [{"event_id": "e1", "offset": 0, "bytes": 4}]
+        attempts = {"exchange_adjacent": attempt_with(harness.PERSISTENT_INDEX_LABEL, evidence),
+                    "exchange_adjacent_rebuild": attempt_with(harness.REBUILD_INDEX_LABEL, evidence),
+                    "exchange_packed": attempt_with(harness.PERSISTENT_INDEX_LABEL, evidence),
+                    "exchange_packed_rebuild": attempt_with(harness.REBUILD_INDEX_LABEL,
+                        [{"event_id": "e1", "offset": 0, "bytes": 3}], {"matched_block_count": 4})}
+        parity = harness.exchange_index_parity(attempts)
+        self.assertEqual(parity["exchange_adjacent"], {"evidence": True, "audit": True, "tokens": True, "labels": True,
+                                                       "differing_audit_keys": []})
+        self.assertEqual(parity["exchange_packed"]["evidence"], False)
+        self.assertEqual(parity["exchange_packed"]["differing_audit_keys"], ["matched_block_count"])
+        rows = [{"exchange_index_parity": parity}, {"exchange_index_parity": {"exchange_adjacent": None, "exchange_packed": None}}]
+        summary = harness.exchange_index_parity_summary(rows)
+        self.assertEqual(summary["exchange_adjacent"]["compared"], 1)
+        self.assertEqual(summary["exchange_packed"]["evidence"], 0)
+        self.assertTrue(set(harness.PARITY_ARMS) <= set(harness.ARMS))
+
 
 if __name__ == "__main__":
     result = unittest.TextTestRunner(stream=io.StringIO()).run(unittest.defaultTestLoader.loadTestsFromTestCase(Contracts))

@@ -192,6 +192,14 @@ final class MemoryStore: @unchecked Sendable {
     private let backgroundDiagnosticsLock = NSLock()
     private var backgroundPayloadPages = 0
     private var backgroundMaterializedBytes = 0
+    // Derived exchange index sidecar (ExchangeIndex.swift). Maintained after
+    // each committed event insertion once it exists; never authoritative.
+    private var exchangeIndexHandle: ExchangeIndexStore?
+    private var exchangeIndexEnabled = false
+    private var exchangeIndexPending: [ExchangeIndexEvent] = []
+    private var exchangeIndexBuildScheduled = false
+    private var exchangeIndexBuildFailed = false
+    private let exchangeIndexBuildQueue = DispatchQueue(label: "boros.exchange-index-build", qos: .utility)
 
     init(directory: URL, episodeMigrationCheckpoint: ((String) throws -> Void)? = nil,
         authorityValidationCheckpoint: ((String) throws -> Void)? = nil,
@@ -375,6 +383,7 @@ final class MemoryStore: @unchecked Sendable {
                 accountingBootstrapping = false
             }
             if let database { try authorityCacheWrites.install(on: database) }
+            exchangeIndexEnabled = ExchangeIndexStore.exists(storeDirectory: self.directory)
         } catch {
             if let database { sqlite3_close(database); self.database = nil }
             if ownerFD >= 0 { close(ownerFD); ownerFD = -1 }
@@ -1586,6 +1595,10 @@ final class MemoryStore: @unchecked Sendable {
         try execute("INSERT INTO events (id,conversation_id,project_id,role,status,turn_id,created_at,digest,byte_count,payload,source_time_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)", [.text(event.id), .text(event.conversationID), .text(event.projectID), .text(event.role.rawValue), .text(event.status.rawValue), .text(event.turnID), .text(event.createdAt), .text(event.digest), .integer(payload.count), .blob(payload), try event.sourceTime.map { .blob(try $0.validated().canonicalData()) } ?? .null])
         let rowID = sqlite3_last_insert_rowid(database)
         try execute("INSERT INTO event_fts(rowid,text) VALUES (?,?)", [.integer(Int(rowID)), .text(event.text)])
+        if exchangeIndexEnabled {
+            exchangeIndexPending.append(ExchangeIndexEvent(sequence: Int(rowID), eventID: event.id, projectID: event.projectID,
+                conversationID: event.conversationID, role: event.role, byteCount: payload.count, digest: event.digest, text: event.text))
+        }
         try execute("UPDATE conversations SET updated_at=? WHERE id=?", [.text(event.createdAt), .text(event.conversationID)])
     }
 
@@ -1835,8 +1848,8 @@ final class MemoryStore: @unchecked Sendable {
     }
     private func transaction<T>(_ body: () throws -> T) throws -> T {
         try execute("BEGIN IMMEDIATE")
-        do { let result = try body(); try execute("COMMIT"); return result }
-        catch { try? execute("ROLLBACK"); authorityCacheWrites.invalidate(); throw error }
+        do { let result = try body(); try execute("COMMIT"); maintainExchangeIndexAfterCommit(); return result }
+        catch { try? execute("ROLLBACK"); exchangeIndexPending.removeAll(); authorityCacheWrites.invalidate(); throw error }
     }
     private func locked<T>(_ body: () throws -> T) throws -> T {
         mutex.lock(); defer { mutex.unlock() }
@@ -3401,5 +3414,193 @@ final class BackgroundSourceReader: @unchecked Sendable {
         guard offset == source.byteCount, digest.finalize().map({ String(format: "%02x", $0) }).joined() == source.digest else { throw BackgroundIndexBudgetError.invalid }
         try verifyLocked()
         try owner.backgroundReaderPerformed(work: work, seal: true, clockSource: clockSource)
+    }
+}
+
+// MARK: Persistent exchange index (derived sidecar; ExchangeIndex.swift)
+
+extension MemoryStore {
+    /// Committed insertions reach the sidecar here. A failure leaves the
+    /// watermark behind; the next read catches up or fails closed.
+    fileprivate func maintainExchangeIndexAfterCommit() {
+        guard !exchangeIndexPending.isEmpty else { return }
+        let events = exchangeIndexPending
+        exchangeIndexPending.removeAll()
+        guard exchangeIndexEnabled, let index = try? openExchangeIndexLocked(create: false) else { return }
+        try? index.applyCommitted(events, store: self)
+    }
+
+    private func openExchangeIndexLocked(create: Bool) throws -> ExchangeIndexStore {
+        if let handle = exchangeIndexHandle { return handle }
+        guard create || ExchangeIndexStore.exists(storeDirectory: directory) else { throw ExchangeIndexError.unavailable }
+        let handle = try ExchangeIndexStore(storeDirectory: directory)
+        try handle.validateBinding(store: self)
+        exchangeIndexHandle = handle
+        exchangeIndexEnabled = true
+        return handle
+    }
+
+    var exchangeIndexExists: Bool { (try? locked { exchangeIndexHandle != nil || ExchangeIndexStore.exists(storeDirectory: directory) }) ?? false }
+
+    /// Runs `body` with the sidecar under the owner mutex. With a lease, the
+    /// episode's SQL fence guards both this store and the sidecar connection.
+    func withExchangeIndex<T>(lease: EpisodeLease?, create: Bool, _ body: (ExchangeIndexStore) throws -> T) throws -> T {
+        let fence = try lease?.progressGuard()
+        return try locked {
+            guard let database else { throw MemoryError.database("closed owner") }
+            let index = try openExchangeIndexLocked(create: create)
+            guard let fence else { return try body(index) }
+            let previous = activeSQLFence
+            activeSQLFence = fence
+            defer { activeSQLFence = previous }
+            return try fence.perform(on: database, restoring: previous) { try index.fenced(fence) { try body(index) } }
+        }
+    }
+
+    /// Builds the sidecar or brings it up to date outside any episode, one
+    /// owner-locked batch at a time. Required before an exchange-policy turn
+    /// on a store with more than `ExchangeIndexStore.maximumTurnCatchUp`
+    /// unindexed events.
+    @discardableResult
+    func buildExchangeIndex(batchEvents: Int = 5_000) throws -> ExchangeIndexStore.CatchUp {
+        var total = ExchangeIndexStore.CatchUp()
+        let started = DispatchTime.now().uptimeNanoseconds
+        while true {
+            let receipt = try locked { try openExchangeIndexLocked(create: true).catchUp(store: self, maximumEvents: batchEvents, batchEvents: batchEvents) }
+            total.events += receipt.events; total.bytes += receipt.bytes
+            if receipt.events < batchEvents { break }
+        }
+        total.milliseconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+        return total
+    }
+
+    /// Builds or catches up the sidecar on a private utility queue, outside
+    /// any episode, in owner-locked batches of 2,000 events (about 0.1 s of
+    /// lock each at the measured rate). Called when an exchange-policy turn
+    /// finds the index unavailable, so stores that never use an exchange
+    /// policy never build or maintain one. Coalesces while a build runs; a
+    /// failed build is retried by the next such turn.
+    func scheduleExchangeIndexBuild() {
+        let start: Bool = (try? locked { () -> Bool in
+            guard !exchangeIndexBuildScheduled else { return false }
+            exchangeIndexBuildScheduled = true
+            return true
+        }) ?? false
+        guard start else { return }
+        exchangeIndexBuildQueue.async { [weak self] in
+            guard let self else { return }
+            let failed = (try? self.buildExchangeIndex(batchEvents: 2_000)) == nil
+            _ = try? self.locked { self.exchangeIndexBuildScheduled = false; self.exchangeIndexBuildFailed = failed }
+        }
+    }
+
+    /// Waits for a scheduled build (checks and diagnostics). Returns whether
+    /// the last build completed.
+    @discardableResult
+    func waitForExchangeIndexBuild() -> Bool {
+        exchangeIndexBuildQueue.sync {}
+        return (try? locked { !exchangeIndexBuildFailed }) ?? false
+    }
+
+    /// Unindexed committed events, or nil without a sidecar.
+    func exchangeIndexLag() -> Int? {
+        try? locked {
+            guard exchangeIndexHandle != nil || ExchangeIndexStore.exists(storeDirectory: directory) else { throw ExchangeIndexError.unavailable }
+            return try exchangeIndexPendingInventory(afterSequence: try openExchangeIndexLocked(create: false).watermark).count
+        }
+    }
+
+    /// Diagnostics: events applied by post-commit maintenance in this process
+    /// and the time it took.
+    func exchangeIndexMaintenanceDiagnostics() -> (events: Int, nanoseconds: UInt64)? {
+        (try? locked { exchangeIndexHandle.map { ($0.eagerEvents, $0.eagerNanoseconds) } }) ?? nil
+    }
+
+    /// Committed events after a sequence, every project, payloads verified.
+    func exchangeIndexEvents(afterSequence: Int, limit: Int) throws -> [ExchangeIndexEvent] {
+        try locked {
+            guard afterSequence >= 0, limit > 0 else { throw MemoryError.invalid("exchange index batch bounds") }
+            return try query("SELECT sequence,id,conversation_id,project_id,role,digest,byte_count,payload FROM events WHERE sequence>? ORDER BY sequence LIMIT ?",
+                [.integer(afterSequence), .integer(min(limit, 100_000))]) { row in
+                let payload = blob(row, 7), bytes = Int(sqlite3_column_int64(row, 6))
+                guard let role = MemoryRole(rawValue: string(row, 4)), let text = String(data: payload, encoding: .utf8),
+                      payload.count == bytes, Self.digest(payload) == string(row, 5) else {
+                    throw MemoryError.database("exchange index source failed integrity verification")
+                }
+                return ExchangeIndexEvent(sequence: Int(sqlite3_column_int64(row, 0)), eventID: string(row, 1), projectID: string(row, 3),
+                    conversationID: string(row, 2), role: role, byteCount: bytes, digest: string(row, 5), text: text)
+            }
+        }
+    }
+
+    func exchangeIndexPendingInventory(afterSequence: Int) throws -> (count: Int, bytes: Int) {
+        try locked {
+            try query("SELECT count(*),coalesce(sum(byte_count),0) FROM events WHERE sequence>?", [.integer(afterSequence)]) {
+                (Int(sqlite3_column_int64($0, 0)), Int(sqlite3_column_int64($0, 1)))
+            }.first ?? (0, 0)
+        }
+    }
+
+    func exchangeIndexEventBinding(sequence: Int) throws -> (eventID: String, digest: String)? {
+        try locked { try query("SELECT id,digest FROM events WHERE sequence=?", [.integer(sequence)]) { (string($0, 0), string($0, 1)) }.first }
+    }
+
+    func exchangeIndexEventCount(throughSequence: Int) throws -> Int {
+        try locked { try scalarCount("SELECT count(*) FROM events WHERE sequence<=?", [.integer(throughSequence)]) }
+    }
+
+    func exchangeIndexEventCount(after lower: Int, before upper: Int) throws -> Int {
+        try locked { try scalarCount("SELECT count(*) FROM events WHERE sequence>? AND sequence<?", [.integer(lower), .integer(upper)]) }
+    }
+
+    /// Source count and highest sequence of one project in the store.
+    func exchangeIndexProjectInventory(projectID: String) throws -> (count: Int, maximum: Int) {
+        try locked {
+            try validateIdentifier(projectID, name: "project ID")
+            return try query("SELECT count(*),coalesce(max(sequence),0) FROM events WHERE project_id=?", [.text(projectID)]) {
+                (Int(sqlite3_column_int64($0, 0)), Int(sqlite3_column_int64($0, 1)))
+            }.first ?? (0, 0)
+        }
+    }
+
+    /// Exact-byte event IDs to (sequence, project). Unknown IDs are omitted.
+    func exchangeIndexLocate(eventIDs: ExactSourceIDs) throws -> [(eventID: String, sequence: Int, projectID: String)] {
+        try locked {
+            guard eventIDs.count <= 10_000 else { throw MemoryError.invalid("exchange index locates at most 10000 sources") }
+            var located: [(eventID: String, sequence: Int, projectID: String)] = []
+            for id in eventIDs {
+                try validateIdentifier(id, name: "excluded source ID")
+                if let row = try query("SELECT sequence,project_id FROM events WHERE id=?", [.text(id)], map: {
+                    (Int(sqlite3_column_int64($0, 0)), string($0, 1))
+                }).first { located.append((id, row.0, row.1)) }
+            }
+            return located
+        }
+    }
+
+    /// Complete sources by sequence with original metadata; payloads are
+    /// checked against their stored digests and byte counts.
+    func exchangeIndexLoad(sequences: [Int]) throws -> [Int: (reference: MemorySourceReference, text: String)] {
+        try locked {
+            guard !sequences.isEmpty else { return [:] }
+            guard sequences.count <= 100_000 else { throw MemoryError.invalid("exchange index loads at most 100000 sources") }
+            let list = "[" + sequences.map(String.init).joined(separator: ",") + "]"
+            let loaded = try query("SELECT sequence,id,conversation_id,project_id,role,status,created_at,digest,byte_count,source_time_json,payload FROM events WHERE sequence IN (SELECT value FROM json_each(?))",
+                [.text(list)], map: { row -> (MemorySourceReference, String) in
+                    let reference = try sourceReference(row), payload = blob(row, 10)
+                    guard let text = String(data: payload, encoding: .utf8), payload.count == reference.byteCount,
+                          Self.digest(payload) == reference.digest else {
+                        throw MemoryError.database("exchange index source failed integrity verification")
+                    }
+                    return (reference, text)
+                })
+            var result: [Int: (reference: MemorySourceReference, text: String)] = [:]
+            for (reference, text) in loaded { result[reference.sequence] = (reference, text) }
+            return result
+        }
+    }
+
+    private func scalarCount(_ sql: String, _ bindings: [Value]) throws -> Int {
+        try query(sql, bindings) { Int(sqlite3_column_int64($0, 0)) }.first ?? 0
     }
 }
