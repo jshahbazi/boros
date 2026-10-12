@@ -9,12 +9,12 @@ import subprocess
 import tempfile
 import time
 
+from swift_store_sources import STORE_CORE_SOURCES
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
-    "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ExchangeIndex.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift",
-    "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "BoundedNeighborhoodExpansion.swift", "ContextAssembler.swift",
-    "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "BackgroundIndexBudgetChecks.swift",
-    "BackgroundIndexLedgerChecks.swift", "MeteredRetrieval.swift", "SemanticIndex.swift",
+    *STORE_CORE_SOURCES,
+    "BackgroundIndexBudgetChecks.swift", "BackgroundIndexLedgerChecks.swift", "SemanticIndex.swift",
     "BackgroundIndexWorker.swift", "BackgroundIndexWorkerChecks.swift",
 )
 HARNESS = r'''

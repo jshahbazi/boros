@@ -8,7 +8,14 @@ import subprocess
 import tempfile
 import time
 
+from swift_store_sources import STORE_CORE_SOURCES
+
 ROOT = Path(__file__).resolve().parents[1]
+SOURCES = (
+    *STORE_CORE_SOURCES,
+    "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift", "BackupCommand.swift",
+    "BackupChecks.swift", "ReadIdentityChecks.swift",
+)
 HARNESS = r'''
 import Foundation
 import CryptoKit
@@ -89,10 +96,7 @@ def main():
         harness = scratch / "BackupHarness.swift"
         harness.write_text(HARNESS)
         binary = scratch / "backup-checks"
-        sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ExchangeIndex.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
-            "BackupArchive.swift", "AuthoritySchemaFive.swift", "AuthoritySchemaSix.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeAccountingJournal.swift", "EpisodeTerminalCleanup.swift", "BackupCommand.swift", "BackupChecks.swift", "ReadIdentityChecks.swift"
-        )]
+        sources = [ROOT / "Sources/Boros" / name for name in SOURCES]
         # Compile one captured dependency set. Other integration agents may be
         # editing shared Swift sources while this isolated suite is running.
         captured = scratch / "sources"

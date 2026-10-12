@@ -4,7 +4,15 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from swift_store_sources import STORE_CORE_SOURCES
+
 ROOT = Path(__file__).resolve().parents[1]
+SOURCES = (
+    *STORE_CORE_SOURCES,
+    "SemanticIndex.swift", "BackgroundIndexWorker.swift", "GlobalSemanticSearch.swift", "ChatContextPreparation.swift",
+    "ContextRetrievalStrategy.swift", "SemanticRetrievalPolicy.swift", "LocalReadCoordinator.swift",
+    "LocalReadChecks.swift", "ReadCoverageChecks.swift",
+)
 HARNESS = r'''
 import Foundation
 private final class CoverageEncoder: SemanticEmbeddingAdapter {
@@ -38,10 +46,7 @@ def main():
         harness = scratch / "LocalReadHarness.swift"
         harness.write_text(HARNESS)
         binary = scratch / "local-read-checks"
-        sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ExchangeIndex.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift",
-            "MeteredRetrieval.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "SemanticIndex.swift", "BackgroundIndexWorker.swift", "ChatContextPreparation.swift", "ContextRetrievalStrategy.swift", "SemanticRetrievalPolicy.swift",
-            "LocalReadCoordinator.swift", "LocalReadChecks.swift", "ReadCoverageChecks.swift")]
+        sources = [ROOT / "Sources/Boros" / name for name in SOURCES]
         subprocess.run(["/usr/bin/swiftc", "-swift-version", "5", "-I", str(ROOT / "Sources/CSQLite"),
                         "-framework", "NaturalLanguage", "-o", str(binary), *map(str, sources), str(harness)], check=True)
         result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=90)

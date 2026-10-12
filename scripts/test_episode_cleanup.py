@@ -11,15 +11,12 @@ import subprocess
 import tempfile
 import time
 
+from swift_store_sources import STORE_CORE_SOURCES
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
-    "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ExchangeIndex.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift",
-    "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift",
-    "AuthorityBindings.swift", "AuthorityBindingJournal.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift",
-    "AuthorityValidationCache.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift",
-    "EpisodeAccountingJournal.swift", "EpisodeTerminalCleanup.swift", "EpisodeCleanupChecks.swift",
-    "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift",
-    "QwenTextRendering.swift", "ContextSourceFraming.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "MeteredRetrieval.swift",
+    *STORE_CORE_SOURCES,
+    "EpisodeCleanupChecks.swift",
 )
 HARNESS = r'''
 import Foundation

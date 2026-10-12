@@ -5,8 +5,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from swift_store_sources import STORE_CORE_SOURCES
+
 
 ROOT = Path(__file__).resolve().parents[1]
+SOURCES = (
+    *STORE_CORE_SOURCES,
+    "MemoryChecks.swift",
+)
 HARNESS = r'''
 import Foundation
 import Darwin
@@ -93,9 +99,7 @@ def main() -> None:
         harness = temporary / "MemoryHarness.swift"
         harness.write_text(HARNESS)
         binary = temporary / "memory-checks"
-        sources = [ROOT / "Sources/Boros" / name for name in (
-            "EpisodeBudget.swift", "EpisodeLease.swift", "EpisodeSQLFence.swift", "MemoryStore.swift", "ExchangeIndex.swift", "EventSourceTime.swift", "SourceTimeSchema.swift", "AuthoritySchemaNine.swift", "AuthorityState.swift", "AuthorityStateJournal.swift", "AuthorityValidatedClock.swift", "AuthorityValidationCache.swift", "EpisodeAccountingJournal.swift", "AuthoritySchemaSeven.swift", "AuthoritySchemaEight.swift", "EpisodeTerminalCleanup.swift", "AuthorityBindings.swift", "AuthorityValidation.swift", "AuthorityPolicyRendering.swift", "AuthorityInputProof.swift", "AuthorityBindingJournal.swift", "BackgroundIndexBudget.swift", "BackgroundIndexJournal.swift", "ContextComponentJournal.swift", "QwenTextRendering.swift", "ContextSourceFraming.swift", "MeteredRetrieval.swift", "HistoricalQueryFormulation.swift", "MeteredExchangeExpansion.swift", "ContextAssembler.swift", "MemoryChecks.swift"
-        )]
+        sources = [ROOT / "Sources/Boros" / name for name in SOURCES]
         subprocess.run([
             "swiftc", "-I", str(ROOT / "Sources/CSQLite"),
             "-o", str(binary), *(str(path) for path in sources), str(harness)
