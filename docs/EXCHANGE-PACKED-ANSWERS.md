@@ -210,7 +210,9 @@ Two reader effects from the diagnostic are visible:
 
 ## Decision
 
-The declared rule's outcome is **promote**. Before the run, the user had approved "if it beats the current default by at least about 5 points: make it the default and move on". The default change is recorded in [IMPLEMENTATION.md](IMPLEMENTATION.md) and [the P2 index record](P2-EXCHANGE-INDEX.md).
+The declared rule's outcome is **promote**. Before the run, the user had approved "if it beats the current default by at least about 5 points: make it the default and move on". The default was switched the same day: ordinary Send now freezes `exchange_packed`, with a labelled v1 lexical fallback for projects that neither the index nor the per-turn rebuild can serve. See [IMPLEMENTATION.md](IMPLEMENTATION.md) and [the P2 index record](P2-EXCHANGE-INDEX.md).
+
+After the switch, the harness `ordinary_send` arm follows the new default. A rerun of this record's capture must use the `lexical` arm for the earlier baseline; rerunning it unchanged fails its own reference check (`baseline_does_not_match_reference`) instead of silently comparing `exchange_packed` with itself.
 
 ## Privacy and artifacts
 
