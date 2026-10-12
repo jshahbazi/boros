@@ -72,7 +72,7 @@ Each read is declared to the episode before it runs, as the rebuild's reads were
 
 ### Two changes shared with the rebuild
 
-1. **Summation order.** The step 1 to 3 score summed matched terms in the iteration order of a filtered Swift `Set`. Swift seeds set storage per instance, so that order, and therefore the last bits of a score, could differ between two rankings of the same contents in one process; blocks whose scores differed only in those bits could swap. The first parity run of this work failed on exactly such last-bit differences in many query and exclusion pairs; the rebuild was affected as much as the index. Terms are now summed in sorted order. The scoring version is `idf-term-coverage-sqrt-byte-cost-v2` (same length as v1, so audit sizes are unchanged). Its effect on recall is in the measurements below.
+1. **Summation order.** The step 1 to 3 score summed matched terms in the iteration order of a filtered Swift `Set`. That order is not fixed for equal contents (the likely cause is Swift's per-instance hash seeding; this is an inference), so the last bits of a score could differ between two rankings of the same contents in one process, and blocks whose scores differed only in those bits could swap. The first parity run of this work failed on exactly such last-bit differences in many query and exclusion pairs; the rebuild was affected as much as the index. Terms are now summed in sorted order. The scoring version is `idf-term-coverage-sqrt-byte-cost-v2` (same length as v1, so audit sizes are unchanged). Its effect on recall is in the measurements below.
 2. **Exact cost lower bounds in the step 1 and 2 packer.** Before computing a block's exact estimated cost, the packer compares a lower bound computed from indexed metadata (page count, identifier lengths, the shortest status and capture time, no source time) with the remaining budget, and skips a block that cannot fit. The bound never exceeds the exact estimate (checked on every synthetic source, four selection versions, with and without source times), so every decision and audit count is unchanged (checked against packing without bounds). It only avoids reading sources the step 1 and 2 packer would have rejected.
 
 ### Contracts
@@ -97,7 +97,7 @@ The existing exchange checks now expect the `persistent_sidecar` label. `scripts
 
 ### Conditions
 
-- **Implementation.** Code at `35189a3`; the development run and the latency diagnostic ran on `4666913` (the same sources, plus the harness cache key and the backup record), clean tree. Development harness binary SHA-256 `84d36bba...c468`; latency binary `af9080b8...9d02`.
+- **Implementation.** Code at `35189a3`; the development run and the latency diagnostic ran on `4666913` (the same sources, plus the harness cache key and the backup record), clean tree. The final commit `cbb329a` only moves the term function and the sidecar's error type to store-level files (the term-function identity string is unchanged); its regression selection was re-verified by the recall floor below, and the development cohort and the latency diagnostic were not rerun on it. Development harness binary SHA-256 `84d36bba...c468`; latency binary `af9080b8...9d02`.
 - **Harness.** Pinned offline tokenizer, no live parity check, four workers, one replicate, stores built cold. The `tokenizers` package came from an existing local virtual environment, because the default `python3` no longer has it; without it the recall floor in `check.py` skips.
 - **Machine.** Apple M5 Max, shared with other agents' work during the runs.
 - **Private reports.** `.build/evaluation/p2-index-development.json`, `.build/evaluation/p2-index-regression-35189a3.json`, `.build/evaluation/p2-index-latency-46669136/report.json`.
@@ -179,7 +179,7 @@ Sizes include write-ahead logs. Ingestion with and without the index ran in diff
 
 ### check.py
 
-CHECKS
+`python3 scripts/check.py` passed on `cbb329a`: **5,027 checks**, recall floor ran. It was run with the virtual environment's Python so the floor had `tokenizers`; with the default `python3` the floor skips (zero checks, reported as a skip). The floor reran the regression cohort on the final sources: every arm at or above its floor (`exchange_packed` R1 12, R2 11) and 8 new parity checks (both pairs, 14 of 14 histories on evidence, audit, tokens and labels). A first run on `4666913` failed one suite, `imported-chat-evaluation`: its harness compiles a store-only subset of sources that `MemoryStore.swift` now extends. `cbb329a` moved the term function and sidecar errors to store-level types and added the sidecar file to every subset build. Nine standalone store scripts outside `check.py` (`test_memory.py`, `test_episode.py`, `test_backup.py` and others) fail identically on the base commit `b6e47c0`; `test_background_index.py` and `test_semantic_recovery.py` pass with this change.
 
 ## What did not work, and iteration disclosure
 
