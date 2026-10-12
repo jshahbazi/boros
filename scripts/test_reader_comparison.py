@@ -145,9 +145,15 @@ class Contracts(unittest.TestCase):
         self.assertEqual(gj.label_from(gemini_reply(text="```json\n" + reply + "\n```"))[1], "accept")
         self.assertEqual(gj.label_from(gemini_reply(text="yes")), ("parse_failed", None, "output_off_schema"))
         self.assertEqual(gj.label_from(gemini_reply(text=reply, reason="MAX_TOKENS"))[:2], ("response_invalid", None))
-        source = (ROOT / "scripts/gemini_judge.py").read_text()
-        self.assertIn('jc.judge_messages(item, "verdict", prompt_function, reply_instruction=True, verdict_rubric=False)',
-                      source)
+        calls = []
+        with patch.object(jc, "judge_messages", side_effect=lambda *args, **kwargs: calls.append((args[1], kwargs))):
+            gj.messages_for({}, None)
+            gj.messages_for({}, None, "v4")
+        self.assertEqual(calls, [("verdict", {"reply_instruction": True, "verdict_rubric": False}),
+                                 ("verdict", {"reply_instruction": True, "verdict_rubric": True})])
+        with self.assertRaisesRegex(gj.JudgeError, "prompt_set_invalid"):
+            gj.messages_for({}, None, "v5")
+        self.assertEqual(gj.PROMPT_SETS["v4"][0], "boros-judge-calibration-vertex-declaration-v4")
         self.assertEqual((gj.MODEL, gj.THINKING_LEVEL, gj.REPLICATES), ("gemini-3.8-flash", "low", 3))
         self.assertIn("vertex-gemini", jc.CANDIDATE_JUDGES)
 

@@ -42,6 +42,18 @@ The frozen binary, source hashes, selection, settings and judge remain unchanged
 
 The runner and active native evaluation process were terminated on October 7, 2026. Seven answers were graded: six accepted and one rejected. Two preceding preparation failures count as zero credit. The tenth attempted question was interrupted, leaving ninety questions unattempted. These partial results do not establish accuracy for the declared 100-question evaluation. The goal is paused; no resume or retry is authorized. The private `user-requested-stop.json` preserves the checkpoint hash and stop state.
 
+## Closed without resuming (October 11, 2026)
+
+On October 11, 2026 the user said to run the paused evaluation "unless you think we shouldn't". The coordinator advised against resuming, so the evaluation is closed as incomplete. The seven graded answers, the two zero-credit preparation failures and every capture stay as recorded. They establish no accuracy for the declared 100 questions. The reasons:
+
+- **Superseded configuration.** The run is frozen to the October 7 binary (SHA-256 `5790b8ab…917f`) and its answer framing. Since then the answer framing moved to V4, ordinary Send moved to lexical selection, and P3 will change the investigation route itself.
+- **Uncalibrated judge.** Grading is frozen to JevK5, whose accuracy was never calibrated. The default judge is now Gemini 3.8 Flash with measured rates ([decision](JUDGE-CALIBRATION.md#default-judge-changed-to-gemini-38-flash-user-decision-october-11-2026)).
+- **No comparison arm.** Only the investigation route runs, once per question, with no recent-only arm. The result could not give A2, which is defined against recent-only.
+- **Not held out.** The 100 questions are the P2 development cohort (selection manifest `2e310e44…`), which retrieval is now being tuned against. A result on them could not count as product quality.
+- **Cost.** About 75 seconds or more per question, serially, would hold the local model server for two to four hours.
+
+The investigation route is measured again in the P6 registered comparison, on held-out questions with recent-only and ordinary arms and the calibrated judge, after P3 repairs its cost. The user may still reverse this closure.
+
 ## Verification checkpoint
 
 The selector/controller passes eleven synthetic checks covering answer-blind selection, opaque identifiers, the 100-question denominator, version-8 provenance, failure handling and recovery without duplicate answer/judge dispatch. The fixed Swift projection set independently matches all 100 frozen inputs. The optimized build passes 4,087 application checks, all seven preceding pilot-controller tests and strict deep signature verification. All 167 captured source/test hashes remain stable. Its binary SHA-256 is `5790b8ab6ba6016f297e984973d110725843faeb1e36f08f1a2e776ea51a917f`. The first full verification caught the coordinator's filtering of new fixed failure labels; the corrected build passes all 282 native investigation checks, including actual malformed/empty/output-limited transport cases with zero unknown work and no final dispatch. The pre-execution verification made no evaluation model calls. The subsequently frozen declaration SHA-256 is `b07e71cf589f834607e026ba78c3c9e341955895737aa6ad0df09cdf84d89d9b`; the live run was subsequently stopped by the user. JevK5's preflight counters were 68 decisions, three cache hits and zero errors, with generation 32. Current progress is checkpointed privately after each question and judgment.

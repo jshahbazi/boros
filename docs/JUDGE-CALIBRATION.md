@@ -1095,24 +1095,42 @@ The Sonnet decision below is kept as history. Its configuration remains valid fo
   - Model: `gemini-3.8-flash` on the global endpoint of `llm-train-482420`, through `scripts/vertex_gemini.py`.
   - Thinking level "low". This is the lowest level, and thinking cannot be turned off.
   - No sampling field. Output limit 2,048 tokens, because thought tokens count against it.
-  - The request is prompt set v3, verdict task only: `judge_calibration.judge_messages` with the reply-format line, parsed by `judge_calibration.parse_instructed_reply`.
+  - The request is prompt set v4 (since the same day; see [Prompt set v4 for Gemini](#prompt-set-v4-for-gemini-user-decision-october-11-2026)), verdict task only: `judge_calibration.judge_messages` with the reply-format line and the self-correction rubric sentence, parsed by `judge_calibration.parse_instructed_reply`. Declare with `gemini_judge.py declare --prompt-set v4`.
   - Three replicates; a majority vote decides. A tie or an unparseable majority is `unknown` and is reported, never counted as accept.
   - Labels use the judge name `vertex-gemini`. A run that changes the prompt, the reply format, the model, the thinking level or the replicate count is a different judge and needs its own calibration.
-- **Rates attached to every later acceptance** (95% Wilson intervals), against the reference target:
+- **Rates attached to every later acceptance** (prompt set v4; 95% Wilson intervals), against the reference target:
 
   | Measure | All 79 items | First 50 items |
   |---|---|---|
   | Error | 6/79, 8% (4-16%) | 1/50, 2% (0-11%) |
-  | False reject | 0/35, 0% (0-10%) | 0/30 |
-  | False accept | 6/44, 14% (6-27%) | 1/20, 5% (1-24%) |
+  | False reject | 4/35, 11% (5-26%) | 1/30 |
+  | False accept | 2/44, 5% (1-15%) | 0/20 |
 
-  The 79-item rates are the headline. Labels: `.build/reader-comparison-20261010/gemini-judge/` in this worktree, set `jc-9adfaeeb572b8380` and `jx-6dbd69dec7456178`.
-- **Known weaknesses.**
-  - False accepts. Five of its six are shared with Sonnet: three self-corrections (extension items 004, 008 and 009) and two judgment-call rejects (024 and 029). The sixth is base item-006. The self-correction rule is not in prompt set v3.
-  - Prompt set v4, which adds that rule, was measured only with Sonnet. Whether Gemini should move to v4 needs its own calibration run and the user's decision. The earlier open question, v4 for Sonnet, no longer applies to the default.
+  The 79-item rates are the headline. Labels: `.build/gemini-judge-v4-20261011/` in this worktree. With prompt set v3 (the first Gemini runs, including the reader comparison) the rates were error 6/79, false reject 0/35 and false accept 6/44; values graded that way keep those rates.
+- **Known weaknesses.** Two judgment-call rejects (extension items 024 and 029) are still accepted, as by every judge so far. Prompt set v4 rejects four answers the reference accepts: base item-034 (knowledge update, a 2-1 vote) and extension items 010, 012 and 022 (multi-session, unanimous; Sonnet also rejected 022).
 - **Self-preference.** Gemini will grade Gemini-authored answers if Gemini is used as a reader. On the user's adjudication of the 25 splits, the user accepted 6 of the 7 Gemini answers that only Gemini accepted. So its apparent lean was mostly correct, but 7 answers is a small sample.
 - **Price.** Google's Vertex pricing page, checked October 11, 2026, lists $0.75 input and $3.75 output per million tokens, with reasoning billed as output, through December 31, 2026. From January 1, 2027 the rate is $1.50 and $7.50, about 20 percent cheaper per verdict than Sonnet rather than about 60 percent. Declarations keep the standard rate so their caps stay conservative.
 - **Earlier results are not re-graded.** Runs graded by Sonnet before October 11 keep Sonnet's verdicts and rates. Re-grading any of them with Gemini is a separate, paid run that needs its own authorization.
+
+### Prompt set v4 for Gemini (user decision, October 11, 2026)
+
+The user approved prompt set v4 for the Gemini judge on the coordinator's recommendation. The approval came before the run: "Yes (assuming that you recommend it)". The run then calibrated Gemini with prompt set v4 on all 79 items.
+
+- **Run.** Declaration `.build/gemini-judge-v4-20261011/declaration.json` (SHA-256 `cd928306…8b93408`), prompt hashes from the Sonnet v4 declaration. Verdict task only, three replicates, $1.00 cap. 237 of 237 requests parsed, with no failure. 78 of 79 items were unanimous. $0.252116 at the declared standard rate, about half that billed.
+- **Result against the reference target.** Error 6/79, the same as prompt set v3, with a different mix:
+
+  | Prompt set | Error | False reject | False accept |
+  |---|---|---|---|
+  | v3 | 6/79 | 0/35 | 6/44 (14%, 6-27%) |
+  | v4 | 6/79 | 4/35 (11%, 5-26%) | 2/44 (5%, 1-15%) |
+  | Sonnet, v4 (for comparison) | 8/79 | 6/35 | 2/44 |
+
+- **Why v4.**
+  - It applies the user's self-correction rule: the three self-corrections Gemini v3 accepted are now rejected, as is base item-006.
+  - Under A2, a false accept overstates quality, while a false reject understates it.
+  - Gemini v4 also makes fewer errors than Sonnet v4.
+  - The cost is four false rejects, three of them on multi-session answers. Watch that category.
+- **Earlier values.** The reader comparison and the 25-answer adjudication used prompt set v3 and keep its rates.
 
 ## Default judge (user decision, October 9, 2026)
 
@@ -1152,11 +1170,13 @@ The default judge's first run outside the calibration set, authorized by the use
 
 ### Run log
 
-One line per authorized run. Every run uses the configuration above, verdict task only, three replicates, and is reported with error 2/50, false reject 1/30 and false accept 1/20.
+One line per authorized run. Runs before October 11, 2026 use the Sonnet configuration above, verdict task only, three replicates, and are reported with error 2/50, false reject 1/30 and false accept 1/20. Runs from October 11 use the [Gemini configuration](#default-judge-changed-to-gemini-38-flash-user-decision-october-11-2026) and its rates.
 
 - October 9, 2026, [hybrid retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-past-conversation-retrieval-on-all-21-questions): 42 Qwen answers, set `jr-d978990efd3d8096`, 126 of 126 parsed, 31 of 42 accepted, $0.128274 observed under a $1.00 cap.
 - October 9, 2026, [lexical (ordinary Send) retrieval-on replay](ANSWER-PRESENTATION-DEFECTS.md#replay-v3-versus-v4-with-ordinary-sends-lexical-retrieval-all-21-questions): 42 Qwen answers, set `jr-ffadbd1ee098c5a5`. The first session halted on one transport failure at 48 of 126 ($0.048666, labels unused); a full second session parsed 126 of 126 (labels SHA-256 `baf8cc71…9c16`, $0.125522). 31 of 42 accepted. Total $0.174188 observed, kept within the $1.00 authorization by capping the second session at $0.94.
 - October 9, 2026, [framing V5 replay](FRAMING-V5.md): 207 Qwen answers (V4, V5 and V4 without G over three cohorts), set `jr-6d3b1c7ae4df92e6`, one session, 621 of 621 parsed (labels SHA-256 `aaf783c5…358e`), 103 of 207 accepted, $0.851556 observed under a $2.00 cap. The output cap was 64 tokens instead of 512 so that the reservation fit the cap; replies averaged 11.5 tokens, all `end_turn`.
+
+- October 11, 2026, Gemini 3.8 Flash with prompt set v4 (the default judge from that day) on the calibration sets `jc-9adfaeeb572b8380` and `jx-6dbd69dec7456178`: 237 of 237 parsed, $0.252116 at the declared standard rate under a $1.00 cap ([result](#prompt-set-v4-for-gemini-user-decision-october-11-2026)).
 
 Candidate runs that do not use the default configuration are logged separately and carry their own rates:
 

@@ -48,6 +48,9 @@ MAX_OUTPUT_TOKENS = 2048
 REPLICATES = 3
 WORKERS = 6
 INPUT_USD, OUTPUT_USD = "1.50", "7.50"
+# Prompt set -> (the Sonnet declaration format whose prompt hashes it must match, verdict rubric sentence).
+PROMPT_SETS = {"v3": ("boros-judge-calibration-vertex-declaration-v3", False),
+               "v4": ("boros-judge-calibration-vertex-declaration-v4", True)}
 RETRYABLE = ("http_status_429", "http_status_500", "http_status_502", "http_status_503", "http_status_504",
              "transport_failed")
 RETRY_DELAYS = (10, 30)
@@ -78,9 +81,12 @@ def private_write(path: Path, data: bytes):
     os.chmod(path, 0o600)
 
 
-def messages_for(item, prompt_function):
-    """The default judge's prompt set v3 verdict request: the upstream prompt plus the reply-format line."""
-    return jc.judge_messages(item, "verdict", prompt_function, reply_instruction=True, verdict_rubric=False)
+def messages_for(item, prompt_function, prompt_set="v3"):
+    """The Sonnet judge's verdict request for the prompt set: the upstream prompt plus the reply-format
+    line, and for v4 the self-correction rubric sentence."""
+    require(prompt_set in PROMPT_SETS, "prompt_set_invalid")
+    return jc.judge_messages(item, "verdict", prompt_function, reply_instruction=True,
+                             verdict_rubric=PROMPT_SETS[prompt_set][1])
 
 
 def estimated_input_tokens(messages):
@@ -106,12 +112,12 @@ def declare(args):
     require(not (output / "declaration.json").exists(), "declaration_exists")
     prompt_function = jc.load_upstream_prompt_function(args.protocol)
     reference, _ = jcr.load_declaration(args.default_declaration)
-    require(reference.get("judge") == "vertex-sonnet" and reference.get("format") == "boros-judge-calibration-vertex-declaration-v3",
-            "default_declaration_not_v3")
+    require(reference.get("judge") == "vertex-sonnet" and reference.get("format") == PROMPT_SETS[args.prompt_set][0],
+            "reference_declaration_prompt_set_mismatch")
     sets = []
     for set_dir in args.set:
         manifest, items = jcr.load_set(set_dir.absolute())
-        rendered = [jc.canonical(messages_for(item, prompt_function)) for item in items]
+        rendered = [jc.canonical(messages_for(item, prompt_function, args.prompt_set)) for item in items]
         sets.append({"path": str(set_dir.absolute()), "set_id": manifest["set_id"], "item_count": len(items),
                      "items_sha256": manifest["items_sha256"],
                      "rendered_messages_sha256": jc.sha256_bytes(jc.canonical([jc.sha256_bytes(raw) for raw in rendered])),
@@ -119,12 +125,11 @@ def declare(args):
     requests = sum(entry["item_count"] for entry in sets) * REPLICATES
     declaration = {
         "version": VERSION, "declared_at_utc": now(), "judge": JUDGE,
-        "authorization": "user, 2026-10-10, in chat: 'have Gemini judge them too to check self-preference'; the "
-                         "coordinator declared the 79 calibration items first, then both reader-comparison halves, "
-                         "three replicates, and a $12 cap",
+        "authorization": args.authorization, "prompt_set": args.prompt_set,
         "provider": vg.configuration(MODEL, THINKING_LEVEL),
         "prompts": {**jcr.prompt_hashes(reference), "rendering": "judge_calibration.judge_messages(item, 'verdict', "
-                    "prompt_function, reply_instruction=True, verdict_rubric=False), the default judge's v3 request"},
+                    "prompt_function, reply_instruction=True, verdict_rubric="
+                    f"{PROMPT_SETS[args.prompt_set][1]}), the Sonnet judge's {args.prompt_set} request"},
         "reply_format": jc.reply_format_declaration(),
         "execution": {"stages_per_item": ["verdict"], "replicates": REPLICATES, "vote": "majority of three; a tie or "
                       "fewer than two agreeing labels is unknown", "max_output_tokens_per_request": MAX_OUTPUT_TOKENS,
@@ -132,7 +137,9 @@ def declare(args):
                       "retry_rule": f"{list(RETRYABLE)} retried at most {len(RETRY_DELAYS)} times after "
                                     f"{list(RETRY_DELAYS)} seconds; other failures are recorded, never coerced"},
         "pricing": {**va.Pricing(INPUT_USD, OUTPUT_USD).declaration(),
-                    "source": "list rate reported by third-party pricing pages, as declared for the reader comparison"},
+                    "source": "standard global rate from 2027-01-01 on Google's Vertex pricing page (checked "
+                              "2026-10-11); the introductory $0.75 / $3.75 billed through 2026-12-31 is half, so "
+                              "recorded spend is an upper bound"},
         "budget": {"spending_cap_usd": str(args.cap), "max_generation_requests": requests,
                    "cap_rule": "before each dispatch, settled spend plus every in-flight request's reservation "
                                "(estimated input at two characters per token plus the full output limit) must "
@@ -160,7 +167,8 @@ def run(args):
     for entry in declaration["sets"]:
         manifest, items = jcr.load_set(Path(entry["path"]))
         require(manifest["items_sha256"] == entry["items_sha256"], "set_changed")
-        rendered = {item["item_id"]: messages_for(item, prompt_function) for item in items}
+        rendered = {item["item_id"]: messages_for(item, prompt_function, declaration.get("prompt_set", "v3"))
+                    for item in items}
         require(jc.sha256_bytes(jc.canonical([jc.sha256_bytes(jc.canonical(rendered[item["item_id"]])) for item in items]))
                 == entry["rendered_messages_sha256"], "rendering_changed")
         for item in items:
@@ -280,7 +288,10 @@ def main(argv=None):
         if name == "declare":
             command.add_argument("--set", type=Path, action="append", required=True)
             command.add_argument("--default-declaration", type=Path, required=True,
-                                 help="a filled default-judge (v3) declaration whose prompt hashes this run must match")
+                                 help="a filled Sonnet declaration of the same prompt set, whose prompt hashes "
+                                      "this run records")
+            command.add_argument("--prompt-set", choices=sorted(PROMPT_SETS), default="v3")
+            command.add_argument("--authorization", required=True, help="who authorized the run, when and how")
             command.add_argument("--cap", type=Decimal, required=True)
     args = parser.parse_args(argv)
     try:
