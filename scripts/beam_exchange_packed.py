@@ -68,7 +68,7 @@ PRICING = va.Pricing("1.50", "7.50")
 PRICE_SOURCE = ("Google's Vertex pricing page, global endpoint, standard rate from 2027-01-01; the introductory "
                 "$0.75 / $3.75 billed through 2026-12-31 is half, so recorded spend is an upper bound")
 ANSWER_CAP_USD = Decimal("10")
-GRADE_CAP_USD = Decimal("5")
+GRADE_CAP_USD = Decimal("15")  # the worst case reserves the full 2,432-token output on every request
 AUTHORIZATION = epa.AUTHORIZATION.replace("the 73 retrieval inputs", "the 20 BEAM questions of the OptChat comparison")
 # OptChat scripts/beam-grader.ts, beamGradingProtocol version beam-native-grader-1, unchanged.
 GRADER_VERSION = "beam-native-grader-1"
