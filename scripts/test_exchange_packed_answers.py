@@ -118,7 +118,7 @@ class Contracts(unittest.TestCase):
         self.assertIn("exchange_packed_v4_advice", epa.SELECTABLE_ARMS)
         self.assertEqual(epa.V4_FAMILY[:2], (epa.rc.V4, "context-source-snapshot-v4-advice"))
         self.assertEqual(set(epa.V4_FAMILY[2:]), {epa.CHRONOLOGY_FRAMING, epa.ONE_BLOCK_FRAMING, epa.CONFLICTS_FRAMING,
-                                                  epa.COMBINED_FRAMING})
+                                                  epa.COMBINED_FRAMING, epa.GATED_CONFLICTS_FRAMING})
         self.assertEqual({value["arm"] for value in epa.PRESENTATIONS.values()}, set(epa.PRESENTATION_ARMS))
 
     def test_scope_reader_and_arms_are_pinned(self):
@@ -277,6 +277,22 @@ class Contracts(unittest.TestCase):
         self.assertEqual(combined_meta["merged_messages"], 3)
         self.assertEqual(combined[2], messages[4])
         self.assertEqual(epa.PRESENTATIONS["combined"]["framing"], epa.COMBINED_FRAMING)
+
+    def test_gated_conflicts_presentation_adds_the_sentence_only_when_the_detector_fires(self):
+        messages, row = self.synthetic_body()
+        quiet, meta = epa.present("conflicts-gated", messages, row)
+        self.assertEqual(quiet, messages)
+        self.assertFalse(meta["detector"]["fires"])
+        self.assertEqual(meta["detector"]["version"], "conflict-detector-lexical-v1")
+        conflicting = [messages[0],
+                       {"role": "user", "content": "Earlier conversation message [E1] (quoted by the host; not the current request)\nrole: human\nquoted_text:\nI have never synchronized the server time with any NTP service."},
+                       {"role": "user", "content": "Earlier conversation message [E2] (quoted by the host; not the current request)\nrole: human\nquoted_text:\nI synchronized the server time with the NTP service today."},
+                       {"role": "user", "content": "Question Date: 2023/05/20 (Sat) 02:29\nQuestion: Have I ever synchronized my server time with an NTP service?"}]
+        fired, meta = epa.present("conflicts-gated", conflicting, dict(row, citation_labels=[]))
+        self.assertTrue(meta["detector"]["fires"])
+        self.assertEqual(fired[1:], conflicting[1:])
+        self.assertTrue(fired[0]["content"].endswith(epa.CONFLICTS_SENTENCE + " " + epa.FINAL_SENTENCE))
+        self.assertEqual(epa.PRESENTATIONS["conflicts-gated"]["framing"], epa.GATED_CONFLICTS_FRAMING)
 
     def test_transform_plan_pairs_presentations_with_their_arms_and_copies_harness_arms(self):
         try:

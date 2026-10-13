@@ -82,13 +82,14 @@ CANDIDATES = (CANDIDATE,)
 HARNESS_ARMS = ("ordinary_send", "exchange_packed", "exchange_wide", "exchange_adjacent", "exchange_lexical", "lexical",
                 "exchange_passages", "exchange_roles", "exchange_prf", "exchange_roles_prf")
 PRESENTATION_ARMS = ("exchange_packed_v4_advice", "exchange_packed_chronology", "exchange_packed_one_block",
-                     "exchange_packed_conflicts", "exchange_packed_combined")
+                     "exchange_packed_conflicts", "exchange_packed_combined", "exchange_packed_conflicts_gated")
 SELECTABLE_ARMS = HARNESS_ARMS + PRESENTATION_ARMS
 ADVICE_FRAMING = "context-source-snapshot-v4-advice"
 CHRONOLOGY_FRAMING = "context-source-snapshot-v4-advice-chronology"
 ONE_BLOCK_FRAMING = "context-source-snapshot-v4-advice-one-block"
 CONFLICTS_FRAMING = "context-source-snapshot-v4-advice-conflicts"
 COMBINED_FRAMING = "context-source-snapshot-v4-advice-combined"
+GATED_CONFLICTS_FRAMING = "context-source-snapshot-v4-advice-conflicts-gated"
 FRAMING_TRANSFORMS = {"v4-advice": ("quotedHistoryFraming", "adviceHistoryFraming", ADVICE_FRAMING)}
 # Presentation probes (October 13, 2026): each derives a candidate arm from a captured V4-family arm.
 # ``v4-advice`` swaps the pinned V4 System literal for the V4-advice literal (both read from
@@ -103,14 +104,18 @@ FRAMING_TRANSFORMS = {"v4-advice": ("quotedHistoryFraming", "adviceHistoryFramin
 #   version with its label and ask which is correct, and not to describe a change no source states.
 # - ``combined``: ``chronology`` applied first, then ``one-block``: one delimited evidence message whose
 #   historical excerpts are chronological with relative-time lines, and both System changes.
+# - ``conflicts-gated``: ``conflicts`` only when the lexical conflict detector (conflict_detector.py) fires on
+#   the question and the delivered user-role sources; otherwise the body is byte-identical to the source.
 PRESENTATIONS = {
     "v4-advice": {"arm": "exchange_packed_v4_advice", "framing": ADVICE_FRAMING, "sources": (rc.V4,)},
     "chronology": {"arm": "exchange_packed_chronology", "framing": CHRONOLOGY_FRAMING, "sources": (ADVICE_FRAMING,)},
     "one-block": {"arm": "exchange_packed_one_block", "framing": ONE_BLOCK_FRAMING, "sources": (ADVICE_FRAMING,)},
     "conflicts": {"arm": "exchange_packed_conflicts", "framing": CONFLICTS_FRAMING, "sources": (ADVICE_FRAMING,)},
     "combined": {"arm": "exchange_packed_combined", "framing": COMBINED_FRAMING, "sources": (ADVICE_FRAMING,)},
+    "conflicts-gated": {"arm": "exchange_packed_conflicts_gated", "framing": GATED_CONFLICTS_FRAMING, "sources": (ADVICE_FRAMING,)},
 }
-V4_FAMILY = (rc.V4, ADVICE_FRAMING, CHRONOLOGY_FRAMING, ONE_BLOCK_FRAMING, CONFLICTS_FRAMING, COMBINED_FRAMING)
+V4_FAMILY = (rc.V4, ADVICE_FRAMING, CHRONOLOGY_FRAMING, ONE_BLOCK_FRAMING, CONFLICTS_FRAMING, COMBINED_FRAMING,
+             GATED_CONFLICTS_FRAMING)
 FINAL_SENTENCE = "A missing excerpt is not proof that the archive lacks a fact."
 LAYOUT_SENTENCES = ("Earlier messages from this conversation are quoted below in separate host-labelled user messages, "
                     "oldest first. Retrieved historical source excerpts, when present, follow in one host-labelled block.")
@@ -602,6 +607,19 @@ def combined_transform(messages, row):
     return folded, {**meta, **fold_meta}
 
 
+def gated_conflicts_transform(messages, row):
+    """The conflicts sentence only when the lexical detector fires; the detector's content-free verdict is recorded."""
+    import conflict_detector
+    verdict = conflict_detector.detect(messages)
+    meta = {"detector": {key: verdict[key] for key in ("version", "fires", "yes_no_question", "question_terms", "required_terms",
+                                                       "statements")},
+            "detector_sources": {"negated": len(verdict["negated_sources"]), "affirmed": len(verdict["affirmed_sources"])}}
+    if not verdict["fires"]:
+        return [dict(message) for message in messages], meta
+    out, _ = conflicts_transform(messages, row)
+    return out, meta
+
+
 def framing_swap_transform(messages, row, presentation):
     source_name, target_name, _version = FRAMING_TRANSFORMS[presentation]
     source_framing, target_framing = swift_framing_literal(source_name), swift_framing_literal(target_name)
@@ -621,7 +639,8 @@ def present(presentation, messages, row):
     if presentation in FRAMING_TRANSFORMS:
         return framing_swap_transform(messages, row, presentation)
     return {"chronology": chronology_transform, "one-block": one_block_transform,
-            "conflicts": conflicts_transform, "combined": combined_transform}[presentation](messages, row)
+            "conflicts": conflicts_transform, "combined": combined_transform,
+            "conflicts-gated": gated_conflicts_transform}[presentation](messages, row)
 
 
 def transform_plan(presentations, source_arms):
@@ -1076,16 +1095,21 @@ def score(args):
     import judge_calibration as jc
     output = args.output.absolute()
     declaration, entries = answered(output)
-    key_document = jc.load_json(output / "judge-set" / "key.json")
-    labels_document = jc.load_json(args.labels)
-    require(labels_document.get("set_id") == key_document["set_id"], "labels_set_mismatch")
-    require(labels_document.get("replicates") == 3 and labels_document.get("complete") is True, "labels_incomplete")
     verdicts = {}
-    for key in key_document["items"]:
-        entry = entries[key["row_index"]]
-        require(entry["question_id"] == key["question_id"] and entry["arm"] == key["arm"], "key_row_mismatch")
-        labels = [value.get("verdict") for value in labels_document["labels"].get(key["item_id"], [{}, {}, {}])]
-        verdicts[key["row_index"]] = replay.majority_of_three(labels)
+    if declaration["jobs"]:
+        key_document = jc.load_json(output / "judge-set" / "key.json")
+        labels_document = jc.load_json(args.labels)
+        require(labels_document.get("set_id") == key_document["set_id"], "labels_set_mismatch")
+        require(labels_document.get("replicates") == 3 and labels_document.get("complete") is True, "labels_incomplete")
+        for key in key_document["items"]:
+            entry = entries[key["row_index"]]
+            require(entry["question_id"] == key["question_id"] and entry["arm"] == key["arm"], "key_row_mismatch")
+            labels = [value.get("verdict") for value in labels_document["labels"].get(key["item_id"], [{}, {}, {}])]
+            verdicts[key["row_index"]] = replay.majority_of_three(labels)
+    else:
+        # No request differed from the baseline's: every question is a tie by construction and its rate
+        # comes from the earlier run the declaration names. No judge set exists.
+        key_document, labels_document = {"set_id": None}, {"judge": None, "declaration_sha256": None}
     per_question, samples, gold, declines = {}, {}, {}, {}
     manifest = load_captures(output)
     capture_rows = {(row["arm"], row["cohort"], row["question_id"]): row for row in manifest["rows"]}
@@ -1204,7 +1228,7 @@ def main(argv=None):
                                  help="an earlier run's score.json for questions with no generated baseline")
             command.add_argument("--reuse-arm", default=None, help="the arm of --reuse-score to take rates from")
         if name == "score":
-            command.add_argument("--labels", type=Path, required=True, help="the judge's labels for judge-set")
+            command.add_argument("--labels", type=Path, default=None, help="the judge's labels for judge-set (none for a zero-job run)")
     args = parser.parse_args(argv)
     import judge_calibration as jc
     import retrieval_harness as harness
