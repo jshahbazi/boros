@@ -23,6 +23,10 @@ extension ExchangeBlockQuery {
         /// Relevance of a unit is its block's score times this weight.
         static let memberWeight = 1.0
         static let neighborWeight = 0.5
+        /// Lead-priority policies: the fraction of the token budget that
+        /// candidate leads may fill before the density pass (declared before
+        /// measurement, docs/EVIDENCE-ALLOWANCE.md).
+        static let leadShare = 0.5
         /// Hard limit of `ContextSnapshot.deliveryAudit()` for `exchange_packed`.
         /// The wide variant declares its own on the policy
         /// (`ContextComponentPolicy.deliveryAuditBytes`).
@@ -109,7 +113,8 @@ extension ExchangeBlockQuery {
         /// value per normalized cost. A reply or neighbor needs its block's
         /// lead delivered; one that outranks its lead waits for that lead.
         static func plan(index: ExchangeCorpus, ranked: [RankedBlock], maximumSpans: Int, tokenBudget: Int,
-                         auditBudget: Int, selectionVersion: String, depth: Int = candidateBlockDepth) throws -> Plan {
+                         auditBudget: Int, selectionVersion: String, depth: Int = candidateBlockDepth,
+                         leadsFirst: Bool = false) throws -> Plan {
             let blocks = try candidates(index: index, ranked: ranked, depth: depth)
             var codes = blocks.map { Array(repeating: "?", count: $0.units.count) }
             var costs: [Int: (spans: [MemoryHit], tokens: Int, audit: Int)] = [:]
@@ -180,6 +185,25 @@ extension ExchangeBlockQuery {
                     }
                 }
             }
+            // Lead share (lead-priority policies): before the density pass,
+            // candidate leads are admitted in density order while their
+            // total stays within `leadShare` of the token budget. A lead that
+            // does not fit this share keeps its "?" and competes in the
+            // density pass like every other unit, so replies and neighbors
+            // of the best blocks keep the rest of the budget.
+            if leadsFirst {
+                let leadBudget = Int(Double(tokenBudget) * leadShare)
+                for item in order where blocks[item.rank].units[item.position].kind == "l" && codes[item.rank][item.position] == "?" {
+                    let unit = blocks[item.rank].units[item.position]
+                    if delivered[unit.source] != nil { continue }
+                    let bytes = try index.byteCount(unit.source)
+                    if bytes == 0 { continue }
+                    let value = try cost(unit.source)
+                    guard tokens + value.tokens <= leadBudget, spanCount + value.spans.count <= maximumSpans,
+                          auditBytes + value.audit <= auditBudget else { continue }
+                    try attempt(item.rank, item.position, mandatory: false)
+                }
+            }
             for item in order { try consider(item.rank, item.position) }
             for (rank, pending) in waiting { for position in pending where codes[rank][position] == "?" { codes[rank][position] = "L" } }
 
@@ -200,7 +224,7 @@ extension ExchangeBlockQuery {
         /// character, so a placeholder plan has the final serialized size up
         /// to numeric fields.
         static func audit(plan: Plan, index: ExchangeCorpus, matchedBlocks: Int, tokenBudget: Int, auditBudget: Int?,
-                          maximumSpans: Int, depth: Int = candidateBlockDepth) throws -> [String: Any] {
+                          maximumSpans: Int, depth: Int = candidateBlockDepth, leadsFirst: Bool = false) throws -> [String: Any] {
             var counts: [String: Int] = [:]
             for row in plan.codes { for code in row { counts[code, default: 0] += 1 } }
             let candidates: [[Any]] = try plan.blocks.enumerated().map { rank, block in
@@ -208,7 +232,8 @@ extension ExchangeBlockQuery {
                     [candidateID(try index.eventID(unit.source)), unit.kind, plan.codes[rank][position]]
                 }]
             }
-            return ["packing_version": version, "candidate_block_depth": depth,
+            return ["packing_version": version, "candidate_block_depth": depth, "lead_priority": leadsFirst,
+                "lead_share": leadsFirst ? leadShare : 0.0,
                 "candidate_block_count": plan.blocks.count,
                 "below_candidate_depth_block_count": max(0, matchedBlocks - plan.blocks.count),
                 "candidate_unit_count": plan.blocks.reduce(0) { $0 + $1.units.count },
@@ -240,6 +265,7 @@ extension ExchangeBlockQuery {
             // The policy's declared window and audit limit (`exchange_packed`
             // keeps this packer's declared constants).
             let depth = componentPolicy.candidateBlockDepth, auditLimit = componentPolicy.deliveryAuditBytes
+            let leadsFirst = componentPolicy.packsLeadsFirst
             // Size probe: the delivery audit with no historical sources and
             // a placeholder candidate audit of the final shape.
             let placeholderBlocks = try candidates(index: index, ranked: ranked, depth: depth)
@@ -249,11 +275,13 @@ extension ExchangeBlockQuery {
             var probe = recent
             probe.deliveryAuditLimit = auditLimit
             probe.retrievalAuditJSON = try retrieval(try audit(plan: placeholder, index: index, matchedBlocks: ranked.count,
-                tokenBudget: tokenBudget, auditBudget: auditLimit, maximumSpans: componentPolicy.evidenceSpans, depth: depth), from: recent)
+                tokenBudget: tokenBudget, auditBudget: auditLimit, maximumSpans: componentPolicy.evidenceSpans, depth: depth,
+                leadsFirst: leadsFirst), from: recent)
             let base = try probe.deliveryAudit().count
             let auditBudget = max(0, auditLimit - admissionHeadroomBytes - probeSlackBytes - base)
             var plan = try plan(index: index, ranked: ranked, maximumSpans: componentPolicy.evidenceSpans,
-                tokenBudget: tokenBudget, auditBudget: auditBudget, selectionVersion: binding.version, depth: depth)
+                tokenBudget: tokenBudget, auditBudget: auditBudget, selectionVersion: binding.version, depth: depth,
+                leadsFirst: leadsFirst)
             var trimmed = 0
             while true {
                 var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,
@@ -261,7 +289,7 @@ extension ExchangeBlockQuery {
                     maximumEvidenceSpans: componentPolicy.evidenceSpans, episodeLease: episodeLease, operationIsNested: true,
                     componentPolicy: componentPolicy, historicalProvenance: nil)
                 var exchange = try audit(plan: plan, index: index, matchedBlocks: ranked.count, tokenBudget: tokenBudget,
-                    auditBudget: auditBudget, maximumSpans: componentPolicy.evidenceSpans, depth: depth)
+                    auditBudget: auditBudget, maximumSpans: componentPolicy.evidenceSpans, depth: depth, leadsFirst: leadsFirst)
                 exchange["verification_trimmed_source_count"] = trimmed
                 exchange["delivery_audit_bytes_before_admission"] = 0
                 result.retrievalAuditJSON = try retrieval(exchange, from: result)

@@ -174,6 +174,22 @@ struct ContextComponentPolicy: Codable, Equatable {
         value.evidenceSpans = 64
         return value
     }()
+    /// Lead-priority variants of the value-density packer: every candidate
+    /// block's lead (the human turn that opens it) is packed before any reply
+    /// or neighbor, each group by value per cost. `exchange_leads` keeps the
+    /// `exchange_packed` caps and window; `exchange_wide_leads` keeps the wide
+    /// ones. Explicit policies for the evidence-allowance measurement
+    /// (docs/EVIDENCE-ALLOWANCE.md).
+    static let selectedQwenExchangeLeads: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-leads"
+        return value
+    }()
+    static let selectedQwenExchangeWideLeads: ContextComponentPolicy = {
+        var value = selectedQwenExchangeWide
+        value.version = "selected-model-context-components-v3-exchange-wide-leads"
+        return value
+    }()
     static let exchangeSelectionAuditVersion = "context-exchange-v1"
     /// The policy ordinary selected-Qwen Send freezes, and the default of
     /// unpinned public evaluation (`AnswerEvaluationCommand`). User decision,
@@ -188,15 +204,17 @@ struct ContextComponentPolicy: Codable, Equatable {
 
     var usesBoundedNeighborhood: Bool { self == Self.selectedQwenNeighborhood }
     var usesExchangeQuery: Bool {
-        self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent || self == Self.selectedQwenExchangePacked
-            || self == Self.selectedQwenExchangeWide
+        self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent || packsExchangeValueDensity
     }
-    var packsAdjacentExchanges: Bool {
-        self == Self.selectedQwenExchangeAdjacent || self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide
+    var packsAdjacentExchanges: Bool { self == Self.selectedQwenExchangeAdjacent || packsExchangeValueDensity }
+    var packsExchangeValueDensity: Bool {
+        self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide
+            || self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads
     }
-    var packsExchangeValueDensity: Bool { self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide }
-    /// The evidence-allowance variant of the value-density packer.
-    var widensEvidenceWindow: Bool { self == Self.selectedQwenExchangeWide }
+    /// The evidence-allowance variants of the value-density packer.
+    var widensEvidenceWindow: Bool { self == Self.selectedQwenExchangeWide || self == Self.selectedQwenExchangeWideLeads }
+    /// The lead-priority variants: candidate leads before replies and neighbors.
+    var packsLeadsFirst: Bool { self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads }
     /// Value-density packing parameters that follow the policy. `exchange_packed`
     /// keeps the values declared for it on October 8, 2026 (docs/P2-PACKING.md).
     var candidateBlockDepth: Int { widensEvidenceWindow ? 48 : 32 }
@@ -234,7 +252,8 @@ struct ContextComponentPolicy: Codable, Equatable {
     func validated() throws -> ContextComponentPolicy {
         guard self == Self.selectedQwen || self == Self.selectedQwenNeighborhood
             || self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent
-            || self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide else { throw EpisodeBudgetError.invalid }
+            || self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide
+            || self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads else { throw EpisodeBudgetError.invalid }
         return self
     }
 

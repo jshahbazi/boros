@@ -19,6 +19,7 @@ enum ExchangeEpisodeChecks {
     private static let policies: [(String, ContextComponentPolicy)] = [
         ("exchange_lexical", .selectedQwenExchange), ("exchange_adjacent", .selectedQwenExchangeAdjacent),
         ("exchange_packed", .selectedQwenExchangePacked), ("exchange_wide", .selectedQwenExchangeWide),
+        ("exchange_leads", .selectedQwenExchangeLeads), ("exchange_wide_leads", .selectedQwenExchangeWideLeads),
         (defaultFallbackCase, .currentSelectedQwen)]
     /// The synthetic tokenizer counts this many tokens per historical source,
     /// so a policy's evidence cap forces counted single-span reductions down

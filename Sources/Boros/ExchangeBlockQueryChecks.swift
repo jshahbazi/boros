@@ -330,6 +330,54 @@ enum ExchangeBlockQueryChecks {
             auditBudget: 100_000, selectionVersion: version)
         result["exchange_packed_quoted_anchor_members_are_mandatory_and_first"] = anchored.blocks.first?.anchors == 1
             && anchored.hits.prefix(2).map(\.eventID) == ["k1", "k1a"] && anchored.codes[0].contains("D")
+        // Lead share: with a budget twice the cost of the three candidate
+        // leads, the lead phase (half the budget) admits every lead before
+        // the density pass, where value density alone would spend the same
+        // budget on the best blocks' short replies first (at a budget that
+        // holds only the three leads, density delivers block 1's reply over
+        // block 2's lead). With that tight budget the lead phase holds one
+        // lead and the rest is the density pass: the delivery equals plain
+        // density. The policies are explicit and distinct.
+        var leadCost = 0
+        for block in index.blocks {
+            guard let first = block.sources.first, ["h1", "h2", "k1"].contains(index.sources[first].reference.eventID) else { continue }
+            for page in try ExchangeBlockQuery.pages(index, first) {
+                leadCost += try ExchangeBlockQuery.estimatedTokens(page, selectionVersion: version)
+            }
+        }
+        let leadsPlan = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: 2 * leadCost,
+            auditBudget: 100_000, selectionVersion: version, leadsFirst: true)
+        let densityPlan = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: leadCost,
+            auditBudget: 100_000, selectionVersion: version)
+        let tightLeadsPlan = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: leadCost,
+            auditBudget: 100_000, selectionVersion: version, leadsFirst: true)
+        let leadsDelivered = Set(leadsPlan.hits.map(\.eventID)), densityDelivered = Set(densityPlan.hits.map(\.eventID))
+        let leadsPolicy = try ContextComponentPolicy.selectedQwenExchangeLeads.validated()
+        let wideLeads = try ContextComponentPolicy.selectedQwenExchangeWideLeads.validated()
+        let leadsAudit = try Packing.audit(plan: leadsPlan, index: index, matchedBlocks: ranked.count, tokenBudget: 2 * leadCost,
+            auditBudget: 100_000, maximumSpans: 48, leadsFirst: true)
+        let densityAudit = try Packing.audit(plan: tight, index: index, matchedBlocks: ranked.count, tokenBudget: 900,
+            auditBudget: 100_000, maximumSpans: 48)
+        let decodedWideLeads = try JSONDecoder().decode(ContextComponentPolicy.self, from: wideLeads.canonicalData())
+        result["exchange_leads_share_admits_every_lead_before_the_density_pass"] = leadCost > 0
+            && leadsDelivered.isSuperset(of: ["h1", "h2", "k1"]) && leadsDelivered.count > 3
+            && densityDelivered.contains("a2") && !densityDelivered.contains("k1")
+            && Set(tightLeadsPlan.hits.map(\.eventID)) == densityDelivered
+            && leadsPlan.estimatedTokens <= 2 * leadCost && leadsAudit["lead_priority"] as? Bool == true
+            && leadsAudit["lead_share"] as? Double == Packing.leadShare && Packing.leadShare == 0.5
+            && densityAudit["lead_priority"] as? Bool == false && densityAudit["lead_share"] as? Double == 0.0
+        result["exchange_leads_policies_are_explicit_distinct_and_declare_their_caps"] = leadsPolicy.packsLeadsFirst
+            && wideLeads.packsLeadsFirst && !packed.packsLeadsFirst && !wide.packsLeadsFirst
+            && leadsPolicy.packsExchangeValueDensity && wideLeads.packsExchangeValueDensity && leadsPolicy.usesExchangeQuery
+            && leadsPolicy.evidenceTokens == packed.evidenceTokens && leadsPolicy.evidenceSpans == packed.evidenceSpans
+            && leadsPolicy.candidateBlockDepth == 32 && leadsPolicy.deliveryAuditBytes == 32_768 && !leadsPolicy.widensEvidenceWindow
+            && wideLeads.evidenceTokens == wide.evidenceTokens && wideLeads.evidenceSpans == wide.evidenceSpans
+            && wideLeads.candidateBlockDepth == 48 && wideLeads.deliveryAuditBytes == 40_960 && wideLeads.widensEvidenceWindow
+            && leadsPolicy.version == "selected-model-context-components-v3-exchange-leads"
+            && wideLeads.version == "selected-model-context-components-v3-exchange-wide-leads"
+            && Set([packed, wide, leadsPolicy, wideLeads].map(\.version)).count == 4
+            && ExchangeBlockQuery.retrievalMode(leadsPolicy) == "exchange_leads"
+            && ExchangeBlockQuery.retrievalMode(wideLeads) == "exchange_wide_leads" && decodedWideLeads == wideLeads
         let audit = try Packing.audit(plan: tight, index: index, matchedBlocks: ranked.count, tokenBudget: 900,
             auditBudget: 100_000, maximumSpans: 48)
         let auditBytes = try JSONSerialization.data(withJSONObject: audit)

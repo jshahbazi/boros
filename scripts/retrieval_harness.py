@@ -72,7 +72,7 @@ PARITY_ARMS = tuple(rebuild for _, rebuild in PARITY_PAIRS)
 PERSISTENT_INDEX_LABEL = "persistent_sidecar"
 REBUILD_INDEX_LABEL = "in_memory_per_turn"
 ARMS = ("recent_only", "lexical", "hybrid", ORDINARY_SEND_ARM, "exchange_lexical", "exchange_adjacent",
-        "exchange_packed", "exchange_wide") + GLOBAL_ARMS + PARITY_ARMS
+        "exchange_packed", "exchange_wide", "exchange_leads", "exchange_wide_leads") + GLOBAL_ARMS + PARITY_ARMS
 PRIMARY_ARM = ORDINARY_SEND_ARM
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
@@ -763,6 +763,8 @@ def run(args):
                  "exchange_adjacent": "explicit P2 step 1+2 policy selected-model-context-components-v3-exchange-adjacent; no semantic index",
                  "exchange_packed": "P2 step 3 policy selected-model-context-components-v3-exchange-packed, pinned; no semantic index; the ordinary Send default since October 12, 2026",
                  "exchange_wide": "evidence-allowance variant selected-model-context-components-v3-exchange-wide, pinned: the exchange_packed query, ranking and packer with a 16,000-token evidence cap, 64 spans, a 48-block window and a 40 KiB delivery audit; no semantic index (docs/EVIDENCE-ALLOWANCE.md)",
+                 "exchange_leads": "lead-priority variant selected-model-context-components-v3-exchange-leads, pinned: exchange_packed's caps and window, every candidate lead packed before any reply or neighbor (docs/EVIDENCE-ALLOWANCE.md)",
+                 "exchange_wide_leads": "lead-priority variant selected-model-context-components-v3-exchange-wide-leads, pinned: exchange_wide's caps and window, every candidate lead packed before any reply or neighbor (docs/EVIDENCE-ALLOWANCE.md)",
                  "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
                  "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)",
                  "exchange_adjacent_rebuild": "exchange_adjacent over the per-turn in-memory rebuild (parity arm; the policy reads the persistent index)",

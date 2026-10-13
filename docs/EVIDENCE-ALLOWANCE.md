@@ -36,6 +36,10 @@ Two contracts changed to let the policy's caps apply end to end:
 - `ProviderComponentProof.accepts` and `ProviderAdmission.admit` bounded the component receipts by the v1 constants 8,000 and 12,000 regardless of the frozen policy. They now bound them by the policy's `recentTokens` and `evidenceTokens`, which the proof already records and the journal validator already checks. The constants remain as the v1 values their own checks use. Before this change, a wide episode packed 16,000 tokens and then lost spans to `envelope` reductions at admission (94 envelope removals across the 14 regression histories, and one lost regression case).
 - `ExchangeBlockQuery.retrievalMode` and the packer's audit name the policy (`exchange_wide`); the harness reads the declared `candidate_block_depth` from each audit instead of assuming 32.
 
+Two lead-priority variants were added after the first offline result (below) showed that the larger budget was spent on replies and neighbors of higher-ranked blocks rather than on the leads the annotations name: `selectedQwenExchangeLeads` (`exchange_leads`, the `exchange_packed` caps and window) and `selectedQwenExchangeWideLeads` (`exchange_wide_leads`, the wide caps and window). Under either, a lead phase precedes the density pass: candidate leads are admitted in value-per-cost order while their total stays within a declared share of the token budget (`leadShare`, 0.5). A lead outside that share keeps its receipt open and competes in the density pass like every other unit. The audit records `lead_priority` and `lead_share`. Pass 1 (quoted-anchor members) and the dependency rule (a reply or neighbor needs its lead) are unchanged.
+
+A strict form (every lead before any reply or neighbor, no share) was measured first on the regression cohort and discarded: it lost both assistant-recall cases, whose gold is the top block's reply, because 40 leads filled the token budget (`1b9b7252`) or the audit budget (`4baee567`) before that reply was considered (`evidence-allowance-regression-3.json`, R2 9 of 12 at either budget).
+
 Nothing else changed. v1/16, the step 1 and 2 policies and `exchange_packed` keep their declared parameters, which the packer checks pin (`exchange_packed_parameters_are_declared`). The evaluation command's `--component-policy` option is unchanged.
 
 ### Contracts
@@ -47,7 +51,43 @@ Nothing else changed. v1/16, the step 1 and 2 policies and `exchange_packed` kee
 
 ## Measured, offline (P1 harness)
 
-To be recorded from the regression and development runs.
+Conditions: this checkout's sources compiled into the delivery harness, pinned offline tokenizer, three workers, one replicate, stores built cold by this harness. Reports are under `.build/evaluation/` of this worktree (`evidence-allowance-regression-2.json`, `evidence-allowance-development.json`).
+
+### Regression cohort (12 answerable of 14)
+
+| Arm | R1 | R2 | Turns whole | Prompt tokens p50 / max | Spans p50 / max | Envelope removals | Audit bytes max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `exchange_packed` | 12 | 11 | 17 / 18 | 15,170 / 16,939 | 24 / 27 | 0 | 30,602 |
+| `exchange_wide` | 12 | 11 | 17 / 18 | 18,558 / 20,631 | 31.5 / 37 | 0 | 37,846 |
+
+No case changed in either direction. The one known miss, `1a1907b4` (the next neighbor of the rank-17 block, a long assistant turn), is still skipped by the token budget (`T`) under both arms. The `ordinary_send` arm still equals `exchange_packed` on 14 of 14 histories.
+
+Before the admission fix, the same run measured `exchange_wide` at R2 10 of 12: the proof bounded evidence receipts at 12,000 regardless of the policy, admission refused the 16,000-token component, and 94 `envelope` removals across the 14 histories took the lowest-ranked spans back out, losing `1192316e` (first report, `evidence-allowance-regression.json`).
+
+### Development cohort (90 answerable of 100), budget alone
+
+| Arm | R1 | R2 | Turns whole / 165 | Prompt tokens p50 / max | Spans p50 / max | Audit bytes max |
+|---|---:|---:|---:|---:|---:|---:|
+| `exchange_packed` | 78 (86.7%) | 69 (76.7%) | 137 | 15,535 / 18,289 | 24 / 27 | 31,806 |
+| `exchange_wide` | 82 (91.1%) | 70 (77.8%) | 139 | 18,992 / 22,027 | 30.5 / 35 | 39,732 |
+
+One case changed, `73d42213` (multi-session; its rank-18 lead, `T` under `exchange_packed`, is delivered), and none was lost. By category R2 is identical except multi-session 11 to 12. No envelope or counted token removal occurred under either arm; the delivery audit never exceeded its limit.
+
+The budget is not the lever. Where the 26 turns `exchange_wide` still misses sit:
+
+| Where | Turns |
+|---|---:|
+| Not a candidate (outside the 48-block window, or in no matched block) | 12 |
+| Candidate lead, token budget (`T`), block ranks 19 to 33 | 10 |
+| Candidate lead, audit byte budget (`A`), rank 38 | 1 |
+| Candidate neighbor whose lead was not delivered (`L`), ranks 35 and 38 | 2 |
+| Candidate next neighbor, token budget (`T`), rank 4 | 1 |
+
+With 4,000 more tokens the packer delivered about seven more spans per history, but they were replies and neighbors of higher-ranked blocks, which value per cost prefers over the leads of lower-ranked blocks. The annotated turns are leads in 11 of the 14 candidate misses. That is why the lead-priority variants were added.
+
+### Step 3 inputs (73), budget alone
+
+The offline capture for the answer-quality run (`scripts/exchange_packed_answers.py capture`, both arms, no generation) delivered every gold turn whole on 53 of the 73 inputs under `exchange_packed` (reproducing the October 12 captures on 73 of 73) and on 54 under `exchange_wide`: only `00ca467f` changed. Median prompt 15,358 tokens against 18,921 (maximum 22,034). One recovered question of 17 non-whole is not worth a paid answer run, so none was dispatched for this arm.
 
 ## Measured, answer quality (step 3 cohorts)
 
