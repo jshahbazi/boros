@@ -166,15 +166,26 @@ class Contracts(unittest.TestCase):
         selected, dropped = br.parse_record_selection("Here:\n- **[R2]**\n[R3].\nR5\n[R9]\n[S1]\nNONE\n[R2]\n", {"R1", "R2", "R3", "R5"})
         self.assertEqual((selected, dropped), (["R2", "R3", "R5"], 3))
         self.assertEqual(br.parse_record_selection("NONE", {"R1"}), ([], 0))
-        self.assertEqual(br.gathered_record_selection([["R1", "R2", "R3"], [], ["R4", "R5"]], limit=4), ["R1", "R2", "R4", "R5"])
+        self.assertEqual(br.gathered_record_selection([["R1", "R2", "R3"], [], ["R4", "R5"]], limit=4), ["R1", "R2", "R3", "R4"])
+        self.assertEqual(br.gathered_record_selection([["R1", "R2", "R3"], [], ["R4", "R5"]]), ["R1", "R2", "R3", "R4", "R5"])
         # The candidate carries the selected labels plus the lexical seeds, chronologically, within the limits.
         entries[3]["statement"] = "The marathon training moved to Chicago."
         chosen = br.candidate_positions(entries, "marathon training", ["R5", "R1"])
         self.assertEqual([entries[p]["seq"] for p in chosen["positions"]], [0, 6, 8])
-        self.assertEqual(chosen["statistics"]["by_reason"], {"selected": 2, "seed": 1})
+        self.assertEqual(chosen["statistics"]["by_reason"], {"selected": 2, "seed": 1, "rank": 0})
         limited = br.candidate_positions(entries, "marathon training", ["R5", "R1"], maximum=2)
         self.assertEqual([entries[p]["seq"] for p in limited["positions"]], [0, 8])
         self.assertEqual(br.candidate_positions(entries, "nothing here", ["R99"])["positions"], [])
+        # Beyond the seeds, the remaining lexical ranks fill the budget in rank order.
+        for seq in range(0, 12, 2):
+            entries[seq // 2]["statement"] = "Statement about the training schedule." if seq != 6 else entries[3]["statement"]
+        filled = br.candidate_positions(entries, "marathon training", [], maximum=3)
+        self.assertEqual(len(filled["positions"]), 3)
+        self.assertEqual(entries[filled["positions"][0]]["seq"] if entries[filled["positions"][0]]["seq"] == 6 else 6, 6)
+        self.assertEqual(filled["statistics"]["by_reason"]["selected"], 0)
+        self.assertEqual(filled["statistics"]["lexical_matches"], 6)
+        with_rank = br.candidate_positions([dict(e, statement="x " * 3) for e in entries] * 10, "x", [], maximum=30)
+        self.assertEqual(with_rank["statistics"]["by_reason"], {"selected": 0, "seed": br.SEED_ENTRIES, "rank": 30 - br.SEED_ENTRIES})
 
 
 if __name__ == "__main__":

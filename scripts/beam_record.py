@@ -86,8 +86,13 @@ CHARS_PER_TOKEN_BOUND = 3
 # quotes) that lists the labels of the relevant entries; the lexical seeds are added as a floor. The
 # pilot on 100K-1 (docs/RECORD-PATH.md) showed why: subjects are singletons and the missed gold messages'
 # entries share no term with the question, so the selection must read the statements.
-MAXIMUM_SELECTED = 250
-MAXIMUM_SELECTED_CHARS = 64_000
+# Composition v2 (amended on the cohort before any candidate answer, from content-free recall counts of the
+# finished selection calls: the equal share per chunk cut large selections, and filling the budget with the
+# lexical ranks raised recall from 55 to 75 percent of the gold at 400 entries): every label the selection
+# calls listed, then the lexical seeds, then the remaining lexical ranks, cut at the limits below.
+COMPOSITION = "selected-then-seeds-then-lexical-fill-v2"
+MAXIMUM_SELECTED = 400
+MAXIMUM_SELECTED_CHARS = 100_000
 SEED_ENTRIES = 24
 EXPANSION_SHARE = 0.04
 BM25_K1 = 1.2
@@ -564,8 +569,9 @@ def select(entries: list, question: str, method=DEFAULT_METHOD, maximum=MAXIMUM_
         if len(kept) >= maximum or chars + size > maximum_chars:
             break
         kept.append(position); chars += size
+    rank_of = {position: rank for rank, position in enumerate(chosen)}
     kept.sort(key=lambda p: (entries[p]["seq"], p))
-    return {"positions": kept, "statistics": {"method": method, "query_terms": len(query["terms"]), "anchors": len(query["anchors"]),
+    return {"positions": kept, "rank_of": rank_of, "statistics": {"method": method, "query_terms": len(query["terms"]), "anchors": len(query["anchors"]),
                                               "entries": len(entries), "matched": len(ranked), "selected": len(kept), "chars": chars,
                                               "by_reason": {name: sum(1 for p in kept if reason[p] == name)
                                                             for name in ("seed", "subject", "entity", "exchange", "rank")}}}
@@ -640,24 +646,25 @@ def parse_record_selection(text: str, labels: set):
 
 
 def gathered_record_selection(per_chunk: list, limit=MAXIMUM_SELECTED) -> list:
-    """Up to `limit` labels across the chunks' selections, an equal share per chunk in listed order."""
-    return ms.gathered_selection(per_chunk, limit)
+    """Every label the chunks' selection calls listed, in chunk order, up to `limit`."""
+    return [label for labels in per_chunk for label in labels][:limit]
 
 
 def candidate_positions(entries: list, question: str, selected_labels: list, index=None, maximum=MAXIMUM_SELECTED,
                         maximum_chars=MAXIMUM_SELECTED_CHARS) -> dict:
-    """The entries the record message carries: the selection call's labels, then the lexical seeds it missed,
-    cut at the limits and ordered chronologically."""
+    """The entries the record message carries (COMPOSITION): the selection calls' labels, then the lexical seeds,
+    then the remaining lexical ranks, cut at the limits and ordered chronologically."""
     index = index or index_entries(entries)
-    seeds = select(entries, question, "lexical", maximum=SEED_ENTRIES, index=index)["positions"]
+    ranked = select(entries, question, "lexical", maximum=len(entries), maximum_chars=10**9, index=index)
+    lexical = sorted(ranked["positions"], key=lambda p: ranked["rank_of"][p])
     reason, order = {}, []
     for label in selected_labels:
         position = int(label[1:]) - 1
         if 0 <= position < len(entries) and position not in reason:
             reason[position] = "selected"; order.append(position)
-    for position in seeds:
+    for rank, position in enumerate(lexical):
         if position not in reason:
-            reason[position] = "seed"; order.append(position)
+            reason[position] = "seed" if rank < SEED_ENTRIES else "rank"; order.append(position)
     kept, chars = [], 0
     for position in order:
         size = len(render_entry(entries[position], 0)) + 1
@@ -665,9 +672,10 @@ def candidate_positions(entries: list, question: str, selected_labels: list, ind
             break
         kept.append(position); chars += size
     kept.sort(key=lambda p: (entries[p]["seq"], p))
-    return {"positions": kept, "statistics": {"method": "listing", "entries": len(entries), "selected_labels": len(selected_labels),
-                                              "seeds": len(seeds), "selected": len(kept), "chars": chars,
-                                              "by_reason": {name: sum(1 for p in kept if reason[p] == name) for name in ("selected", "seed")}}}
+    return {"positions": kept, "statistics": {"method": "listing", "composition": COMPOSITION, "entries": len(entries),
+                                              "selected_labels": len(selected_labels), "lexical_matches": len(lexical), "selected": len(kept),
+                                              "chars": chars, "by_reason": {name: sum(1 for p in kept if reason[p] == name)
+                                                                            for name in ("selected", "seed", "rank")}}}
 
 
 # --------------------------------------------------------------------------- coverage and recall (offline)
@@ -789,6 +797,8 @@ def declare(args):
     frozen jobs (baseline answers, one selection per routed question, candidate answers), the worst case and
     the cap. No model output is generated."""
     output = args.output.absolute()
+    if args.amend:
+        return amend(args)
     captures = cohort.load_captures(output)
     manifest, cases = cohort.load_cohort(output)
     extractions = load_extract_declarations(output)
@@ -894,10 +904,11 @@ def declare(args):
                    "select_output_tokens": SELECT_OUTPUT_TOKENS, "pricing": {**PRICING.declaration(), "source": PRICE_SOURCE}},
         "router": {"rules": ms.ROUTES, "time_units_exception": ms.TIME_UNITS.pattern, "routing": routing, "routed": routed,
                    "by_category": by_category, "source": "beam_multi_source.route, unchanged"},
-        "selection": {"method": args.method, "maximum_selected": MAXIMUM_SELECTED, "maximum_selected_chars": MAXIMUM_SELECTED_CHARS,
-                      "seed_entries": SEED_ENTRIES, "bm25": {"k1": BM25_K1, "b": BM25_B}, "listing_chunk_chars": LISTING_CHUNK_CHARS,
-                      "select_per_chunk": SELECT_PER_CHUNK, "system_sha256": cohort.sha256_text(SELECT_SYSTEM),
-                      "once_per_question": True, "candidate_extra_tokens_bound": candidate_extra, "statistics": listing_statistics},
+        "selection": {"method": args.method, "composition": COMPOSITION, "maximum_selected": MAXIMUM_SELECTED,
+                      "maximum_selected_chars": MAXIMUM_SELECTED_CHARS, "seed_entries": SEED_ENTRIES, "bm25": {"k1": BM25_K1, "b": BM25_B},
+                      "listing_chunk_chars": LISTING_CHUNK_CHARS, "select_per_chunk": SELECT_PER_CHUNK,
+                      "system_sha256": cohort.sha256_text(SELECT_SYSTEM), "once_per_question": True,
+                      "candidate_extra_tokens_bound": candidate_extra, "statistics": listing_statistics},
         "answer": {"framing_sentence_sha256": cohort.sha256_text(RECORD_FRAMING_SENTENCE), "heading_sha256": cohort.sha256_text(RECORD_HEADING),
                    "base_framing": cohort.ADVICE_FRAMING},
         "input_tokens": counts, "listing_input_tokens": listing_counts, "replicates": replicates, "labels": labels,
@@ -917,6 +928,44 @@ def declare(args):
                                                              / max(1, sum(s["gold_turns"] for s in listing_statistics.values())), 1),
                       "worst_case_usd": declaration["worst_case_usd"], "cap_usd": declaration["spending_cap_usd"],
                       "declaration_sha256": replay.digest(declaration_path(output).read_bytes())}))
+
+
+def amend(args):
+    """Re-declares the candidate composition and limits while no candidate answer exists: the jobs, listings,
+    selection outputs and baseline ledger stay; the declaration is rewritten with the current driver and the
+    earlier one is kept beside it. Only the answer step's input changes, and it has not been generated."""
+    output = args.output.absolute()
+    require(not replay.git("status", "--porcelain", "--", "scripts", "Tests/Evaluation", "Sources"), "sources_not_committed")
+    earlier = load_declaration(output)
+    require(not (output / "ledger-candidate.jsonl").exists() and not list((output / "selections").glob("*.body.json")),
+            "candidate_answers_exist")
+    number = 1 + len(list(output.glob("declaration-before-amend-*.json")))
+    replay.private_write(output / f"declaration-before-amend-{number}.json", declaration_path(output).read_bytes())
+    captures = cohort.load_captures(output)
+    rows = {row["label"]: row for row in captures["rows"]}
+    candidate_extra = math.ceil((len(RECORD_HEADING) + MAXIMUM_SELECTED_CHARS) / CHARS_PER_TOKEN_BOUND) + 16
+    worst = 0
+    reused = set(earlier["reused_baseline_jobs"])
+    for index, job in enumerate(earlier["jobs"]):
+        row = rows[job["label"]]
+        if job["stage"] == "baseline" and index not in reused:
+            worst += PRICING.microusd(earlier["input_tokens"][job["label"]], answer_limit(row))
+        elif job["stage"] == "select":
+            worst += PRICING.microusd(earlier["listing_input_tokens"][job["label"]][job["chunk"]], SELECT_OUTPUT_TOKENS + THINKING_ALLOWANCE)
+        elif job["stage"] == "candidate":
+            worst += PRICING.microusd(earlier["input_tokens"][job["label"]] + candidate_extra, answer_limit(row))
+    require(Decimal(worst) / 10**6 <= Decimal(earlier["spending_cap_usd"]), "worst_case_exceeds_cap")
+    declaration = {**earlier, "amended_at_utc": beam.now(), "amended_from_sha256": replay.digest(declaration_path(output).read_bytes()),
+                   "amendment": args.amend, "worst_case_usd": str(Decimal(worst) / 10**6), "drivers": drivers(),
+                   "build_commit": replay.git("rev-parse", "HEAD"),
+                   "selection": {**earlier["selection"], "composition": COMPOSITION, "maximum_selected": MAXIMUM_SELECTED,
+                                 "maximum_selected_chars": MAXIMUM_SELECTED_CHARS, "seed_entries": SEED_ENTRIES,
+                                 "candidate_extra_tokens_bound": candidate_extra}}
+    declaration_path(output).unlink()
+    replay.private_write(declaration_path(output), replay.canonical(declaration) + b"\n")
+    print(json.dumps({"amended": number, "composition": COMPOSITION, "maximum_selected": MAXIMUM_SELECTED,
+                      "maximum_selected_chars": MAXIMUM_SELECTED_CHARS, "worst_case_usd": declaration["worst_case_usd"],
+                      "cap_usd": declaration["spending_cap_usd"], "declaration_sha256": replay.digest(declaration_path(output).read_bytes())}))
 
 
 def load_declaration(output: Path):
@@ -1395,6 +1444,7 @@ def main(argv=None):
             command.add_argument("--reuse-answers", type=Path, action="append", default=None,
                                  help="a finished run whose ordinary answers over identical requests this run reuses (repeatable)")
             command.add_argument("--cap-usd", default="15")
+            command.add_argument("--amend", default=None, help="re-declare the candidate composition before any candidate answer; the reason, recorded")
         if name == "grade-declare":
             command.add_argument("--reuse-grades", type=Path, action="append", default=None,
                                  help="a grader directory whose verdicts for identical items this run reuses (repeatable)")
