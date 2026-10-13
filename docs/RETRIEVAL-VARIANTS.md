@@ -97,7 +97,9 @@ Under `exchange_roles_prf`, four partial deliveries and one none became whole, a
 
 The unchanged-request rule (item 1a) found nothing to reuse: the request body differs from the baseline's on 73 of 73 inputs, and the set of delivered byte ranges differs on 72, because role weighting re-ranks blocks and the packer admits different units, not merely the same units in another order. An order-only change would not have been a tie by construction either, and the driver does not treat it as one. The paired run is therefore the full one: 438 answers at about $10.8 at the declared standard rate plus about $1.5 of judging. With $16.54 spent on the presentation-probe answers and about $2.2 on their judge, that would end near $31 against the $25 the mandate allows without asking. **No retrieval answer was generated.** The arm stays an explicit, selectable policy; `currentSelectedQwen` remains `exchange_packed`.
 
-What a decision would need (proposed): the full paired run above under the declared rule (promote at D >= +5, lower bound >= -2, no cohort below -5), with the capture already made; the October 12 record measured that newly whole delivery converted at 17.9 to 76.9 percent accepted for this reader, so the five recovered questions could be worth about +4 to +5 points on the 72, while the 52 re-contexted questions carry the risk.
+**Update, later on October 13:** the coordinator funded that run; its result is in [FOUR-ARM-PAIRED-RUN.md](FOUR-ARM-PAIRED-RUN.md): D -0.9 points (interval -8.3 to +6.0), the five newly whole questions +40 points and the 66 re-contexted questions -2.5; not promoted.
+
+What a decision would have needed (as proposed before that run): the full paired run above under the declared rule (promote at D >= +5, lower bound >= -2, no cohort below -5), with the capture already made; the October 12 record measured that newly whole delivery converted at 17.9 to 76.9 percent accepted for this reader, so the five recovered questions could be worth about +4 to +5 points on the 72, while the 52 re-contexted questions carry the risk.
 
 ## Privacy and artifacts
 
