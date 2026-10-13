@@ -21,7 +21,7 @@ The driver also gained, for this batch, several candidate arms per run with a ro
 
 ## Declared before generation (measured)
 
-`.build/presentation-probes-20261013/declaration.json` (SHA-256 `DECLARATION_SHA`) froze: the captures (SHA-256 `ef53697f…23ad`; 219 rows, 73 per arm, every candidate changed, so no request was reused); 657 jobs (73 inputs, the baseline `exchange_packed_v4_advice` and the two candidates, three replicates, arm order rotating by question and replicate); the reader settings of the earlier records (Gemini 3.8 Flash, thinking level low, the step 3 output limit plus a 2,048-token thinking allowance, no sampling field); a cap of $31 at the standard rate, which is the worst-case bound (every answer at its output ceiling; the expected spend at the observed output lengths was about $16), with an operational stop at $20 of recorded spend; the judge (the default verdict judge, prompt set v4, three replicates, majority vote, one blinded set holding every answer of the three arms); and the rule:
+`.build/presentation-probes-20261013/declaration.json` (SHA-256 `ea24f964…dae7`) froze: the captures (SHA-256 `ef53697f…23ad`; 219 rows, 73 per arm, every candidate changed, so no request was reused); 657 jobs (73 inputs, the baseline `exchange_packed_v4_advice` and the two candidates, three replicates, arm order rotating by question and replicate); the reader settings of the earlier records (Gemini 3.8 Flash, thinking level low, the step 3 output limit plus a 2,048-token thinking allowance, no sampling field); a cap of $31 at the standard rate, which is the worst-case bound (every answer at its output ceiling; the expected spend at the observed output lengths was about $16), with an operational stop at $20 of recorded spend; the judge (the default verdict judge, prompt set v4, three replicates, majority vote, one blinded set holding every answer of the three arms); and the rule:
 
 - **Unit.** The question: the 72 retrieval questions without `54026fce`; a question's accept rate is its accepted answers over three replicates.
 - **Difference.** For each candidate, D is its mean per-question accept rate minus the baseline's, in points, with a 10,000-resample paired bootstrap percentile interval and a two-sided sign test.
@@ -32,7 +32,33 @@ Token counts (free): median Gemini count 15,626 for the baseline, 16,122 for `ch
 
 ## Result (measured)
 
-RESULTS_SECTION
+- **Generation.** 657 of 657 answers completed, no failure, no incomplete result, no retry stop; $16.54 at the declared standard rate (the introductory price billed through 2026 is half). Median latency was unchanged across arms.
+- **Judging.** Blinded set `jep-9f6d8a5aa7704304` (657 items, items SHA-256 `f60704f1…de94`), 0 identifier substitutions, 1 item naming a model (the blinding check passed). 1,971 judge requests completed with 0 failures and 0 unknown votes; $2.14. Judge declaration SHA-256 `3869343b…0d8e`.
+- **Baseline consistency.** The same V4-advice requests measured 76.4 percent here and 79.2 on October 12 (fresh generations both times); that 2.8-point gap is the reader's and judge's run-to-run variation, which is why both candidates are compared paired within this run.
+
+Mean per-question accept rate, D in points, paired 95 percent bootstrap interval, questions better / worse / tied:
+
+| Questions | V4-advice (baseline) | `chronology` | D | Interval | Better / worse / tie | `one-block` | D | Interval | Better / worse / tie |
+|---|---:|---:|---:|---|---|---:|---:|---|---|
+| All 72 | 76.4% | 80.1% | +3.7 | 0.0 to +7.9 | 6 / 1 / 65 | 79.6% | +3.2 | +0.5 to +6.9 | 6 / 1 / 65 |
+| retrieval-on-21 (20) | 90.0% | 90.0% | 0.0 | 0.0 to 0.0 | 0 / 0 / 20 | 90.0% | 0.0 | 0.0 to 0.0 | 0 / 0 / 20 |
+| preference-27 | 75.3% | 85.2% | +9.9 | +2.5 to +18.5 | 5 / 0 / 22 | 77.8% | +2.5 | -2.5 to +7.4 | 3 / 1 / 23 |
+| temporal-25 | 66.7% | 66.7% | 0.0 | -8.0 to +8.0 | 1 / 1 / 23 | 73.3% | +6.7 | 0.0 to +16.0 | 3 / 0 / 22 |
+
+Sign tests: 0.125 for both candidates over all 72.
+
+Declines (the step 3 lexical measure, 219 answers per arm; "false" means every gold turn delivered and the question answerable): baseline 43 declines, 16 false; `chronology` 40 and 13; `one-block` 37 and 10. Verdicts accepted: 168, 176 and 175 of 219.
+
+The excluded `54026fce` was accepted three of three times under every arm. Gold delivery is identical across arms by construction (52 whole, 9 partial, 8 none, 3 no gold turns of the 72), so every difference is presentation.
+
+### What each probe did (measured, then inferred)
+
+- **`chronology` did not move the temporal questions it targeted.** Temporal-25 is level question for question (one better, one worse). Its gain is on preference questions (+9.9 points, five better, none worse); the one temporal loss (`0bc8ad93`, gold whole) and one temporal gain (`gpt4_e414231f`) cancel. A plausible reading is that ordering the history oldest first puts the user's most recent statements last, where an advice question benefits, while the relative-time lines did not change how Gemini does date arithmetic on these 25 questions. The three temporal questions wrong on every replicate with gold whole stayed wrong under both probes except `gpt4_e414231f`, which both probes fix on two or three replicates.
+- **`one-block` reduced false declines and helped temporal questions.** False declines with gold whole fell from 16 to 10 of 219 (declines 43 to 37); temporal-25 rose 6.7 points (three better, none worse, including the partial-delivery question `gpt4_d6585ce8`), and the one loss is a preference question with partial delivery (`1c0ddc50`, 3 of 3 to 2 of 3). Its interval excludes zero over all 72 (+0.5 to +6.9), but D is below the declared +5.
+
+### Decision
+
+Under the rule declared before generation, **neither probe is promoted**: `chronology` has D +3.7 and `one-block` D +3.2 against the +5 threshold (both lower bounds are at least -2 and no cohort is below -5). The default framing stays V4-advice; the application is unchanged. Both probes are positive on every cohort or level, with no cohort loss, so the honest statement is "probably a small gain, not established at the size the rule asks for". A combined probe (one block, chronological inside it, with the relative-time lines) is the natural next candidate; it was not built, because the budget was spent on measuring the two separately as the mandate asked.
 
 ## Item 3c: contradictions (diagnosed, measured in part)
 
@@ -41,7 +67,7 @@ The two BEAM contradiction questions were read privately with their rubrics and 
 - On one, Gemini answered with one of the two conflicting states and cited a single source on all three replicates: a wrong-state answer with both states available.
 - On the other, Gemini stated both conflicting statements with their labels on all three replicates but did not ask which is correct; the grader's rubric requires the clarification request, so the answers were rejected on the grader's expectation.
 
-Inference: a general rule is warranted (report a conflict, give both versions with labels, ask which is correct, and do not describe a change no source states). It is implemented as the `conflicts` transform. CONFLICTS_RESULT
+Inference: a general rule is warranted (report a conflict, give both versions with labels, ask which is correct, and do not describe a change no source states). It is implemented as the `conflicts` transform. It was not answered: the mandate asks for the test on the BEAM contradiction questions plus the full 72 as a guard against invented changes on static facts, and the full-72 guard (219 answers, about $5.4 plus judging) did not fit the remaining budget after the two probes above. The transform and its contracts are in place; the test is the recommended next presentation run, paired with the combined probe above in one run so one baseline serves both.
 
 ## Privacy and artifacts
 

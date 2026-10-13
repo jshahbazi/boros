@@ -83,7 +83,21 @@ What each variant did:
 
 The mandate's gate: answer only an arm that clears a meaningful offline gain without losing cases. `exchange_passages` fails it (no win, five losses) and is dropped. `exchange_prf` alone fails it (a regression loss). `exchange_roles` alone is net +3 with one loss. `exchange_roles_prf` is net +5 with one loss on development and no change on regression, recovers four of the twelve budget-skipped leads and two of the sixteen never-candidate turns, and keeps the assistant-recall guard; it is the one arm answered. The paired Gemini run on the 73 step 3 inputs generates only the questions whose request differs from `exchange_packed`'s (item 1a); its declaration and result are recorded in [PRESENTATION-PROBES.md](PRESENTATION-PROBES.md)'s companion section below.
 
-RETRIEVAL_ANSWERS_SECTION
+## Step 3 inputs: capture and the paired run that was not dispatched (measured, offline; decision)
+
+`scripts/exchange_packed_answers.py capture` rebuilt the exact answer request bodies of `exchange_packed`, `exchange_roles` and `exchange_roles_prf` for the 73 step 3 inputs (`.build/retrieval-roles-20261013/captures.json`, SHA-256 `3c59f837…68b7`; the baseline reproduced the October 12 capture's delivery and gold class on 73 of 73). Gold delivery on the 73 inputs, whole / partial / none / no gold turns:
+
+| Arm | Whole | Partial | None | No gold turns | Prompt tokens median |
+|---|---:|---:|---:|---:|---:|
+| `exchange_packed` | 53 | 9 | 8 | 3 | 15,414 |
+| `exchange_roles` | 58 | 4 | 8 | 3 | 15,513 |
+| `exchange_roles_prf` | 58 | 4 | 8 | 3 | 15,441 |
+
+Under `exchange_roles_prf`, four partial deliveries and one none became whole, and one partial became none; 52 questions keep whole delivery with a different surrounding context. That is the same shape as the development result (more budget-skipped leads reached), on inputs that were not used to choose the parameters.
+
+The unchanged-request rule (item 1a) found nothing to reuse: the request body differs from the baseline's on 73 of 73 inputs, and the set of delivered byte ranges differs on 72, because role weighting re-ranks blocks and the packer admits different units, not merely the same units in another order. An order-only change would not have been a tie by construction either, and the driver does not treat it as one. The paired run is therefore the full one: 438 answers at about $10.8 at the declared standard rate plus about $1.5 of judging. With $16.54 spent on the presentation-probe answers and about $2.2 on their judge, that would end near $31 against the $25 the mandate allows without asking. **No retrieval answer was generated.** The arm stays an explicit, selectable policy; `currentSelectedQwen` remains `exchange_packed`.
+
+What a decision would need (proposed): the full paired run above under the declared rule (promote at D >= +5, lower bound >= -2, no cohort below -5), with the capture already made; the October 12 record measured that newly whole delivery converted at 17.9 to 76.9 percent accepted for this reader, so the five recovered questions could be worth about +4 to +5 points on the 72, while the 52 re-contexted questions carry the risk.
 
 ## Privacy and artifacts
 
