@@ -181,7 +181,10 @@ enum ComponentPreparationChecks {
             if [.pipeline, .boundary, .neighborhoodAuditDated, .neighborhoodAuditFit].contains(kind) {
                 settings.contextFraming = ContextSourceFraming.currentSelectionVersion
             }
-            if kind.quotedFamily && kind != .quotedPipeline {
+            // Every quoted-family kind pins its framing, V4 included: the
+            // unpinned default is V4-advice since October 12, 2026, which the
+            // advice pipeline exercises and the framing checks pin as default.
+            if kind.quotedFamily {
                 settings.contextFraming = kind.quotedFraming
                 // As the answer-evaluation command grants it for a pinned ablation.
                 settings.evaluationOnlyFramingPermitted = kind == .ablationPipeline

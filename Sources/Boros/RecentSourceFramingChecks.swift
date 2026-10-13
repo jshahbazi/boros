@@ -245,9 +245,10 @@ enum RecentSourceFramingChecks {
         var checks: [String: Bool] = [:]
         let quoted = ContextSourceFraming.quotedSelectionVersion, current = ContextSourceFraming.currentSelectionVersion
         let captured = "2026-10-06T12:00:00Z"
-        checks["quoted_framing_v4_is_supported_default_and_distinct"] = quoted == "context-source-snapshot-v4"
-            && ContextSourceFraming.defaultSelectionVersion == quoted && ContextSourceFraming.isSupportedSelectionVersion(quoted)
-            && GenerationSettings().contextFraming == quoted && current == "context-source-snapshot-v3"
+        checks["quoted_framing_v4_is_supported_and_v4_advice_is_the_default"] = quoted == "context-source-snapshot-v4"
+            && ContextSourceFraming.defaultSelectionVersion == ContextSourceFraming.adviceSelectionVersion
+            && ContextSourceFraming.isSupportedSelectionVersion(quoted)
+            && GenerationSettings().contextFraming == ContextSourceFraming.adviceSelectionVersion && current == "context-source-snapshot-v3"
             && ContextSourceFraming.carriesSourceTime(quoted) && ContextSourceFraming.carriesSourceTime(current)
             && ContextSourceFraming.quotesSources(quoted) && !ContextSourceFraming.quotesSources(current)
         // Old format: exact bytes pinned from the pre-V4 source (088d92f).
@@ -381,10 +382,18 @@ enum RecentSourceFramingChecks {
         let unbound = try ContextAssembler.prepare(store: store, conversationID: chat.id, projectID: project, prompt: request.text,
             system: system, excludingEventID: request.id)
         let unboundLabels = (try JSONSerialization.jsonObject(with: unbound.selectionEvidence()) as? [String: Any])?["citation_labels"] as? [[String: Any]]
-        checks["quoted_framing_unbound_path_defaults_to_v4"] = unbound.selectionVersion == quoted && unbound.includedRecentCount > 0
+        // The unbound path takes the default framing (V4-advice since October
+        // 12, 2026): V4's presentation with the advice System framing.
+        let defaultVersion = ContextSourceFraming.defaultSelectionVersion
+        let defaultFraming = ContextAssembler.historyFraming(selectionVersion: defaultVersion)
+        let quotedFramingText = ContextAssembler.historyFraming(selectionVersion: quoted)
+        checks["quoted_framing_unbound_path_takes_the_default_v4_advice"] = unbound.selectionVersion == defaultVersion
+            && defaultVersion == ContextSourceFraming.adviceSelectionVersion && unbound.includedRecentCount > 0
             && unbound.messages.allSatisfy { $0.role != "assistant" }
             && unbound.messages[1].content.hasPrefix(ContextSourceFraming.quotedRecentHeading + "[E1]")
-            && unbound.messages[0].content == framing && unboundLabels?.count == unbound.includedRecentCount
+            && unbound.messages[0].content == system + "\n\n" + defaultFraming && framing == system + "\n\n" + quotedFramingText
+            && Array(unbound.messages.dropFirst()) == Array(snapshot.messages.dropFirst())
+            && unboundLabels?.count == unbound.includedRecentCount
         checks.merge(try scopedDeclineChecks(store: store, chat: chat, project: project, request: request, system: system,
             v4: snapshot, hit: hit)) { _, new in new }
         checks.merge(try v4VariantChecks(store: store, chat: chat, project: project, request: request, system: system,
@@ -410,7 +419,8 @@ enum RecentSourceFramingChecks {
             && ContextSourceFraming.isSupportedSelectionVersion(v5) && ContextSourceFraming.isSupportedSelectionVersion(ablation)
             && ContextSourceFraming.quotesSources(v5) && ContextSourceFraming.quotesSources(ablation)
             && ContextSourceFraming.carriesSourceTime(v5) && ContextSourceFraming.carriesSourceTime(ablation)
-            && ContextSourceFraming.defaultSelectionVersion == quoted && GenerationSettings().contextFraming == quoted
+            && ContextSourceFraming.defaultSelectionVersion == ContextSourceFraming.adviceSelectionVersion
+            && GenerationSettings().contextFraming == ContextSourceFraming.adviceSelectionVersion
             && !GenerationSettings().evaluationOnlyFramingPermitted
             && ContextSourceFraming.evaluationOnlySelectionVersions == [ablation]
             && Set([quoted, v5, ablation]).count == 3
@@ -497,7 +507,7 @@ enum RecentSourceFramingChecks {
                 && ContextSourceFraming.quotesSources($0) && ContextSourceFraming.carriesSourceTime($0)
                 && ContextSourceFraming.permits($0, evaluationOnlyPermitted: false) }
             && ContextSourceFraming.quotedSelectionVersions == Set(family) && Set(family).count == 5
-            && ContextSourceFraming.defaultSelectionVersion == quoted && GenerationSettings().contextFraming == quoted
+            && ContextSourceFraming.defaultSelectionVersion == advice && GenerationSettings().contextFraming == advice
             && !ContextSourceFraming.evaluationOnlySelectionVersions.contains(advice)
             && !ContextSourceFraming.evaluationOnlySelectionVersions.contains(ordered)
         // System text: byte-level derivation from the pinned V4 literal.

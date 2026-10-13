@@ -81,7 +81,8 @@ class Contracts(unittest.TestCase):
         coordinator = (SOURCES / "AnswerAttemptCoordinator.swift").read_text()
         self.assertIn("ContextSourceFraming.permits(settings.contextFraming", coordinator)
         framing = (SOURCES / "ContextSourceFraming.swift").read_text()
-        self.assertIn("static let defaultSelectionVersion = quotedSelectionVersion", framing)
+        # V4-advice is the default since October 12, 2026 (docs/EVIDENCE-ALLOWANCE.md); V5 stays selectable, not the default.
+        self.assertIn("static let defaultSelectionVersion = adviceSelectionVersion", framing)
         self.assertIn("evaluationOnlySelectionVersions: Set<String> = [insufficientEvidenceAblationSelectionVersion]", framing)
         command = (SOURCES / "AnswerEvaluationCommand.swift").read_text()
         self.assertIn("settings.evaluationOnlyFramingPermitted = options?.framingPinned == true", command)

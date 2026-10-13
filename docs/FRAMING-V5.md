@@ -2,6 +2,7 @@
 
 Status, October 9, 2026:
 
+- **Update, October 12, 2026:** the default framing is now V4-advice (V4 plus V5's advice clause only), on a judged paired measurement with the Gemini reader ([EVIDENCE-ALLOWANCE.md](EVIDENCE-ALLOWANCE.md)). V5 itself is still not adopted; the statements below that V4 stays the default describe October 8, 2026.
 - **Implemented:** `context-source-snapshot-v5` (V5) and the evaluation-only ablation `context-source-snapshot-v4-no-g`. Both are selectable with `--answer-evaluation --context-framing`. **V4 stays the default.**
 - **Measured:** one pre-declared, paired replay of V4 (default), V5 and the ablation, run on three cohorts: the 21-question retrieval-on cohort (ordinary Send's lexical retrieval), a fresh 27-question preference cohort, and the 21-question recent-only cohort. It used 207 local generations, and the default judge gave verdicts on all 207 answers (621 Vertex requests, $0.851556).
 - **Decision (pre-declared rule): do not adopt V5. V4 stays the default.** V5 removed every decline on the preference questions with gold delivered whole (V4 4 of 14, V5 0 of 14), and the judge accepted all 14. But V5 failed three of the five criteria. It declined one fewer abstention question (2 of 3 against 3 of 3) and one fewer recent-only question (19 of 20 against 20 of 20). It also had two fewer judge accepts on the gold-whole regression set (9 of 12 against 11 of 12).

@@ -2106,8 +2106,10 @@ extension AnswerEvaluationCommand {
         let plain = try invocationOptions(base)
         let scoped = try invocationOptions(base + ["--context-framing", v5])
         let ablated = try invocationOptions(base + ["--context-framing", ablation, "--retrieval-arm", "ordinary_send"])
-        checks["framing_cli_default_is_v4_unpinned"] = plain.framing == ContextSourceFraming.quotedSelectionVersion
-            && !plain.framingPinned && ContextSourceFraming.defaultSelectionVersion == ContextSourceFraming.quotedSelectionVersion
+        let v4Pinned = try invocationOptions(base + ["--context-framing", ContextSourceFraming.quotedSelectionVersion])
+        checks["framing_cli_default_is_v4_advice_unpinned"] = plain.framing == ContextSourceFraming.adviceSelectionVersion
+            && !plain.framingPinned && ContextSourceFraming.defaultSelectionVersion == ContextSourceFraming.adviceSelectionVersion
+            && v4Pinned.framing == ContextSourceFraming.quotedSelectionVersion && v4Pinned.framingPinned
         checks["framing_cli_v5_and_ablation_pinnable"] = scoped.framing == v5 && scoped.framingPinned
             && ablated.framing == ablation && ablated.framingPinned && ablated.retrievalArm == .ordinarySend
         for (index, value) in ["context-source-snapshot-v6", "context-source-snapshot-v1", "context-source-snapshot-v2",
@@ -2139,7 +2141,7 @@ extension AnswerEvaluationCommand {
             && ContextSourceFraming.permits(advice, evaluationOnlyPermitted: false)
             && ContextSourceFraming.permits(ordered, evaluationOnlyPermitted: false)
             && pinnableFramings.count == 6 && Set(pinnableFramings).count == 6
-            && ![advice, ordered].contains(ContextSourceFraming.defaultSelectionVersion)
+            && ContextSourceFraming.defaultSelectionVersion == advice && ordered != ContextSourceFraming.defaultSelectionVersion
         for (index, value) in ["context-source-snapshot-v4-Advice", "context-source-snapshot-v4-order",
                                "context-source-snapshot-v4-advice ", "context-source-snapshot-v4-advice-ordered"].enumerated() {
             do { _ = try invocationOptions(base + ["--context-framing", value]); checks["framing_cli_v4_variant_invalid_\(index)_refused"] = false }
@@ -2163,7 +2165,8 @@ extension AnswerEvaluationCommand {
         } catch { refusedAtAcceptance = error is ContextError }
         let nothingAccepted = try store.eventCount(conversationID: chat.id, excludingEventID: nil) == 0
         checks["framing_gate_ablation_refused_outside_evaluation"] = !GenerationSettings().evaluationOnlyFramingPermitted
-            && GenerationSettings().contextFraming == ContextSourceFraming.quotedSelectionVersion
+            && GenerationSettings().contextFraming == ContextSourceFraming.defaultSelectionVersion
+            && ContextSourceFraming.defaultSelectionVersion == ContextSourceFraming.adviceSelectionVersion
             && refusedAtAcceptance && nothingAccepted
             && !ContextSourceFraming.permits(ablation, evaluationOnlyPermitted: false)
             && ContextSourceFraming.permits(v5, evaluationOnlyPermitted: false)
