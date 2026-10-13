@@ -146,10 +146,35 @@ class Contracts(unittest.TestCase):
         self.assertFalse(br.decide({"difference_points": 9.9, "interval_points": [1.0, 20.0]}, {})["promote"])
         self.assertEqual(br.decide(None, {})["outcome"], "no_default_change")
         self.assertEqual(br.ARMS, ("ordinary_send", "record"))
-        self.assertEqual(br.STAGES, ("baseline", "candidate"))
+        self.assertEqual(br.STAGES, ("baseline", "select", "candidate"))
         self.assertIn("NO ENTRIES", br.EXTRACT_SYSTEM)
+        self.assertIn("NONE", br.SELECT_SYSTEM)
         self.assertIn("routed", br.DECISION_RULE["promote"])
         self.assertEqual(br.job_name({"stage": "baseline", "label": "ab", "replicate": 0}), "ab--r0")
+
+    def test_listing_chunks_carry_global_labels_and_the_selection_resolves_across_them(self):
+        entries = [entry(seq, seq // 2, f"subject {seq}", f"Statement number {seq}.", f"q{seq}") for seq in range(0, 12, 2)]
+        chunks = br.listing_chunks(entries, "Q?", chunk_chars=150)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual([label for chunk in chunks for label in chunk["labels"]], [f"R{n}" for n in range(1, 7)])
+        self.assertEqual([m["role"] for m in chunks[0]["messages"]], ["system", "user"])
+        self.assertEqual(chunks[0]["messages"][0]["content"], br.SELECT_SYSTEM)
+        self.assertTrue(chunks[0]["messages"][1]["content"].startswith(f"Record entries (part 1 of {len(chunks)}, chronological):\n\n[R1] 2024-01-01 t0 user fact: Statement number 0."))
+        self.assertTrue(chunks[-1]["messages"][1]["content"].endswith("\n\nQuestion:\nQ?"))
+        self.assertNotIn("Quote:", chunks[0]["messages"][1]["content"])
+        self.assertEqual(len(br.listing_chunks(entries, "Q?")), 1)
+        selected, dropped = br.parse_record_selection("Here:\n- **[R2]**\n[R3].\nR5\n[R9]\n[S1]\nNONE\n[R2]\n", {"R1", "R2", "R3", "R5"})
+        self.assertEqual((selected, dropped), (["R2", "R3", "R5"], 3))
+        self.assertEqual(br.parse_record_selection("NONE", {"R1"}), ([], 0))
+        self.assertEqual(br.gathered_record_selection([["R1", "R2", "R3"], [], ["R4", "R5"]], limit=4), ["R1", "R2", "R4", "R5"])
+        # The candidate carries the selected labels plus the lexical seeds, chronologically, within the limits.
+        entries[3]["statement"] = "The marathon training moved to Chicago."
+        chosen = br.candidate_positions(entries, "marathon training", ["R5", "R1"])
+        self.assertEqual([entries[p]["seq"] for p in chosen["positions"]], [0, 6, 8])
+        self.assertEqual(chosen["statistics"]["by_reason"], {"selected": 2, "seed": 1})
+        limited = br.candidate_positions(entries, "marathon training", ["R5", "R1"], maximum=2)
+        self.assertEqual([entries[p]["seq"] for p in limited["positions"]], [0, 8])
+        self.assertEqual(br.candidate_positions(entries, "nothing here", ["R99"])["positions"], [])
 
 
 if __name__ == "__main__":
