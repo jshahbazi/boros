@@ -265,6 +265,8 @@ def run(args):
     output = args.output.absolute()
     declaration = load(output)
     rows = {row["label"]: row for row in declaration["rows"]}
+    if not (output / "answers").exists():
+        replay.private_directory(output / "answers")
     for arm in ARMS:
         if not (output / "answers" / arm).exists():
             replay.private_directory(output / "answers" / arm)

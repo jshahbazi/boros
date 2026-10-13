@@ -1189,7 +1189,7 @@ def score(args):
                 "gold_delivery": {arm: {kind: sum(1 for q in counted if gold[q][arm] == kind)
                                         for kind in ("whole", "partial", "none", "no_gold_turns")} for arm in ARMS},
                 "declines": decline_table, "verdicts": verdict_counts, "median_input_tokens": tokens,
-                "excluded": {question: {arm: samples[question][arm] for arm in ARMS}
+                "excluded": {question: {arm: samples.get(question, {}).get(arm) for arm in ARMS}
                              for question in per_question if question.endswith(tuple(EXCLUDED_FROM_COUNTS))},
                 "per_question": {question: {arm: [per_question[question][arm], gold[question][arm]] for arm in ARMS}
                                  for question in sorted(per_question)}}
