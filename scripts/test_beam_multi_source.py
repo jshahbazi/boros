@@ -69,23 +69,31 @@ class Contracts(unittest.TestCase):
         head = ms.window("x " * 200, {"zzz"}, 50)
         self.assertFalse(head.startswith("…"))
 
-    def test_snippets_skip_delivered_blocks_order_chronologically_and_fit_the_budget(self):
-        items, stats = ms.snippets(case(), "marathon long run progress", delivered_whole={2, 3})
-        self.assertEqual([item["seqs"] for item in items], [[0, 1], [6, 7]])
-        self.assertEqual([item["label"] for item in items], ["S1", "S2"])
+    def test_snippets_cover_every_block_chronologically_with_replies_for_ranked_blocks(self):
+        items, stats = ms.snippets(case(), "marathon long run progress", rich_blocks=2)
+        self.assertEqual([item["seqs"] for item in items], [[0, 1], [2, 3], [4, 5], [6, 7]])
+        self.assertEqual([item["label"] for item in items], ["S1", "S2", "S3", "S4"])
         self.assertTrue(items[0]["text"].startswith("[S1] 2024-01-05, turn 0\nuser: "))
+        # The two best-ranked blocks (3 and 1) carry a reply window; the unmatched printer block does not.
+        self.assertIn("assistant: ", items[3]["text"])
         self.assertIn("assistant: ", items[1]["text"])
-        self.assertEqual(stats["snippets"], 2)
-        self.assertEqual(stats["blocks"], 4)
-        self.assertLessEqual(len(items[1]["text"]), len("[S2] 2024-03-20, turn 6\nuser: ") + ms.HUMAN_WINDOW + 4
+        self.assertNotIn("assistant: ", items[2]["text"])
+        self.assertIsNone(items[2]["rank"])
+        self.assertEqual((stats["snippets"], stats["blocks"], stats["rich_snippets"], stats["dropped_blocks"]), (4, 4, 2, 0))
+        self.assertLessEqual(len(items[3]["text"]), len("[S4] 2024-03-20, turn 6\nuser: ") + ms.HUMAN_WINDOW + 4
                              + len("\nassistant: ") + ms.ASSISTANT_WINDOW + 4)
-        limited, _ = ms.snippets(case(), "marathon long run progress", set(), blocks_limit=1)
-        self.assertEqual(len(limited), 1)
-        budgeted, _ = ms.snippets(case(), "marathon long run progress", set(), char_budget=200)
-        self.assertLessEqual(sum(len(item["text"]) for item in budgeted), 200)
-        messages = ms.map_messages("Q?", items)
-        self.assertEqual([m["role"] for m in messages], ["system", "user"])
-        self.assertTrue(messages[1]["content"].endswith("\n\nQuestion:\nQ?"))
+        # Over the budget, the unmatched block goes first, then the lowest ranked.
+        budgeted, limited = ms.snippets(case(), "marathon long run progress", char_budget=400)
+        self.assertNotIn([4, 5], [item["seqs"] for item in budgeted])
+        self.assertLessEqual(sum(len(item["text"]) + 8 for item in budgeted), 400)
+        self.assertGreater(limited["dropped_blocks"], 0)
+        chunks = ms.map_chunks("Q?", items, chunk_chars=300)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual([label for chunk in chunks for label in chunk["labels"]], ["S1", "S2", "S3", "S4"])
+        self.assertEqual([m["role"] for m in chunks[0]["messages"]], ["system", "user"])
+        self.assertTrue(chunks[0]["messages"][1]["content"].startswith(f"Snippets (part 1 of {len(chunks)}, chronological):"))
+        self.assertTrue(chunks[-1]["messages"][1]["content"].endswith("\n\nQuestion:\nQ?"))
+        self.assertEqual(len(ms.map_chunks("Q?", items)), 1)
 
     def test_notes_parser_keeps_only_resolvable_dated_lines(self):
         text = ("Here are the notes:\n- **2024-01-05 [S1]:** started training in Boston\n"
@@ -97,7 +105,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(dropped, 3)
         self.assertEqual(ms.parse_notes("NO RELEVANT NOTES", {"S1"}), ([], 0))
         many = "\n".join(f"2024-01-01 [S1]: note {i}" for i in range(100))
-        self.assertEqual(len(ms.parse_notes(many, {"S1"})[0]), ms.MAXIMUM_NOTES)
+        self.assertEqual(len(ms.parse_notes(many, {"S1"})[0]), ms.NOTES_PER_CHUNK)
+        self.assertEqual(len(ms.parse_notes(many, {"S1"}, maximum=7)[0]), 7)
 
     def test_candidate_body_adds_the_notes_message_and_framing_sentence_only(self):
         captured = [{"role": "system", "content": "Base.\n\n" + FRAMING}, {"role": "user", "content": "quoted E1"},
@@ -141,7 +150,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(ms.STAGES, ("baseline", "map", "candidate"))
         self.assertIn("promote", ms.DECISION_RULE)
         self.assertIn("NO RELEVANT NOTES", ms.MAP_SYSTEM)
-        self.assertEqual(ms.job_name({"stage": "map", "label": "ab", "replicate": 2}), "map/ab--r2")
+        self.assertEqual(ms.job_name({"stage": "map", "label": "ab", "replicate": 2, "chunk": 1}), "ab--r2--c1")
+        self.assertEqual(ms.job_name({"stage": "baseline", "label": "ab", "replicate": 0}), "ab--r0")
 
 
 if __name__ == "__main__":
