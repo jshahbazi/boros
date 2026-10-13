@@ -70,8 +70,9 @@ GRADERS = {"gemini-3.8-flash": {"route": "gemini", "pricing": va.Pricing("1.50",
 PRICING = GRADERS[READER]["pricing"]
 PRICE_SOURCE = beam.PRICE_SOURCE
 # Caps are worst-case bounds: every request reserves its full output allowance (the thinking allowance
-# included) until its usage is known. Measured spend is far below them (docs/MULTI-SOURCE-ANSWERS.md).
-ANSWER_CAP_USD = Decimal("30")
+# included) until its usage is known. Measured spend is far below them (docs/MULTI-SOURCE-ANSWERS.md):
+# the six-question pilot spent $0.83 against a $1.59 worst case.
+ANSWER_CAP_USD = Decimal("40")
 GRADE_CAPS_USD = {"gemini-3.8-flash": Decimal("40"), "claude-sonnet-5-5": Decimal("50")}
 BOOTSTRAP_RESAMPLES = 10000
 # Map step limits (declared before measurement). Every exchange block of the history contributes a
@@ -888,8 +889,8 @@ def score(args):
             provenance.setdefault(label, {})[arm] = used
     seed = replay.digest((output / "declaration.json").read_bytes())
     overall = paired(per_question, labels, seed)
-    by_category = {category: paired(per_question, [label for label in labels if rows[label]["category"] == category], seed)
-                   for category in cohort.CATEGORIES}
+    members = {category: [label for label in labels if rows[label]["category"] == category] for category in cohort.CATEGORIES}
+    by_category = {category: paired(per_question, members[category], seed) for category in cohort.CATEGORIES if members[category]}
     routed_labels = [label for label in labels if label in routed]
     subsets = {"routed": paired(per_question, routed_labels, seed) if routed_labels else None,
                "unrouted": paired(per_question, [label for label in labels if label not in routed], seed)}
