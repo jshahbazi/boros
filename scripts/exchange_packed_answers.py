@@ -82,12 +82,13 @@ CANDIDATES = (CANDIDATE,)
 HARNESS_ARMS = ("ordinary_send", "exchange_packed", "exchange_wide", "exchange_adjacent", "exchange_lexical", "lexical",
                 "exchange_passages", "exchange_roles", "exchange_prf", "exchange_roles_prf")
 PRESENTATION_ARMS = ("exchange_packed_v4_advice", "exchange_packed_chronology", "exchange_packed_one_block",
-                     "exchange_packed_conflicts")
+                     "exchange_packed_conflicts", "exchange_packed_combined")
 SELECTABLE_ARMS = HARNESS_ARMS + PRESENTATION_ARMS
 ADVICE_FRAMING = "context-source-snapshot-v4-advice"
 CHRONOLOGY_FRAMING = "context-source-snapshot-v4-advice-chronology"
 ONE_BLOCK_FRAMING = "context-source-snapshot-v4-advice-one-block"
 CONFLICTS_FRAMING = "context-source-snapshot-v4-advice-conflicts"
+COMBINED_FRAMING = "context-source-snapshot-v4-advice-combined"
 FRAMING_TRANSFORMS = {"v4-advice": ("quotedHistoryFraming", "adviceHistoryFraming", ADVICE_FRAMING)}
 # Presentation probes (October 13, 2026): each derives a candidate arm from a captured V4-family arm.
 # ``v4-advice`` swaps the pinned V4 System literal for the V4-advice literal (both read from
@@ -100,13 +101,16 @@ FRAMING_TRANSFORMS = {"v4-advice": ("quotedHistoryFraming", "adviceHistoryFramin
 #   delimited by BEGIN QUOTED SOURCES / END QUOTED SOURCES; the first two System sentences say so.
 # - ``conflicts``: one System sentence tells the reader to report conflicting quoted sources, state each
 #   version with its label and ask which is correct, and not to describe a change no source states.
+# - ``combined``: ``chronology`` applied first, then ``one-block``: one delimited evidence message whose
+#   historical excerpts are chronological with relative-time lines, and both System changes.
 PRESENTATIONS = {
     "v4-advice": {"arm": "exchange_packed_v4_advice", "framing": ADVICE_FRAMING, "sources": (rc.V4,)},
     "chronology": {"arm": "exchange_packed_chronology", "framing": CHRONOLOGY_FRAMING, "sources": (ADVICE_FRAMING,)},
     "one-block": {"arm": "exchange_packed_one_block", "framing": ONE_BLOCK_FRAMING, "sources": (ADVICE_FRAMING,)},
     "conflicts": {"arm": "exchange_packed_conflicts", "framing": CONFLICTS_FRAMING, "sources": (ADVICE_FRAMING,)},
+    "combined": {"arm": "exchange_packed_combined", "framing": COMBINED_FRAMING, "sources": (ADVICE_FRAMING,)},
 }
-V4_FAMILY = (rc.V4, ADVICE_FRAMING, CHRONOLOGY_FRAMING, ONE_BLOCK_FRAMING, CONFLICTS_FRAMING)
+V4_FAMILY = (rc.V4, ADVICE_FRAMING, CHRONOLOGY_FRAMING, ONE_BLOCK_FRAMING, CONFLICTS_FRAMING, COMBINED_FRAMING)
 FINAL_SENTENCE = "A missing excerpt is not proof that the archive lacks a fact."
 LAYOUT_SENTENCES = ("Earlier messages from this conversation are quoted below in separate host-labelled user messages, "
                     "oldest first. Retrieved historical source excerpts, when present, follow in one host-labelled block.")
@@ -591,6 +595,13 @@ def conflicts_transform(messages, row):
     return [dict(messages[0], content=system)] + [dict(message) for message in messages[1:]], {}
 
 
+def combined_transform(messages, row):
+    """Chronology first (reorder, relabel, relative-time lines, its sentence), then the one-block fold."""
+    ordered, meta = chronology_transform(messages, row)
+    folded, fold_meta = one_block_transform(ordered, row)
+    return folded, {**meta, **fold_meta}
+
+
 def framing_swap_transform(messages, row, presentation):
     source_name, target_name, _version = FRAMING_TRANSFORMS[presentation]
     source_framing, target_framing = swift_framing_literal(source_name), swift_framing_literal(target_name)
@@ -610,7 +621,18 @@ def present(presentation, messages, row):
     if presentation in FRAMING_TRANSFORMS:
         return framing_swap_transform(messages, row, presentation)
     return {"chronology": chronology_transform, "one-block": one_block_transform,
-            "conflicts": conflicts_transform}[presentation](messages, row)
+            "conflicts": conflicts_transform, "combined": combined_transform}[presentation](messages, row)
+
+
+def transform_plan(presentations, source_arms):
+    """(presentation arm per presentation, candidate arms copied from the source capture). Every configured
+    candidate is either a presentation's arm or a harness arm the source capture already holds."""
+    require(presentations and all(name in PRESENTATIONS for name in presentations), "presentation_unknown")
+    presentation_arms = [PRESENTATIONS[name]["arm"] for name in presentations]
+    require(len(set(presentation_arms)) == len(presentation_arms) and set(presentation_arms) <= set(CANDIDATES), "arms_mismatch")
+    copied = [arm for arm in CANDIDATES if arm not in presentation_arms]
+    require(all(arm in source_arms and arm in HARNESS_ARMS for arm in copied), "copied_arm_missing")
+    return presentation_arms, copied
 
 
 def transform(args):
@@ -622,12 +644,11 @@ def transform(args):
     require(not output.exists(), "output_exists")
     source = args.source_output.absolute()
     presentations = list(args.presentations or [])
-    require(presentations and len(presentations) == len(CANDIDATES)
-            and all(PRESENTATIONS.get(name, {}).get("arm") == arm for name, arm in zip(presentations, CANDIDATES)),
-            "arms_mismatch")
     require(args.source_arm == BASELINE, "arms_mismatch")
     manifest = json.loads((source / "captures.json").read_text())
     require(manifest.get("version") == VERSION, "captures_version")
+    presentation_arms, copied_arms = transform_plan(presentations, {row["arm"] for row in manifest["rows"]})
+    source_rows = {(row["arm"], row["cohort"], row["question_id"]): row for row in manifest["rows"]}
     replay.private_directory(output)
     requests = output / "requests"
     replay.private_directory(requests)
@@ -659,7 +680,18 @@ def transform(args):
             base.update(reference_flags[(row["cohort"], row["question_id"])])
             base["reference"] = "inherited:" + str(row.get("reference"))
         rows.append(base)
-        for name, arm in zip(presentations, CANDIDATES):
+        # Harness candidates captured beside the source arm are carried over unchanged.
+        for arm in copied_arms:
+            copied = source_rows.get((arm, row["cohort"], row["question_id"]))
+            require(copied is not None, "copied_arm_missing")
+            copied_raw = (source / "requests" / case / (arm + ".request.json")).read_bytes()
+            require(replay.digest(copied_raw) == copied["request_sha256"], "source_body_changed")
+            replay.private_write(directory / (arm + ".request.json"), copied_raw)
+            carried = dict(copied)
+            for key in ("unchanged_from_baseline", "changed_candidates"):
+                carried.pop(key, None)
+            rows.append(carried)
+        for name, arm in zip(presentations, presentation_arms):
             derived_messages, meta = present(name, messages, row)
             derived_body = dict(body, messages=derived_messages)
             derived = json.dumps(derived_body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -683,6 +715,7 @@ def transform(args):
                 "recorded_at_utc": now(), "baseline_captures_sha256": manifest.get("baseline_captures_sha256"),
                 "source_captures_sha256": replay.digest((source / "captures.json").read_bytes()),
                 "transform": {"presentations": presentations, "source_arm": args.source_arm, "candidate_arms": list(CANDIDATES),
+                              "copied_arms": copied_arms,
                               "framings": {name: PRESENTATIONS[name]["framing"] for name in presentations},
                               "sentences_sha256": {"chronology": replay.digest(CHRONOLOGY_SENTENCE.encode()),
                                                    "one_block": replay.digest(ONE_BLOCK_SENTENCES.encode()),

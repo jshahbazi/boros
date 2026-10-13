@@ -117,7 +117,8 @@ class Contracts(unittest.TestCase):
         self.assertEqual(epa.FRAMING_TRANSFORMS["v4-advice"][2], "context-source-snapshot-v4-advice")
         self.assertIn("exchange_packed_v4_advice", epa.SELECTABLE_ARMS)
         self.assertEqual(epa.V4_FAMILY[:2], (epa.rc.V4, "context-source-snapshot-v4-advice"))
-        self.assertEqual(set(epa.V4_FAMILY[2:]), {epa.CHRONOLOGY_FRAMING, epa.ONE_BLOCK_FRAMING, epa.CONFLICTS_FRAMING})
+        self.assertEqual(set(epa.V4_FAMILY[2:]), {epa.CHRONOLOGY_FRAMING, epa.ONE_BLOCK_FRAMING, epa.CONFLICTS_FRAMING,
+                                                  epa.COMBINED_FRAMING})
         self.assertEqual({value["arm"] for value in epa.PRESENTATIONS.values()}, set(epa.PRESENTATION_ARMS))
 
     def test_scope_reader_and_arms_are_pinned(self):
@@ -266,6 +267,30 @@ class Contracts(unittest.TestCase):
         self.assertGreater(swap_meta["system_bytes_added"], 0)
         with self.assertRaisesRegex(epa.EvaluationError, "presentation_unknown"):
             epa.present("ordered", messages, row)
+        combined, combined_meta = epa.present("combined", messages, row)
+        self.assertEqual([message["role"] for message in combined], ["system", "user", "user"])
+        self.assertIn(epa.ONE_BLOCK_SENTENCES, combined[0]["content"])
+        self.assertIn(epa.CHRONOLOGY_SENTENCE + " " + epa.FINAL_SENTENCE, combined[0]["content"])
+        self.assertTrue(combined[1]["content"].startswith(epa.ONE_BLOCK_OPEN))
+        self.assertIn("relative_time: 66 days before the question (2 months 5 days); earliest excerpt", combined[1]["content"])
+        self.assertLess(combined[1]["content"].index("Earliest caf\u00e9 note"), combined[1]["content"].index("Later note"))
+        self.assertEqual(combined_meta["merged_messages"], 3)
+        self.assertEqual(combined[2], messages[4])
+        self.assertEqual(epa.PRESENTATIONS["combined"]["framing"], epa.COMBINED_FRAMING)
+
+    def test_transform_plan_pairs_presentations_with_their_arms_and_copies_harness_arms(self):
+        try:
+            epa.configure_arms("exchange_packed", ["exchange_roles_prf", "exchange_packed_combined", "exchange_packed_conflicts"], 5)
+            plan = epa.transform_plan(["combined", "conflicts"], {"exchange_packed", "exchange_roles_prf"})
+            self.assertEqual(plan, (["exchange_packed_combined", "exchange_packed_conflicts"], ["exchange_roles_prf"]))
+            with self.assertRaisesRegex(epa.EvaluationError, "copied_arm_missing"):
+                epa.transform_plan(["combined", "conflicts"], {"exchange_packed"})
+            with self.assertRaisesRegex(epa.EvaluationError, "arms_mismatch"):
+                epa.transform_plan(["chronology"], {"exchange_packed", "exchange_roles_prf"})
+            with self.assertRaisesRegex(epa.EvaluationError, "presentation_unknown"):
+                epa.transform_plan([], {"exchange_packed"})
+        finally:
+            epa.configure_arms("ordinary_send", "exchange_packed", 0)
 
     def test_harness_accepts_both_arms_in_one_capture(self):
         source = (ROOT / "Tests/Evaluation/DeliveryHarness.swift").read_text()
