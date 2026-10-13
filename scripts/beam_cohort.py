@@ -198,27 +198,42 @@ def reused_ids(datasets: Path):
     return mapping, case
 
 
+def parse_selection(text):
+    """`--conversations`: comma-separated scale:id pairs, in the given order."""
+    pairs = []
+    for item in text.split(","):
+        scale, _, conversation_id = item.strip().partition(":")
+        require(scale in ("100K", "500K") and conversation_id.isdigit(), "conversations_invalid")
+        pairs.append((scale, conversation_id))
+    require(pairs and len(set(pairs)) == len(pairs), "conversations_invalid")
+    return tuple(pairs)
+
+
 def build(args):
     """Reads the parquet files read-only and writes the private cases and the public cohort manifest."""
     import pyarrow.parquet as pq
     output = args.output.absolute()
     require(output.is_relative_to(ROOT / ".build"), "output_outside_build")
     datasets = args.datasets.absolute()
+    selected = parse_selection(args.conversations) if args.conversations else SELECTED
+    categories = tuple(args.categories.split(",")) if args.categories else CATEGORIES
+    require(all(category in CATEGORIES for category in categories), "categories_invalid")
     replay.private_directory(output)
     cohort = output / "cohort"
     replay.private_directory(cohort)
     reuse, reused_case = reused_ids(datasets)
     conversations, questions = [], []
-    for scale in sorted({scale for scale, _ in SELECTED}):
+    for scale in sorted({scale for scale, _ in selected}):
         path = datasets / f"beam-{scale}.parquet"
         parquet_sha256 = replay.digest(path.read_bytes())
         rows = {row["conversation_id"]: row for row in pq.read_table(path).to_pylist()}
-        for selected_scale, conversation_id in SELECTED:
+        for selected_scale, conversation_id in selected:
             if selected_scale != scale:
                 continue
             require(conversation_id in rows, "conversation_missing")
             case = normalize(scale, rows[conversation_id], parquet_sha256,
                              reuse if (scale, conversation_id) == REUSED else None)
+            case["questions"] = [question for question in case["questions"] if question["category"] in categories]
             if (scale, conversation_id) == REUSED:
                 # The comparison's case: same messages except its 10 date-prefixed session openers.
                 same = sum(1 for mine, theirs in zip(case["messages"], reused_case["messages"]) if mine["text"] == theirs["text"])
@@ -244,10 +259,11 @@ def build(args):
             questions += [public_question(case, question) for question in case["questions"]]
     labels = [question["label"] for question in questions]
     require(len(set(labels)) == len(labels), "labels_collide")
-    by_category = {category: sum(1 for q in questions if q["category"] == category) for category in CATEGORIES}
-    manifest = {"version": VERSION, "kind": "beam-cohort", "recorded_at_utc": beam.now(), "selected": [list(s) for s in SELECTED],
-                "reused": list(REUSED), "system_sha256": sha256_text(SYSTEM), "conversations": conversations,
-                "questions": questions, "by_category": by_category}
+    by_category = {category: sum(1 for q in questions if q["category"] == category) for category in categories}
+    manifest = {"version": VERSION, "kind": "beam-cohort", "recorded_at_utc": beam.now(), "selected": [list(s) for s in selected],
+                "categories": list(categories), "reused": list(REUSED) if REUSED in selected else None,
+                "system_sha256": sha256_text(SYSTEM), "conversations": conversations, "questions": questions,
+                "by_category": by_category}
     replay.private_write(output / "cohort.json", replay.canonical(manifest) + b"\n")
     print(json.dumps({"conversations": len(conversations), "questions": len(questions), "by_category": by_category,
                       "messages": sum(c["messages"] for c in conversations),
@@ -386,6 +402,8 @@ def main(argv=None):
         command.add_argument("--output", type=Path, required=True)
         if name == "build":
             command.add_argument("--datasets", type=Path, default=DEFAULT_DATASETS, help="OptChat's read-only BEAM dataset directory")
+            command.add_argument("--conversations", default=None, help="scale:id pairs, comma-separated (default: the cohort)")
+            command.add_argument("--categories", default=None, help="comma-separated categories (default: all ten)")
         if name == "capture":
             import retrieval_harness as harness
             command.add_argument("--tokenizer", type=Path, default=harness.DEFAULT_TOKENIZER)

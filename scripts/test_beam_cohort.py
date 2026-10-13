@@ -92,6 +92,13 @@ class Contracts(unittest.TestCase):
         self.assertEqual(cohort.flatten_references({"a": [1, "x"], "b": 2}), [1, 2])
         self.assertEqual(cohort.flatten_references(None), [])
 
+    def test_conversation_selection_parses_scale_id_pairs(self):
+        self.assertEqual(cohort.parse_selection("100K:3, 500K:12"), (("100K", "3"), ("500K", "12")))
+        for bad in ("", "200K:1", "100K:x", "100K:1,100K:1"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(cohort.CohortError):
+                    cohort.parse_selection(bad)
+
     def test_public_question_carries_no_text(self):
         case = cohort.normalize("100K", row(), PARQUET_SHA)
         public = cohort.public_question(case, case["questions"][0])

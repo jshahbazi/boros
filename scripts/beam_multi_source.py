@@ -848,15 +848,17 @@ def grade_declare(args):
     by_label = {cohort.label_of(question["id"]): question for question in questions}
     records = stage_records(output, declaration)
     seed = replay.digest((output / "declaration.json").read_bytes())
+    graded = sorted(set(args.labels.split(",")) if args.labels else set(declaration["labels"]))
+    require(set(graded) <= set(declaration["labels"]), "labels_unknown")
     items = [{"item": control["control"], "kind": control["kind"], "label": cohort.label_of(control["question_id"]),
               "candidate_sha256": cohort.sha256_text(control["candidate"])} for control in calibration_controls(questions)
-             if cohort.label_of(control["question_id"]) in set(declaration["labels"])]
+             if cohort.label_of(control["question_id"]) in set(graded)]
     answered = []
     for stage in ("baseline", "candidate"):
         for (label, replicate), stage_records_ in sorted(records[stage].items()):
             record = stage_records_[0]
             text = answer_text(output, stage, label, replicate)
-            if record.get("skipped") or text is None:
+            if record.get("skipped") or text is None or label not in set(graded):
                 continue
             require(replay.digest(text.encode()) == record.get("answer_sha256"), "answer_changed")
             answered.append((replay.digest(f"{seed}\0{stage}\0{label}\0{replicate}".encode()), {
@@ -892,7 +894,7 @@ def grade_declare(args):
                 reused.append({**record, "job": index, "reused_from": str(source)})
     replay.private_directory(directory)
     document = {"version": VERSION, "kind": "beam-multi-source-grade-declaration", "declared_at_utc": beam.now(),
-                "answers_declaration_sha256": seed, "reused_grades": len(reused),
+                "answers_declaration_sha256": seed, "reused_grades": len(reused), "labels": graded,
                 "grader": {"version": beam.GRADER_VERSION, "model": args.grader, "route": GRADERS[args.grader]["route"],
                            "instruction_sha256": cohort.sha256_text(beam.GRADER_INSTRUCTION),
                            "max_output_tokens": beam.GRADE_OUTPUT_TOKENS, "source": "OptChat scripts/beam-grader.ts as ported in "
@@ -1025,7 +1027,7 @@ def score(args):
                                and calibration["negatives_rejected"] == calibration["negatives"] and calibration["invalid"] == 0)
     verdict_of = {(item["stage"], item["label"], item["replicate"]): vote.get(item["item"])
                   for item in grading["items"] if item["kind"] == "answer"}
-    labels = list(declaration["labels"])
+    labels = list(grading.get("labels") or declaration["labels"])
     routed = set(declaration["router"]["routed"])
     replicates_declared = declaration["replicates"]
     per_question, provenance, unknown, costs, citations = {}, {}, {arm: 0 for arm in ARMS}, {}, {arm: [] for arm in ARMS}
@@ -1121,6 +1123,7 @@ def main(argv=None):
         if name == "grade-declare":
             command.add_argument("--reuse-grades", type=Path, default=None,
                                  help="a grader directory whose verdicts for identical items this run reuses")
+            command.add_argument("--labels", default=None, help="grade only these comma-separated question labels")
         if name.startswith("grade") or name == "score":
             command.add_argument("--grader", default=READER, choices=sorted(GRADERS))
     args = parser.parse_args(argv)
