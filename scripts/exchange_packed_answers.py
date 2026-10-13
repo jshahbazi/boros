@@ -63,8 +63,14 @@ VERSION = "exchange-packed-answers-v1"
 READER = "gemini-3.8-flash"
 ARMS = ("ordinary_send", "exchange_packed")
 BASELINE, CANDIDATE = ARMS
-# Harness arms this driver may compare (DeliveryHarness.exchangeLimits plus the ordinary default).
-SELECTABLE_ARMS = ("ordinary_send", "exchange_packed", "exchange_wide", "exchange_adjacent", "exchange_lexical", "lexical")
+# Harness arms this driver may compare (DeliveryHarness.exchangeLimits plus the ordinary default), and the
+# presentation arms that ``transform`` derives from a captured arm by replacing the V4 System framing with a
+# selectable V4 variant's framing (ContextAssembler's pinned literals), nothing else.
+SELECTABLE_ARMS = ("ordinary_send", "exchange_packed", "exchange_wide", "exchange_adjacent", "exchange_lexical", "lexical",
+                   "exchange_packed_v4_advice")
+ADVICE_FRAMING = "context-source-snapshot-v4-advice"
+FRAMING_TRANSFORMS = {"v4-advice": ("quotedHistoryFraming", "adviceHistoryFraming", ADVICE_FRAMING)}
+V4_FAMILY = (rc.V4, ADVICE_FRAMING)
 # Promotion threshold on D in points; the declaration records the value used.
 PROMOTE_MINIMUM_POINTS = 0.0
 COHORTS = ("retrieval-on-21", "preference-27", "temporal-25")
@@ -83,7 +89,7 @@ def decision_rule():
         "difference": f"D = mean accept rate of {CANDIDATE} minus {BASELINE}, in points, with a 95 percent paired "
                       f"bootstrap percentile interval over questions ({BOOTSTRAP_RESAMPLES} resamples, seeded by the "
                       "declaration digest) and a two-sided sign test on questions that differ",
-        "promote": f"recommend {CANDIDATE} as the ordinary Send default when D >= {PROMOTE_MINIMUM_POINTS:g}, the "
+        "promote": f"recommend {CANDIDATE} over {BASELINE} for the ordinary path when D >= {PROMOTE_MINIMUM_POINTS:g}, the "
                    "interval's lower bound is >= -2 points, and no cohort's D is below -5 points",
         "promote_minimum_points": PROMOTE_MINIMUM_POINTS,
         "retrieval_lever": "retrieval is confirmed as a practical lever for this reader when D >= +5 points and the "
@@ -251,7 +257,7 @@ def capture_summary(rows):
         tokens = [row["harness_prompt_tokens"] for row in mine if isinstance(row.get("harness_prompt_tokens"), int)]
         out[arm] = {"rows": len(mine),
                     "complete": sum(1 for row in mine if row.get("body_digest_matches") and row["preparation_completed"]),
-                    "framing_v4": sum(1 for row in mine if row.get("context_framing") == rc.V4),
+                    "framing_v4": sum(1 for row in mine if row.get("context_framing") in V4_FAMILY),
                     "gold_delivery": {kind: sum(1 for row in mine if row["gold_delivery"] == kind)
                                       for kind in ("whole", "partial", "none", "no_gold_turns")},
                     "prompt_tokens_median": statistics.median(tokens) if tokens else None,
@@ -278,6 +284,80 @@ def captured_body(output: Path, row):
     raw = (output / "requests" / case_name(row["cohort"], row["question_id"]) / (row["arm"] + ".request.json")).read_bytes()
     require(replay.digest(raw) == row["request_sha256"], "captured_body_changed")
     return rc.request_messages(raw)
+
+
+# --------------------------------------------------------------------------- presentation transform
+
+def swift_framing_literal(name):
+    """A pinned System framing literal of ContextAssembler.swift, as test_framing_v4_variants_replay reads it."""
+    import re
+    text = (ROOT / "Sources/Boros/ContextAssembler.swift").read_text()
+    match = re.search(r'private static let ' + name + r' = """\n(.*?)\n\s*"""', text, re.S)
+    require(match is not None, "framing_literal_missing")
+    return match.group(1).strip()
+
+
+def transformed_system(content, source_framing, target_framing):
+    """The System content with its V4 framing replaced by the variant's framing; refuses any other content."""
+    require(content == source_framing or content.endswith("\n\n" + source_framing), "system_framing_mismatch")
+    return content[:len(content) - len(source_framing)] + target_framing
+
+
+def transform(args):
+    """Offline: a presentation arm derived from a captured arm's bodies by swapping the V4 System framing for a
+    selectable variant's framing. Delivery, gold class and every other message are the source arm's. No generation."""
+    output = args.output.absolute()
+    require(output.is_relative_to(ROOT / ".build"), "output_outside_build")
+    require(not output.exists(), "output_exists")
+    source = args.source_output.absolute()
+    require(args.framing in FRAMING_TRANSFORMS, "framing_unknown")
+    source_name, target_name, framing_version = FRAMING_TRANSFORMS[args.framing]
+    require(args.source_arm == BASELINE and CANDIDATE.endswith("_" + args.framing.replace("-", "_")), "arms_mismatch")
+    manifest = json.loads((source / "captures.json").read_text())
+    require(manifest.get("version") == VERSION, "captures_version")
+    source_framing, target_framing = swift_framing_literal(source_name), swift_framing_literal(target_name)
+    require(source_framing != target_framing and len(target_framing) > len(source_framing), "framing_literals_invalid")
+    replay.private_directory(output)
+    requests = output / "requests"
+    replay.private_directory(requests)
+    rows = []
+    for row in manifest["rows"]:
+        if row["arm"] != args.source_arm:
+            continue
+        case = case_name(row["cohort"], row["question_id"])
+        raw = (source / "requests" / case / (row["arm"] + ".request.json")).read_bytes()
+        require(replay.digest(raw) == row["request_sha256"], "source_body_changed")
+        require(row.get("context_framing") == rc.V4, "source_framing_not_v4")
+        body = json.loads(raw)
+        messages = rc.request_messages(raw)
+        require(messages[0]["role"] == "system", "system_message_missing")
+        body["messages"][0]["content"] = transformed_system(messages[0]["content"], source_framing, target_framing)
+        derived = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        require(rc.request_messages(derived)[1:] == messages[1:], "transform_touched_other_messages")
+        directory = requests / case
+        replay.private_directory(directory)
+        replay.private_write(directory / (row["arm"] + ".request.json"), raw)
+        replay.private_write(directory / (CANDIDATE + ".request.json"), derived)
+        candidate = dict(row, arm=CANDIDATE, request_sha256=replay.digest(derived), request_bytes=len(derived),
+                         context_framing=framing_version, body_digest_matches=True,
+                         reference="transformed:" + row["arm"] + ":" + args.framing,
+                         transform={"framing": args.framing, "system_bytes_added": len(target_framing) - len(source_framing),
+                                    "serialization": "python-json-canonical"})
+        for key in ("delivery_matches_reference", "gold_matches_reference", "request_matches_baseline"):
+            candidate.pop(key, None)
+        rows.append(dict(row))
+        rows.append(candidate)
+    require(len(rows) == QUESTIONS * len(ARMS), "transform_incomplete")
+    document = {**{key: manifest[key] for key in ("version", "kind", "reference", "harness", "endpoint_counters")},
+                "recorded_at_utc": now(), "baseline_captures_sha256": manifest.get("baseline_captures_sha256"),
+                "source_captures_sha256": replay.digest((source / "captures.json").read_bytes()),
+                "transform": {"framing": args.framing, "source_arm": args.source_arm, "candidate_arm": CANDIDATE,
+                              "source_framing_sha256": replay.digest(source_framing.encode()),
+                              "target_framing_sha256": replay.digest(target_framing.encode())},
+                "rows": rows, "summary": capture_summary(rows)}
+    replay.private_write(output / "captures.json", replay.canonical(document) + b"\n")
+    print(json.dumps({"captures": len(rows), **document["summary"], "transform": document["transform"],
+                      "captures_sha256": replay.digest((output / "captures.json").read_bytes())}))
 
 
 # --------------------------------------------------------------------------- count
@@ -334,7 +414,7 @@ def declare(args):
     jobs = jobs_for(manifest["rows"])
     reader = rc.READERS[READER]
     declaration = {
-        "version": VERSION, "declared_at_utc": now(), "authorization": AUTHORIZATION,
+        "version": VERSION, "declared_at_utc": now(), "authorization": args.authorization or AUTHORIZATION,
         "purpose": f"answer-quality evidence for the ordinary Send default decision: the same reader, inputs and judge "
                    f"under the baseline arm {BASELINE} and the candidate arm {CANDIDATE}",
         "captures_sha256": replay.digest((output / "captures.json").read_bytes()),
@@ -651,7 +731,7 @@ def score(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("capture", "count", "declare", "run", "judge-set", "score"):
+    for name in ("capture", "transform", "count", "declare", "run", "judge-set", "score"):
         command = commands.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
         command.add_argument("--baseline-arm", default=BASELINE, choices=SELECTABLE_ARMS)
@@ -665,6 +745,12 @@ def main(argv=None):
             command.add_argument("--reference", type=Path, required=True, help="the step 3 replay output directory")
             command.add_argument("--baseline-captures", type=Path, help="the reader comparison's captures.json")
             command.add_argument("--tokenizer", type=Path, default=harness.DEFAULT_TOKENIZER)
+        if name == "transform":
+            command.add_argument("--source-output", type=Path, required=True, help="a capture output directory")
+            command.add_argument("--source-arm", required=True, choices=SELECTABLE_ARMS)
+            command.add_argument("--framing", required=True, choices=sorted(FRAMING_TRANSFORMS))
+        if name == "declare":
+            command.add_argument("--authorization", default=None, help="who authorized this run, when and how")
         if name == "score":
             command.add_argument("--labels", type=Path, required=True, help="the judge's labels for judge-set")
     args = parser.parse_args(argv)
@@ -672,8 +758,8 @@ def main(argv=None):
     import retrieval_harness as harness
     try:
         configure_arms(args.baseline_arm, args.candidate_arm, args.promote_minimum_points)
-        {"capture": capture, "count": count, "declare": declare, "run": run, "judge-set": judge_set,
-         "score": score}[args.command](args)
+        {"capture": capture, "transform": transform, "count": count, "declare": declare, "run": run,
+         "judge-set": judge_set, "score": score}[args.command](args)
     except (EvaluationError, rc.ComparisonError, va.VertexError, replay.ReplayError, v5plan.PlanError, v4v.PlanError,
             jc.CalibrationError, harness.HarnessError) as error:
         print(json.dumps({"error": str(error)}))

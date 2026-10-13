@@ -101,6 +101,22 @@ class Contracts(unittest.TestCase):
         self.assertEqual(epa.ARMS, ("ordinary_send", "exchange_packed"))
         self.assertEqual(epa.PROMOTE_MINIMUM_POINTS, 0.0)
 
+    def test_presentation_transform_swaps_only_the_pinned_v4_framing(self):
+        v4 = epa.swift_framing_literal("quotedHistoryFraming")
+        advice = epa.swift_framing_literal("adviceHistoryFraming")
+        self.assertIn("tailor the reply to relevant details about the user", advice)
+        self.assertNotIn("tailor the reply", v4)
+        self.assertTrue(advice.endswith("A missing excerpt is not proof that the archive lacks a fact."))
+        self.assertEqual(epa.transformed_system(v4, v4, advice), advice)
+        self.assertEqual(epa.transformed_system("Host instructions.\n\n" + v4, v4, advice), "Host instructions.\n\n" + advice)
+        with self.assertRaisesRegex(epa.EvaluationError, "system_framing_mismatch"):
+            epa.transformed_system("Host instructions.\n" + v4, v4, advice)
+        with self.assertRaisesRegex(epa.EvaluationError, "system_framing_mismatch"):
+            epa.transformed_system(advice, v4, advice)
+        self.assertEqual(epa.FRAMING_TRANSFORMS["v4-advice"][2], "context-source-snapshot-v4-advice")
+        self.assertIn("exchange_packed_v4_advice", epa.SELECTABLE_ARMS)
+        self.assertEqual(epa.V4_FAMILY, (epa.rc.V4, "context-source-snapshot-v4-advice"))
+
     def test_scope_reader_and_arms_are_pinned(self):
         self.assertEqual(epa.ARMS, ("ordinary_send", "exchange_packed"))
         self.assertIn("exchange_wide", epa.SELECTABLE_ARMS)
