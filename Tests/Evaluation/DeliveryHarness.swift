@@ -105,6 +105,10 @@ enum DeliveryHarness {
         case "exchange_wide": limits.componentPolicy = .selectedQwenExchangeWide
         case "exchange_leads": limits.componentPolicy = .selectedQwenExchangeLeads
         case "exchange_wide_leads": limits.componentPolicy = .selectedQwenExchangeWideLeads
+        case "exchange_passages": limits.componentPolicy = .selectedQwenExchangePassages
+        case "exchange_roles": limits.componentPolicy = .selectedQwenExchangeRoles
+        case "exchange_prf": limits.componentPolicy = .selectedQwenExchangeFeedback
+        case "exchange_roles_prf": limits.componentPolicy = .selectedQwenExchangeRolesFeedback
         case "exchange_adjacent_rebuild": limits.componentPolicy = .selectedQwenExchangeAdjacent
         case "exchange_packed_rebuild": limits.componentPolicy = .selectedQwenExchangePacked
         default: return nil

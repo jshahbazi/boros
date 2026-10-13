@@ -190,6 +190,39 @@ struct ContextComponentPolicy: Codable, Equatable {
         value.version = "selected-model-context-components-v3-exchange-wide-leads"
         return value
     }()
+    /// Retrieval variants of `exchange_packed` measured offline on October 13,
+    /// 2026 (docs/RETRIEVAL-VARIANTS.md). Each keeps the `exchange_packed` caps,
+    /// window, audits and packer and changes one declared thing:
+    /// - `passages`: a source longer than `ExchangeBlockQuery.passageSourceThresholdBytes`
+    ///   is delivered as a short head plus query-centred windows instead of
+    ///   whole pages (`ExchangeBlockQuery.passages`).
+    /// - `roles`: term hits in assistant turns count at `assistantTermWeight`
+    ///   of a hit in a user turn when a block is scored (in-memory ranking).
+    /// - `prf`: up to `feedbackTermLimit` high-IDF terms of the top ranked
+    ///   blocks join the query at `feedbackTermWeight` (in-memory ranking).
+    /// Explicit policies; none is a default.
+    static let selectedQwenExchangePassages: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-passages"
+        return value
+    }()
+    static let selectedQwenExchangeRoles: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-roles"
+        return value
+    }()
+    static let selectedQwenExchangeFeedback: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-prf"
+        return value
+    }()
+    /// Both scoring variants together: role-weighted scoring, then feedback
+    /// terms from its top blocks, re-ranked with the same role weights.
+    static let selectedQwenExchangeRolesFeedback: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-roles-prf"
+        return value
+    }()
     static let exchangeSelectionAuditVersion = "context-exchange-v1"
     /// The policy ordinary selected-Qwen Send freezes, and the default of
     /// unpinned public evaluation (`AnswerEvaluationCommand`). User decision,
@@ -210,11 +243,21 @@ struct ContextComponentPolicy: Codable, Equatable {
     var packsExchangeValueDensity: Bool {
         self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide
             || self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads
+            || packsPassageWindows || weighsUserTurns || expandsQueryFromFeedback
     }
     /// The evidence-allowance variants of the value-density packer.
     var widensEvidenceWindow: Bool { self == Self.selectedQwenExchangeWide || self == Self.selectedQwenExchangeWideLeads }
     /// The lead-priority variants: candidate leads before replies and neighbors.
     var packsLeadsFirst: Bool { self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads }
+    /// The October 13 retrieval variants (docs/RETRIEVAL-VARIANTS.md).
+    var packsPassageWindows: Bool { self == Self.selectedQwenExchangePassages }
+    var weighsUserTurns: Bool { self == Self.selectedQwenExchangeRoles || self == Self.selectedQwenExchangeRolesFeedback }
+    var expandsQueryFromFeedback: Bool { self == Self.selectedQwenExchangeFeedback || self == Self.selectedQwenExchangeRolesFeedback }
+    /// Scoring variants read per-role and whole-vocabulary block statistics
+    /// that the persistent sidecar does not store, so they rank over the
+    /// per-turn in-memory rebuild; `ExchangeBlockQuery.select` routes them
+    /// there and labels the audit.
+    var requiresInMemoryRanking: Bool { weighsUserTurns || expandsQueryFromFeedback }
     /// Value-density packing parameters that follow the policy. `exchange_packed`
     /// keeps the values declared for it on October 8, 2026 (docs/P2-PACKING.md).
     var candidateBlockDepth: Int { widensEvidenceWindow ? 48 : 32 }
@@ -253,7 +296,9 @@ struct ContextComponentPolicy: Codable, Equatable {
         guard self == Self.selectedQwen || self == Self.selectedQwenNeighborhood
             || self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent
             || self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide
-            || self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads else { throw EpisodeBudgetError.invalid }
+            || self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads
+            || self == Self.selectedQwenExchangePassages || self == Self.selectedQwenExchangeRoles
+            || self == Self.selectedQwenExchangeFeedback || self == Self.selectedQwenExchangeRolesFeedback else { throw EpisodeBudgetError.invalid }
         return self
     }
 

@@ -19,16 +19,28 @@ level "low", a 2,048-token thinking allowance on the step 3 output limit, no sam
 arms are answered fresh in the same run, three replicates, interleaved. Judge: the default verdict
 judge (gemini_judge.py, prompt set v4) on one blinded set holding both arms.
 
-Commands: ``capture``, ``count`` (free), ``declare``, ``run`` (paid), ``judge-set``, ``score``.
+Commands: ``capture``, ``transform``, ``count`` (free), ``declare``, ``run`` (paid), ``judge-set``, ``score``.
 
 Arms: ``--baseline-arm`` and ``--candidate-arm`` (defaults ``ordinary_send`` and ``exchange_packed``) select
-the two harness arms, so the same driver measures a later policy against the current default. A
-baseline other than ``ordinary_send`` has no step 3 declaration to check against; its delivery and gold
-class are instead checked against the same arm's rows in ``--baseline-captures`` (a previous run of this
-driver), which must then be given. ``--promote-minimum-points`` raises the declared promotion threshold
-on D (default 0, the October 12 rule); the declaration records it and ``score`` applies the recorded value.
-The evidence-allowance run (docs/EVIDENCE-ALLOWANCE.md) used ``exchange_packed`` against ``exchange_wide``
-with a 5-point threshold.
+the harness arms, so the same driver measures a later policy against the current default. Since October
+13, 2026 ``--candidate-arm`` takes several arms: every candidate is compared with the one baseline, paired
+within the run, and the dispatch order rotates over the arms by question and replicate. A baseline other
+than ``ordinary_send`` has no step 3 declaration to check against; its delivery and gold class are instead
+checked against the same arm's rows in ``--baseline-captures`` (a previous run of this driver), which must
+then be given. ``--promote-minimum-points`` raises the declared promotion threshold on D (default 0, the
+October 12 rule); the declaration records it and ``score`` applies the recorded value. The
+evidence-allowance run (docs/EVIDENCE-ALLOWANCE.md) used ``exchange_packed`` against ``exchange_wide`` with
+a 5-point threshold.
+
+Unchanged requests (evaluation hygiene, October 13, 2026): ``capture`` and ``transform`` mark a candidate row
+``unchanged_from_baseline`` when its request body equals the baseline's modulo ingestion identifiers (the
+``captured_utc:`` and ``conversation_id:`` header lines, the only lines two captures of one arm differ in).
+``declare`` lists no job for an unchanged (question, candidate) pair, and no baseline job for a question
+with no changed candidate; the true difference there is zero by construction and ``score`` counts it as a
+tie. Where a question has no generated baseline, both arms take that question's accept rate from an
+earlier run's ``score.json`` named by ``declare --reuse-score PATH --reuse-arm ARM`` (recorded in the
+declaration), so the reported accept rates mix one earlier run's answers into the unchanged questions;
+D and its interval do not depend on them.
 
 Privacy: request bodies, answers and raw responses stay in the private output directory (0700
 directories, 0600 files) and are never printed. stdout carries counts, hashes, identifiers and fixed
@@ -45,6 +57,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import statistics
 import sys
 import tempfile
@@ -63,14 +76,53 @@ VERSION = "exchange-packed-answers-v1"
 READER = "gemini-3.8-flash"
 ARMS = ("ordinary_send", "exchange_packed")
 BASELINE, CANDIDATE = ARMS
+CANDIDATES = (CANDIDATE,)
 # Harness arms this driver may compare (DeliveryHarness.exchangeLimits plus the ordinary default), and the
-# presentation arms that ``transform`` derives from a captured arm by replacing the V4 System framing with a
-# selectable V4 variant's framing (ContextAssembler's pinned literals), nothing else.
-SELECTABLE_ARMS = ("ordinary_send", "exchange_packed", "exchange_wide", "exchange_adjacent", "exchange_lexical", "lexical",
-                   "exchange_packed_v4_advice")
+# presentation arms that ``transform`` derives from a captured arm (see PRESENTATIONS), nothing else.
+HARNESS_ARMS = ("ordinary_send", "exchange_packed", "exchange_wide", "exchange_adjacent", "exchange_lexical", "lexical",
+                "exchange_passages", "exchange_roles", "exchange_prf", "exchange_roles_prf")
+PRESENTATION_ARMS = ("exchange_packed_v4_advice", "exchange_packed_chronology", "exchange_packed_one_block",
+                     "exchange_packed_conflicts")
+SELECTABLE_ARMS = HARNESS_ARMS + PRESENTATION_ARMS
 ADVICE_FRAMING = "context-source-snapshot-v4-advice"
+CHRONOLOGY_FRAMING = "context-source-snapshot-v4-advice-chronology"
+ONE_BLOCK_FRAMING = "context-source-snapshot-v4-advice-one-block"
+CONFLICTS_FRAMING = "context-source-snapshot-v4-advice-conflicts"
 FRAMING_TRANSFORMS = {"v4-advice": ("quotedHistoryFraming", "adviceHistoryFraming", ADVICE_FRAMING)}
-V4_FAMILY = (rc.V4, ADVICE_FRAMING)
+# Presentation probes (October 13, 2026): each derives a candidate arm from a captured V4-family arm.
+# ``v4-advice`` swaps the pinned V4 System literal for the V4-advice literal (both read from
+# ContextAssembler.swift). The three probes below start from a V4-advice body and are defined here, in
+# the evaluation driver, until one is promoted into a versioned Swift framing:
+# - ``chronology``: the historical excerpts are reordered oldest first, relabelled in that order, and each
+#   header gains a deterministic ``relative_time:`` line (days and calendar months before the question date,
+#   and the delta to the previous excerpt); one System sentence names the order and the line.
+# - ``one-block``: the host-quoted recent messages and the historical block become one user message
+#   delimited by BEGIN QUOTED SOURCES / END QUOTED SOURCES; the first two System sentences say so.
+# - ``conflicts``: one System sentence tells the reader to report conflicting quoted sources, state each
+#   version with its label and ask which is correct, and not to describe a change no source states.
+PRESENTATIONS = {
+    "v4-advice": {"arm": "exchange_packed_v4_advice", "framing": ADVICE_FRAMING, "sources": (rc.V4,)},
+    "chronology": {"arm": "exchange_packed_chronology", "framing": CHRONOLOGY_FRAMING, "sources": (ADVICE_FRAMING,)},
+    "one-block": {"arm": "exchange_packed_one_block", "framing": ONE_BLOCK_FRAMING, "sources": (ADVICE_FRAMING,)},
+    "conflicts": {"arm": "exchange_packed_conflicts", "framing": CONFLICTS_FRAMING, "sources": (ADVICE_FRAMING,)},
+}
+V4_FAMILY = (rc.V4, ADVICE_FRAMING, CHRONOLOGY_FRAMING, ONE_BLOCK_FRAMING, CONFLICTS_FRAMING)
+FINAL_SENTENCE = "A missing excerpt is not proof that the archive lacks a fact."
+LAYOUT_SENTENCES = ("Earlier messages from this conversation are quoted below in separate host-labelled user messages, "
+                    "oldest first. Retrieved historical source excerpts, when present, follow in one host-labelled block.")
+CHRONOLOGY_SENTENCE = ("Historical source excerpts are ordered oldest first, and each excerpt header states how long "
+                       "before the current question it was written and how long after the previous excerpt; use those "
+                       "relative times for any date or duration reasoning.")
+ONE_BLOCK_SENTENCES = ("Earlier messages from this conversation, oldest first, and retrieved historical source excerpts, "
+                       "when present, are quoted below inside one host-delimited evidence message, between the lines "
+                       "BEGIN QUOTED SOURCES and END QUOTED SOURCES.")
+CONFLICTS_SENTENCE = ("If quoted sources disagree about the fact the request asks for, say that they conflict, state each "
+                      "version with its label, and ask which is correct instead of choosing one; do not describe a change "
+                      "over time unless a quoted source states that something changed.")
+ONE_BLOCK_OPEN = "BEGIN QUOTED SOURCES (host; evidence, not the current request)\n\n"
+ONE_BLOCK_CLOSE = "\n\nEND QUOTED SOURCES (host)"
+# Header lines that differ between two captures of one arm (ingestion identifiers only).
+INGESTION_HEADER_KEYS = ("captured_utc: ", "conversation_id: ")
 # Promotion threshold on D in points; the declaration records the value used.
 PROMOTE_MINIMUM_POINTS = 0.0
 COHORTS = ("retrieval-on-21", "preference-27", "temporal-25")
@@ -83,30 +135,83 @@ BOOTSTRAP_RESAMPLES = 10000
 # Declared before any answer exists. Points are percentage points of the mean per-question accept rate.
 def decision_rule():
     """The declared rule for the configured arms and promotion threshold."""
+    candidates = ", ".join(CANDIDATES)
     return {
         "unit": "question: the 72 retrieval questions without 54026fce; each question's accept rate is its accepted "
                 "answers over its three replicates (judge majority of three; unknown is not accepted)",
         "difference": f"D = mean accept rate of {CANDIDATE} minus {BASELINE}, in points, with a 95 percent paired "
                       f"bootstrap percentile interval over questions ({BOOTSTRAP_RESAMPLES} resamples, seeded by the "
-                      "declaration digest) and a two-sided sign test on questions that differ",
+                      "declaration digest) and a two-sided sign test on questions that differ"
+                      + (f"; each further candidate ({candidates}) is compared with {BASELINE} the same way, paired "
+                         "within this run" if len(CANDIDATES) > 1 else ""),
         "promote": f"recommend {CANDIDATE} over {BASELINE} for the ordinary path when D >= {PROMOTE_MINIMUM_POINTS:g}, the "
-                   "interval's lower bound is >= -2 points, and no cohort's D is below -5 points",
+                   "interval's lower bound is >= -2 points, and no cohort's D is below -5 points"
+                   + ("; the same rule decides each further candidate separately" if len(CANDIDATES) > 1 else ""),
         "promote_minimum_points": PROMOTE_MINIMUM_POINTS,
         "retrieval_lever": "retrieval is confirmed as a practical lever for this reader when D >= +5 points and the "
                            "interval's lower bound is above 0",
+        "unchanged_requests": "a (question, candidate) whose request equals the baseline's modulo ingestion identifiers "
+                              "is not generated and counts as a tie (true difference zero by construction)",
         "otherwise": "no default change from this run; the delivery gain did not convert to answers at a detectable size",
     }
 
 
 def configure_arms(baseline, candidate, promote_minimum_points=0.0):
-    """Select the two harness arms this run compares and the declared promotion threshold."""
-    global ARMS, BASELINE, CANDIDATE, PROMOTE_MINIMUM_POINTS
-    require(baseline in SELECTABLE_ARMS and candidate in SELECTABLE_ARMS and baseline != candidate, "arms_invalid")
+    """Select the baseline and the candidate arm(s) this run compares and the declared promotion threshold."""
+    global ARMS, BASELINE, CANDIDATE, CANDIDATES, PROMOTE_MINIMUM_POINTS
+    candidates = tuple(candidate) if isinstance(candidate, (list, tuple)) else (candidate,)
+    require(baseline in SELECTABLE_ARMS and candidates and all(arm in SELECTABLE_ARMS for arm in candidates)
+            and baseline not in candidates and len(set(candidates)) == len(candidates), "arms_invalid")
     require(promote_minimum_points >= 0, "promotion_threshold_invalid")
-    ARMS = (baseline, candidate)
-    BASELINE, CANDIDATE = ARMS
+    ARMS = (baseline,) + candidates
+    BASELINE, CANDIDATES = baseline, candidates
+    CANDIDATE = candidates[0]
     PROMOTE_MINIMUM_POINTS = float(promote_minimum_points)
     return ARMS
+
+
+def normalized_messages(raw: bytes):
+    """Role messages with the ingestion-identifier header lines reduced to their keys, for the unchanged test."""
+    out = []
+    for message in rc.request_messages(raw):
+        lines = []
+        for line in message["content"].split("\n"):
+            key = next((key for key in INGESTION_HEADER_KEYS if line.startswith(key)), None)
+            lines.append(key.strip() if key else line)
+        out.append((message["role"], "\n".join(lines)))
+    return out
+
+
+def equivalent_bodies(baseline_raw: bytes, candidate_raw: bytes):
+    """Byte-identical, or identical modulo ingestion timestamps and generated conversation identifiers."""
+    if baseline_raw == candidate_raw:
+        return True
+    left, right = json.loads(baseline_raw), json.loads(candidate_raw)
+    if {key: value for key, value in left.items() if key != "messages"} != \
+            {key: value for key, value in right.items() if key != "messages"}:
+        return False
+    return normalized_messages(baseline_raw) == normalized_messages(candidate_raw)
+
+
+def mark_unchanged(rows, body_of):
+    """Sets ``unchanged_from_baseline`` on every candidate row and ``changed_candidates`` on every baseline row."""
+    by_question = {}
+    for row in rows:
+        by_question.setdefault((row["cohort"], row["question_id"]), {})[row["arm"]] = row
+    for arms in by_question.values():
+        baseline = arms.get(BASELINE)
+        if baseline is None:
+            continue
+        changed = []
+        for arm in CANDIDATES:
+            candidate = arms.get(arm)
+            if candidate is None:
+                continue
+            candidate["unchanged_from_baseline"] = equivalent_bodies(body_of(baseline), body_of(candidate))
+            if not candidate["unchanged_from_baseline"]:
+                changed.append(arm)
+        baseline["changed_candidates"] = changed
+    return rows
 AUTHORIZATION = ("user, 2026-10-12, in chat: 'ok do it' to the proposed exchange_packed answer-quality evaluation, "
                  "including the exception to the repair plan's principle 3 for a configuration below the offline "
                  "R2 gate; then 'just use vertex for evals, don't worry about the local llm anymore' and 'yeah gemini "
@@ -237,6 +342,8 @@ def capture(args):
     finally:
         endpoint.stop()
     require(not any(row["runner_started"] for row in rows), "answer_runner_started")
+    mark_unchanged(rows, lambda row: (requests / case_name(row["cohort"], row["question_id"])
+                                      / (row["arm"] + ".request.json")).read_bytes())
     manifest = {"version": VERSION, "kind": "exchange-packed-captures", "recorded_at_utc": now(),
                 "reference": {"path_name": reference.name, "declaration_sha256":
                               replay.digest((reference / "declaration.json").read_bytes()),
@@ -262,6 +369,8 @@ def capture_summary(rows):
                                       for kind in ("whole", "partial", "none", "no_gold_turns")},
                     "prompt_tokens_median": statistics.median(tokens) if tokens else None,
                     "prompt_tokens_max": max(tokens) if tokens else None}
+        if arm != BASELINE:
+            out[arm]["unchanged_from_baseline"] = sum(1 for row in mine if row.get("unchanged_from_baseline"))
     baseline = [row for row in rows if row["arm"] == BASELINE]
     out[BASELINE]["delivery_matches_reference"] = sum(1 for row in baseline if row.get("delivery_matches_reference"))
     out[BASELINE]["gold_matches_reference"] = sum(1 for row in baseline if row.get("gold_matches_reference"))
@@ -280,10 +389,14 @@ def load_captures(output: Path):
     return manifest
 
 
-def captured_body(output: Path, row):
+def captured_raw(output: Path, row):
     raw = (output / "requests" / case_name(row["cohort"], row["question_id"]) / (row["arm"] + ".request.json")).read_bytes()
     require(replay.digest(raw) == row["request_sha256"], "captured_body_changed")
-    return rc.request_messages(raw)
+    return raw
+
+
+def captured_body(output: Path, row):
+    return rc.request_messages(captured_raw(output, row))
 
 
 # --------------------------------------------------------------------------- presentation transform
@@ -303,23 +416,227 @@ def transformed_system(content, source_framing, target_framing):
     return content[:len(content) - len(source_framing)] + target_framing
 
 
+def framing_literal_for(version):
+    """The pinned Swift System literal of a V4-family framing version."""
+    names = {rc.V4: "quotedHistoryFraming", ADVICE_FRAMING: "adviceHistoryFraming"}
+    require(version in names, "source_framing_unsupported")
+    return swift_framing_literal(names[version])
+
+
+def replaced_once(text, old, new, code):
+    require(text.count(old) == 1, code)
+    return text.replace(old, new)
+
+
+# --- chronology: evidence parsing, calendar arithmetic and relative-time headers
+
+HEADER_PATTERN = re.compile(
+    r"BEGIN HISTORICAL SOURCE \[E(\d+)\]\n(conversation_id: [^\n]*\n)(role: [^\n]*\n)(capture_status: [^\n]*\n)"
+    r"(captured_utc: [^\n]*\n)(source_time: [^\n]*\n)(source_sha256: [0-9a-f]{64}\n)(excerpt_utf8_offset: \d+\n)"
+    r"(source_total_bytes: \d+\n)quoted_excerpt:\n")
+EVIDENCE_PREFIX = "Historical source excerpts for reference:\n\n"
+EVIDENCE_SEPARATOR = "\n\n"
+QUESTION_DATE_PATTERN = re.compile(r"\AQuestion Date: ([^\n]+)\nQuestion: ")
+LOCAL_DATE_PATTERN = re.compile(r"^(\d{4})/(\d{2})/(\d{2}) \((?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)\)(?: (\d{2}):(\d{2}))?$")
+ISO_DATE_PATTERN = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
+
+def parse_evidence(content, labels):
+    """The historical block as (prefix, [excerpt]) using the capture row's historical labels, in delivered order.
+    Each excerpt is (label number, header groups, excerpt text, footer). Re-serializing must reproduce the bytes."""
+    require(content.startswith(EVIDENCE_PREFIX), "evidence_prefix_missing")
+    position = len(EVIDENCE_PREFIX)
+    excerpts = []
+    for index, label in enumerate(labels):
+        if index:
+            require(content.startswith(EVIDENCE_SEPARATOR, position), "evidence_separator_missing")
+            position += len(EVIDENCE_SEPARATOR)
+        match = HEADER_PATTERN.match(content, position)
+        require(match is not None and "E" + match.group(1) == label["label"], "evidence_header_mismatch")
+        start = match.end()
+        excerpt_bytes = label["excerpt_bytes"]
+        encoded = content[start:].encode()
+        excerpt = encoded[:excerpt_bytes].decode()
+        require(len(excerpt.encode()) == excerpt_bytes, "evidence_excerpt_length_mismatch")
+        after = start + len(excerpt)
+        footer = "\nEND HISTORICAL SOURCE [" + label["label"] + "]"
+        require(content.startswith(footer, after), "evidence_footer_mismatch")
+        require(match.group(8) == f"excerpt_utf8_offset: {label['excerpt_offset']}\n", "evidence_offset_mismatch")
+        excerpts.append({"label": int(match.group(1)), "groups": match.groups()[1:], "excerpt": excerpt,
+                         "event_id": label["event_id"], "offset": label["excerpt_offset"]})
+        position = after + len(footer)
+    require(position == len(content), "evidence_trailing_content")
+    return excerpts
+
+
+def render_evidence(excerpts, first_label, extra_lines):
+    """The historical block with sequential labels from ``first_label`` and ``extra_lines[i]`` after source_time."""
+    parts = []
+    for index, item in enumerate(excerpts):
+        label = f"E{first_label + index}"
+        groups = list(item["groups"])
+        header = "BEGIN HISTORICAL SOURCE [" + label + "]\n" + "".join(groups[:5]) + extra_lines[index] \
+            + "".join(groups[5:]) + "quoted_excerpt:\n"
+        parts.append(header + item["excerpt"] + "\nEND HISTORICAL SOURCE [" + label + "]")
+    return EVIDENCE_PREFIX + EVIDENCE_SEPARATOR.join(parts)
+
+
+def calendar_date(literal):
+    """(year, month, day) of a LongMemEval local literal or an ISO value; the clock is ignored."""
+    match = LOCAL_DATE_PATTERN.match(literal) or ISO_DATE_PATTERN.match(literal)
+    require(match is not None, "date_literal_invalid")
+    import datetime
+    return datetime.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def source_date(source_time_line):
+    """The calendar date of a ``source_time:`` header line (its JSON object's ``value``)."""
+    value = json.loads(source_time_line[len("source_time: "):].strip())
+    require(isinstance(value, dict) and isinstance(value.get("value"), str), "source_time_missing")
+    return calendar_date(value["value"])
+
+
+def calendar_delta(earlier, later):
+    """Whole calendar months and remaining days from ``earlier`` to ``later`` (both dates, earlier <= later)."""
+    require(earlier <= later, "calendar_delta_order")
+    months = (later.year - earlier.year) * 12 + later.month - earlier.month
+    if later.day < earlier.day:
+        months -= 1
+    import datetime
+    year, month = earlier.year + (earlier.month - 1 + months) // 12, (earlier.month - 1 + months) % 12 + 1
+    import calendar
+    day = min(earlier.day, calendar.monthrange(year, month)[1])
+    return months, (later - datetime.date(year, month, day)).days
+
+
+def plural(count, unit):
+    return f"{count} {unit}" + ("" if count == 1 else "s")
+
+
+def relative_time_line(question_date, excerpt_date, previous_date):
+    days = (question_date - excerpt_date).days
+    if days == 0:
+        before = "same day as the question"
+    elif days > 0:
+        months, rest = calendar_delta(excerpt_date, question_date)
+        inside = plural(months, "month") + (" " + plural(rest, "day") if rest else "") if months else ""
+        before = plural(days, "day") + " before the question" + (f" ({inside})" if inside else "")
+    else:
+        before = plural(-days, "day") + " after the question"
+    if previous_date is None:
+        after = "earliest excerpt"
+    else:
+        gap = (excerpt_date - previous_date).days
+        after = "same day as the previous excerpt" if gap == 0 else plural(gap, "day") + " after the previous excerpt"
+    return "relative_time: " + before + "; " + after + "\n"
+
+
+def question_date_of(messages):
+    match = QUESTION_DATE_PATTERN.match(messages[-1]["content"])
+    require(messages[-1]["role"] == "user" and match is not None, "question_date_missing")
+    return calendar_date(match.group(1))
+
+
+def chronology_transform(messages, row):
+    """Historical excerpts oldest first with relative-time header lines; recent and question messages unchanged."""
+    labels = [label for label in row["citation_labels"] if label["kind"] == "historical"]
+    historical = [index for index, message in enumerate(messages)
+                  if message["role"] == "user" and message["content"].startswith(EVIDENCE_PREFIX)]
+    require(len(historical) == (1 if labels else 0), "historical_block_count")
+    system = replaced_once(messages[0]["content"], " " + FINAL_SENTENCE, " " + CHRONOLOGY_SENTENCE + " " + FINAL_SENTENCE,
+                           "final_sentence_missing")
+    out = [dict(messages[0], content=system)] + [dict(message) for message in messages[1:]]
+    new_labels = [label for label in row["citation_labels"] if label["kind"] != "historical"]
+    if labels:
+        excerpts = parse_evidence(messages[historical[0]]["content"], labels)
+        for position, item in enumerate(excerpts):
+            item["date"] = source_date(item["groups"][4])
+            item["position"] = position
+        ordered = sorted(excerpts, key=lambda item: (item["date"], item["event_id"], item["offset"], item["position"]))
+        question_date = question_date_of(messages)
+        lines, previous = [], None
+        for item in ordered:
+            lines.append(relative_time_line(question_date, item["date"], previous))
+            previous = item["date"]
+        first_label = min(item["label"] for item in excerpts)
+        require(first_label == len(new_labels) + 1, "historical_labels_not_after_recent")
+        content = render_evidence(ordered, first_label, lines)
+        require(render_evidence(excerpts, first_label, [""] * len(excerpts)) == messages[historical[0]]["content"],
+                "evidence_round_trip_failed")
+        out[historical[0]] = dict(messages[historical[0]], content=content)
+        for index, item in enumerate(ordered):
+            original = labels[item["position"]]
+            new_labels.append(dict(original, label=f"E{first_label + index}", original_label=original["label"]))
+    return out, {"citation_labels": new_labels, "historical_excerpts": len(labels)}
+
+
+def one_block_transform(messages, row):
+    """Every host-quoted message between the System and the question becomes one delimited user message."""
+    system = replaced_once(messages[0]["content"], LAYOUT_SENTENCES, ONE_BLOCK_SENTENCES, "layout_sentences_missing")
+    middle = messages[1:-1]
+    require(all(message["role"] == "user" for message in middle), "quoted_messages_not_user")
+    out = [dict(messages[0], content=system)]
+    if middle:
+        out.append({"role": "user", "content": ONE_BLOCK_OPEN + "\n\n".join(message["content"] for message in middle)
+                    + ONE_BLOCK_CLOSE})
+    out.append(dict(messages[-1]))
+    return out, {"merged_messages": len(middle)}
+
+
+def conflicts_transform(messages, row):
+    system = replaced_once(messages[0]["content"], " " + FINAL_SENTENCE, " " + CONFLICTS_SENTENCE + " " + FINAL_SENTENCE,
+                           "final_sentence_missing")
+    return [dict(messages[0], content=system)] + [dict(message) for message in messages[1:]], {}
+
+
+def framing_swap_transform(messages, row, presentation):
+    source_name, target_name, _version = FRAMING_TRANSFORMS[presentation]
+    source_framing, target_framing = swift_framing_literal(source_name), swift_framing_literal(target_name)
+    require(source_framing != target_framing and len(target_framing) > len(source_framing), "framing_literals_invalid")
+    out = [dict(messages[0], content=transformed_system(messages[0]["content"], source_framing, target_framing))] \
+        + [dict(message) for message in messages[1:]]
+    return out, {"system_bytes_added": len(target_framing) - len(source_framing),
+                 "source_framing_sha256": replay.digest(source_framing.encode()),
+                 "target_framing_sha256": replay.digest(target_framing.encode())}
+
+
+def present(presentation, messages, row):
+    """The candidate messages and content-free metadata of one presentation applied to one captured body."""
+    require(presentation in PRESENTATIONS, "presentation_unknown")
+    require(row.get("context_framing") in PRESENTATIONS[presentation]["sources"], "source_framing_unsupported")
+    require(messages[0]["role"] == "system", "system_message_missing")
+    if presentation in FRAMING_TRANSFORMS:
+        return framing_swap_transform(messages, row, presentation)
+    return {"chronology": chronology_transform, "one-block": one_block_transform,
+            "conflicts": conflicts_transform}[presentation](messages, row)
+
+
 def transform(args):
-    """Offline: a presentation arm derived from a captured arm's bodies by swapping the V4 System framing for a
-    selectable variant's framing. Delivery, gold class and every other message are the source arm's. No generation."""
+    """Offline: presentation arms derived from a captured arm's bodies (PRESENTATIONS). Delivery and gold class are
+    the source arm's; the System text and the layout of the quoted sources change as each presentation declares.
+    No generation."""
     output = args.output.absolute()
     require(output.is_relative_to(ROOT / ".build"), "output_outside_build")
     require(not output.exists(), "output_exists")
     source = args.source_output.absolute()
-    require(args.framing in FRAMING_TRANSFORMS, "framing_unknown")
-    source_name, target_name, framing_version = FRAMING_TRANSFORMS[args.framing]
-    require(args.source_arm == BASELINE and CANDIDATE.endswith("_" + args.framing.replace("-", "_")), "arms_mismatch")
+    presentations = list(args.presentations or [])
+    require(presentations and len(presentations) == len(CANDIDATES)
+            and all(PRESENTATIONS.get(name, {}).get("arm") == arm for name, arm in zip(presentations, CANDIDATES)),
+            "arms_mismatch")
+    require(args.source_arm == BASELINE, "arms_mismatch")
     manifest = json.loads((source / "captures.json").read_text())
     require(manifest.get("version") == VERSION, "captures_version")
-    source_framing, target_framing = swift_framing_literal(source_name), swift_framing_literal(target_name)
-    require(source_framing != target_framing and len(target_framing) > len(source_framing), "framing_literals_invalid")
     replay.private_directory(output)
     requests = output / "requests"
     replay.private_directory(requests)
+    # A source arm that was itself transformed carries its delivery from the source run's harness
+    # baseline; the reference flags of that question's harness rows apply to it unchanged.
+    reference_flags = {}
+    for row in manifest["rows"]:
+        if "delivery_matches_reference" in row:
+            key = (row["cohort"], row["question_id"])
+            reference_flags[key] = {name: bool(row.get(name)) or reference_flags.get(key, {}).get(name, False)
+                                    for name in ("delivery_matches_reference", "gold_matches_reference")}
     rows = []
     for row in manifest["rows"]:
         if row["arm"] != args.source_arm:
@@ -327,33 +644,47 @@ def transform(args):
         case = case_name(row["cohort"], row["question_id"])
         raw = (source / "requests" / case / (row["arm"] + ".request.json")).read_bytes()
         require(replay.digest(raw) == row["request_sha256"], "source_body_changed")
-        require(row.get("context_framing") == rc.V4, "source_framing_not_v4")
         body = json.loads(raw)
         messages = rc.request_messages(raw)
-        require(messages[0]["role"] == "system", "system_message_missing")
-        body["messages"][0]["content"] = transformed_system(messages[0]["content"], source_framing, target_framing)
-        derived = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        require(rc.request_messages(derived)[1:] == messages[1:], "transform_touched_other_messages")
         directory = requests / case
         replay.private_directory(directory)
         replay.private_write(directory / (row["arm"] + ".request.json"), raw)
-        replay.private_write(directory / (CANDIDATE + ".request.json"), derived)
-        candidate = dict(row, arm=CANDIDATE, request_sha256=replay.digest(derived), request_bytes=len(derived),
-                         context_framing=framing_version, body_digest_matches=True,
-                         reference="transformed:" + row["arm"] + ":" + args.framing,
-                         transform={"framing": args.framing, "system_bytes_added": len(target_framing) - len(source_framing),
-                                    "serialization": "python-json-canonical"})
-        for key in ("delivery_matches_reference", "gold_matches_reference", "request_matches_baseline"):
-            candidate.pop(key, None)
-        rows.append(dict(row))
-        rows.append(candidate)
+        base = dict(row)
+        for key in ("unchanged_from_baseline", "changed_candidates"):
+            base.pop(key, None)
+        if "delivery_matches_reference" not in base:
+            require((row["cohort"], row["question_id"]) in reference_flags, "source_reference_flags_missing")
+            base.update(reference_flags[(row["cohort"], row["question_id"])])
+            base["reference"] = "inherited:" + str(row.get("reference"))
+        rows.append(base)
+        for name, arm in zip(presentations, CANDIDATES):
+            derived_messages, meta = present(name, messages, row)
+            derived_body = dict(body, messages=derived_messages)
+            derived = json.dumps(derived_body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            require(rc.request_messages(derived)[-1] == messages[-1], "transform_touched_question")
+            replay.private_write(directory / (arm + ".request.json"), derived)
+            candidate = dict(base, arm=arm, request_sha256=replay.digest(derived), request_bytes=len(derived),
+                             context_framing=PRESENTATIONS[name]["framing"], body_digest_matches=True,
+                             message_roles=[message["role"] for message in derived_messages],
+                             reference="transformed:" + row["arm"] + ":" + name,
+                             transform={"presentation": name, "serialization": "python-json-canonical",
+                                        **{key: value for key, value in meta.items() if key != "citation_labels"}})
+            if "citation_labels" in meta:
+                candidate["citation_labels"] = meta["citation_labels"]
+            for key in ("delivery_matches_reference", "gold_matches_reference", "request_matches_baseline"):
+                candidate.pop(key, None)
+            rows.append(candidate)
     require(len(rows) == QUESTIONS * len(ARMS), "transform_incomplete")
+    mark_unchanged(rows, lambda row: (requests / case_name(row["cohort"], row["question_id"])
+                                      / (row["arm"] + ".request.json")).read_bytes())
     document = {**{key: manifest[key] for key in ("version", "kind", "reference", "harness", "endpoint_counters")},
                 "recorded_at_utc": now(), "baseline_captures_sha256": manifest.get("baseline_captures_sha256"),
                 "source_captures_sha256": replay.digest((source / "captures.json").read_bytes()),
-                "transform": {"framing": args.framing, "source_arm": args.source_arm, "candidate_arm": CANDIDATE,
-                              "source_framing_sha256": replay.digest(source_framing.encode()),
-                              "target_framing_sha256": replay.digest(target_framing.encode())},
+                "transform": {"presentations": presentations, "source_arm": args.source_arm, "candidate_arms": list(CANDIDATES),
+                              "framings": {name: PRESENTATIONS[name]["framing"] for name in presentations},
+                              "sentences_sha256": {"chronology": replay.digest(CHRONOLOGY_SENTENCE.encode()),
+                                                   "one_block": replay.digest(ONE_BLOCK_SENTENCES.encode()),
+                                                   "conflicts": replay.digest(CONFLICTS_SENTENCE.encode())}},
                 "rows": rows, "summary": capture_summary(rows)}
     replay.private_write(output / "captures.json", replay.canonical(document) + b"\n")
     print(json.dumps({"captures": len(rows), **document["summary"], "transform": document["transform"],
@@ -389,17 +720,34 @@ def count(args):
 
 # --------------------------------------------------------------------------- declaration
 
+def job_arms(rows):
+    """Per question, the arms that need answers: the baseline plus every changed candidate; nothing for a
+    question whose candidates are all unchanged (their true difference is zero by construction)."""
+    by_question = {}
+    for row in rows:
+        by_question.setdefault((row["cohort"], row["question_id"]), {})[row["arm"]] = row
+    out = {}
+    for question, arms in by_question.items():
+        changed = [arm for arm in CANDIDATES if arm in arms and not arms[arm].get("unchanged_from_baseline")]
+        out[question] = [BASELINE] + changed if changed else []
+    return out
+
+
 def jobs_for(rows):
-    """Dispatch order: replicate, then question as captured; the arm order alternates by question and replicate."""
+    """Dispatch order: replicate, then question as captured; the arm order rotates by question and replicate
+    (for two arms it alternates). Unchanged (question, candidate) pairs have no job."""
     questions = []
     for row in rows:
         if (row["cohort"], row["question_id"]) not in questions:
             questions.append((row["cohort"], row["question_id"]))
+    needed = job_arms(rows)
     jobs = []
     for replicate in range(REPLICATES):
         for position, (cohort, qid) in enumerate(questions):
-            order = ARMS if (position + replicate) % 2 == 0 else tuple(reversed(ARMS))
-            jobs.extend({"arm": arm, "cohort": cohort, "question_id": qid, "replicate": replicate} for arm in order)
+            shift = (position + replicate) % len(ARMS)
+            order = ARMS[shift:] + ARMS[:shift]
+            jobs.extend({"arm": arm, "cohort": cohort, "question_id": qid, "replicate": replicate}
+                        for arm in order if arm in needed[(cohort, qid)])
     return jobs
 
 
@@ -407,11 +755,35 @@ def declare(args):
     output = args.output.absolute()
     manifest = load_captures(output)
     counts_document = json.loads((output / "counts.json").read_text())
-    worst = sum(Decimal(value["worst_case_usd_all_replicates"]) for value in counts_document["totals"].values())
-    require(worst <= SPENDING_CAP_USD, "worst_case_exceeds_cap")
     require(not (output / "declaration.json").exists(), "declaration_exists")
     require(not replay.git("status", "--porcelain", "--", "scripts", "Tests/Evaluation", "Sources"), "sources_not_committed")
     jobs = jobs_for(manifest["rows"])
+    counted = {(row["arm"], row["cohort"], row["question_id"]): row for row in counts_document["rows"]}
+    rows = {(row["arm"], row["cohort"], row["question_id"]): row for row in manifest["rows"]}
+    price = rc.pricing(READER)
+    worst = Decimal(sum(price.microusd(counted[(job["arm"], job["cohort"], job["question_id"])]["input_tokens"],
+                                       rc.max_output(READER, rows[(job["arm"], job["cohort"], job["question_id"])]))
+                        for job in jobs)) / Decimal(10**6)
+    cap = Decimal(str(args.cap_usd)) if getattr(args, "cap_usd", None) is not None else SPENDING_CAP_USD
+    require(worst <= cap, "worst_case_exceeds_cap")
+    unchanged = {arm: sorted(case_name(row["cohort"], row["question_id"]) for row in manifest["rows"]
+                             if row["arm"] == arm and row.get("unchanged_from_baseline")) for arm in CANDIDATES}
+    generated_questions = sorted({case_name(job["cohort"], job["question_id"]) for job in jobs})
+    reuse = None
+    missing_baseline = [case_name(cohort, qid) for (cohort, qid), arms in job_arms(manifest["rows"]).items() if not arms]
+    if missing_baseline:
+        require(getattr(args, "reuse_score", None) is not None and getattr(args, "reuse_arm", None), "reuse_score_required")
+        prior = json.loads(args.reuse_score.read_text())
+        require(prior.get("kind") == "exchange-packed-score", "reuse_score_invalid")
+        rates = {}
+        for question in missing_baseline:
+            value = prior["per_question"].get(question, {}).get(args.reuse_arm)
+            require(isinstance(value, list) and len(value) == 2, "reuse_score_question_missing")
+            rates[question] = value[0]
+        reuse = {"score_sha256": replay.digest(args.reuse_score.read_bytes()), "path_name": args.reuse_score.name,
+                 "arm": args.reuse_arm, "set_id": prior.get("set_id"), "questions": rates,
+                 "rule": "both arms of a question with no generated answer take this earlier run's per-question accept "
+                         "rate for the named arm; the pair is a tie and does not move D"}
     reader = rc.READERS[READER]
     declaration = {
         "version": VERSION, "declared_at_utc": now(), "authorization": args.authorization or AUTHORIZATION,
@@ -429,10 +801,11 @@ def declare(args):
                    "in order; no sampling parameter, seed or Qwen template field is sent",
         "output_limit": "the step 3 run's maximum_output per input plus a 2,048-token thinking allowance",
         "replicates": REPLICATES, "jobs": jobs, "generation_limit": len(jobs), "workers": WORKERS,
+        "unchanged_requests": unchanged, "generated_questions": generated_questions, "reuse": reuse,
         "retry_rule": f"codes {list(rc.RETRYABLE)} are retried at most {len(rc.RETRY_DELAYS)} times after "
                       f"{list(rc.RETRY_DELAYS)} seconds; any other failure is final and recorded; a response cut at "
                       "its output limit keeps its text as incomplete_result",
-        "spending_cap_usd": str(SPENDING_CAP_USD), "worst_case_usd": str(worst),
+        "spending_cap_usd": str(cap), "worst_case_usd": str(worst),
         "cap_rule": "before each dispatch, spent plus that request's worst case (counted input, full output limit) "
                     "must not exceed the cap; spend uses billed usage at the declared prices",
         "judge": "the default verdict judge: gemini_judge.py, prompt set v4, three replicates, majority vote, on one "
@@ -448,7 +821,10 @@ def declare(args):
     }
     replay.private_write(output / "declaration.json", replay.canonical(declaration) + b"\n")
     replay.private_write(output / "ledger.jsonl", b"")
-    print(json.dumps({"jobs": len(jobs), "worst_case_usd": str(worst), "cap_usd": str(SPENDING_CAP_USD),
+    print(json.dumps({"jobs": len(jobs), "worst_case_usd": str(worst), "cap_usd": str(cap),
+                      "generated_questions": len(generated_questions),
+                      "unchanged_requests": {arm: len(values) for arm, values in unchanged.items()},
+                      "reused_questions": len(reuse["questions"]) if reuse else 0,
                       "declaration_sha256": replay.digest((output / "declaration.json").read_bytes())}))
 
 
@@ -634,10 +1010,11 @@ def bootstrap_interval(differences, seed, resamples=BOOTSTRAP_RESAMPLES):
     return means[int(0.025 * resamples)], means[int(math.ceil(0.975 * resamples)) - 1]
 
 
-def paired(per_question, questions, seed):
+def paired(per_question, questions, seed, candidate=None):
     """Mean accept rates (points), D, its interval and the sign test over `questions`."""
+    candidate = candidate or CANDIDATE
     base = [per_question[question][BASELINE] for question in questions]
-    cand = [per_question[question][CANDIDATE] for question in questions]
+    cand = [per_question[question][candidate] for question in questions]
     differences = [100 * (c - b) for b, c in zip(base, cand)]
     low, high = bootstrap_interval(differences, seed)
     better = sum(1 for value in differences if value > 0)
@@ -675,11 +1052,14 @@ def score(args):
         labels = [value.get("verdict") for value in labels_document["labels"].get(key["item_id"], [{}, {}, {}])]
         verdicts[key["row_index"]] = replay.majority_of_three(labels)
     per_question, samples, gold, declines = {}, {}, {}, {}
+    manifest = load_captures(output)
+    capture_rows = {(row["arm"], row["cohort"], row["question_id"]): row for row in manifest["rows"]}
+    for row in manifest["rows"]:
+        gold.setdefault(case_name(row["cohort"], row["question_id"]), {})[row["arm"]] = row["gold_delivery"]
     for entry in entries:
         question = case_name(entry["cohort"], entry["question_id"])
         verdict = verdicts.get(entry["row_index"])
         samples.setdefault(question, {}).setdefault(entry["arm"], []).append(verdict)
-        gold.setdefault(question, {})[entry["arm"]] = entry["capture"]["gold_delivery"]
         if entry["answer"] is not None:
             outcome = v5plan.decline_outcome(entry["answer"])["outcome"]
             declines.setdefault(entry["arm"], []).append((v5plan.is_decline(outcome), entry["capture"]["gold_delivery"],
@@ -687,18 +1067,47 @@ def score(args):
     for question, arms in samples.items():
         per_question[question] = {arm: sum(1 for value in values if value == "accept") / REPLICATES
                                   for arm, values in arms.items()}
+    # Unchanged pairs: the candidate takes the baseline's generated rate, or both take the earlier run's.
+    reuse = declaration.get("reuse") or {}
+    reused, tied = [], {arm: [] for arm in CANDIDATES}
+    for question in sorted(gold):
+        for arm in CANDIDATES:
+            row = capture_rows.get((arm,) + tuple(question.split("--", 1)))
+            if row is None or not row.get("unchanged_from_baseline") or arm in per_question.get(question, {}):
+                continue
+            if BASELINE in per_question.get(question, {}):
+                per_question[question][arm] = per_question[question][BASELINE]
+            else:
+                require(question in (reuse.get("questions") or {}), "reuse_rate_missing")
+                per_question.setdefault(question, {})[BASELINE] = reuse["questions"][question]
+                per_question[question][arm] = reuse["questions"][question]
+                if question not in reused:
+                    reused.append(question)
+            tied[arm].append(question)
+    for question, arms in per_question.items():
+        require(set(arms) == set(ARMS), "arm_rates_incomplete")
     seed = replay.digest((output / "declaration.json").read_bytes())
     counted = sorted(question for question in per_question if not question.endswith(tuple(EXCLUDED_FROM_COUNTS)))
-    overall = paired(per_question, counted, seed)
-    cohorts = {cohort: paired(per_question, [q for q in counted if q.startswith(cohort + "--")], seed)
-               for cohort in COHORTS}
-    transitions = {}
-    for question in counted:
-        before, after = gold[question][BASELINE], gold[question][CANDIDATE]
-        group = ("same_delivery" if before == after else
-                 "gained_whole" if after == "whole" else "lost_whole" if before == "whole" else "changed_not_whole")
-        transitions.setdefault(group, []).append(question)
-    by_transition = {group: paired(per_question, questions, seed) for group, questions in sorted(transitions.items())}
+    require(len(counted) == QUESTIONS - len(EXCLUDED_FROM_COUNTS), "counted_questions_incomplete")
+    results = {}
+    for arm in CANDIDATES:
+        overall_arm = paired(per_question, counted, seed, arm)
+        cohorts_arm = {cohort: paired(per_question, [q for q in counted if q.startswith(cohort + "--")], seed, arm)
+                       for cohort in COHORTS}
+        transitions = {}
+        for question in counted:
+            before, after = gold[question][BASELINE], gold[question][arm]
+            group = ("same_delivery" if before == after else
+                     "gained_whole" if after == "whole" else "lost_whole" if before == "whole" else "changed_not_whole")
+            transitions.setdefault(group, []).append(question)
+        results[arm] = {"overall": overall_arm, "cohorts": cohorts_arm,
+                        "decision": decide(overall_arm, cohorts_arm,
+                                           float(declaration["decision_rule"].get("promote_minimum_points", 0))),
+                        "by_gold_transition": {group: paired(per_question, questions, seed, arm)
+                                               for group, questions in sorted(transitions.items())},
+                        "unchanged_tied_questions": len(tied[arm])}
+    overall, cohorts = results[CANDIDATE]["overall"], results[CANDIDATE]["cohorts"]
+    by_transition = results[CANDIDATE]["by_gold_transition"]
     decline_table = {arm: {"answers": len(values), "declines": sum(1 for value in values if value[0]),
                            "false_declines_gold_whole": sum(1 for value in values if value[0] and value[1] == "whole"
                                                             and not value[2])}
@@ -707,14 +1116,17 @@ def score(args):
                                        and verdicts.get(entry["row_index"]) == label)
                             for label in ("accept", "reject", "unknown")} for arm in ARMS}
     verdict_counts["missing"] = sum(1 for entry in entries if entry["row_index"] not in verdicts)
-    tokens = {arm: statistics.median(entry["record"]["input_tokens"] for entry in entries
-                                     if entry["arm"] == arm and entry["record"].get("input_tokens")) for arm in ARMS}
+    tokens = {}
+    for arm in ARMS:
+        values = [entry["record"]["input_tokens"] for entry in entries if entry["arm"] == arm and entry["record"].get("input_tokens")]
+        tokens[arm] = statistics.median(values) if values else None
     document = {"version": VERSION, "kind": "exchange-packed-score", "recorded_at_utc": now(),
                 "set_id": key_document["set_id"], "judge": labels_document.get("judge"),
                 "labels_declaration_sha256": labels_document.get("declaration_sha256"),
                 "decision_rule": declaration["decision_rule"], "overall": overall, "cohorts": cohorts,
-                "decision": decide(overall, cohorts, float(declaration["decision_rule"].get("promote_minimum_points", 0))),
-                "by_gold_transition": by_transition,
+                "decision": results[CANDIDATE]["decision"],
+                "by_gold_transition": by_transition, "candidates": results,
+                "reused_questions": reused, "reuse": reuse or None,
                 "gold_delivery": {arm: {kind: sum(1 for q in counted if gold[q][arm] == kind)
                                         for kind in ("whole", "partial", "none", "no_gold_turns")} for arm in ARMS},
                 "declines": decline_table, "verdicts": verdict_counts, "median_input_tokens": tokens,
@@ -723,9 +1135,8 @@ def score(args):
                 "per_question": {question: {arm: [per_question[question][arm], gold[question][arm]] for arm in ARMS}
                                  for question in sorted(per_question)}}
     replay.private_write(output / "score.json", replay.canonical(document) + b"\n")
-    print(json.dumps({key: document[key] for key in ("overall", "cohorts", "decision", "by_gold_transition",
-                                                      "gold_delivery", "declines", "verdicts", "median_input_tokens")},
-                     indent=1))
+    print(json.dumps({key: document[key] for key in ("candidates", "gold_delivery", "declines", "verdicts",
+                                                      "median_input_tokens", "reused_questions")}, indent=1))
 
 
 def main(argv=None):
@@ -735,7 +1146,8 @@ def main(argv=None):
         command = commands.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
         command.add_argument("--baseline-arm", default=BASELINE, choices=SELECTABLE_ARMS)
-        command.add_argument("--candidate-arm", default=CANDIDATE, choices=SELECTABLE_ARMS)
+        command.add_argument("--candidate-arm", nargs="+", default=[CANDIDATE], choices=SELECTABLE_ARMS,
+                             help="one or more candidate arms, each compared with the baseline")
         command.add_argument("--promote-minimum-points", type=float, default=PROMOTE_MINIMUM_POINTS,
                              help="declared promotion threshold on D in points (recorded by declare)")
         if name in ("capture", "judge-set"):
@@ -748,9 +1160,14 @@ def main(argv=None):
         if name == "transform":
             command.add_argument("--source-output", type=Path, required=True, help="a capture output directory")
             command.add_argument("--source-arm", required=True, choices=SELECTABLE_ARMS)
-            command.add_argument("--framing", required=True, choices=sorted(FRAMING_TRANSFORMS))
+            command.add_argument("--presentation", "--framing", dest="presentations", nargs="+", required=True,
+                                 choices=sorted(PRESENTATIONS), help="one presentation per candidate arm, in order")
         if name == "declare":
             command.add_argument("--authorization", default=None, help="who authorized this run, when and how")
+            command.add_argument("--cap-usd", type=float, default=None, help="generation cap at the declared rate")
+            command.add_argument("--reuse-score", type=Path, default=None,
+                                 help="an earlier run's score.json for questions with no generated baseline")
+            command.add_argument("--reuse-arm", default=None, help="the arm of --reuse-score to take rates from")
         if name == "score":
             command.add_argument("--labels", type=Path, required=True, help="the judge's labels for judge-set")
     args = parser.parse_args(argv)

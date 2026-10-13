@@ -71,8 +71,12 @@ PARITY_PAIRS = (("exchange_adjacent", "exchange_adjacent_rebuild"), ("exchange_p
 PARITY_ARMS = tuple(rebuild for _, rebuild in PARITY_PAIRS)
 PERSISTENT_INDEX_LABEL = "persistent_sidecar"
 REBUILD_INDEX_LABEL = "in_memory_per_turn"
+# October 13, 2026 retrieval variants (docs/RETRIEVAL-VARIANTS.md): passage
+# windows for long turns, role-weighted scoring and pseudo-relevance feedback,
+# each an explicit policy over exchange_packed's caps and window.
+VARIANT_ARMS = ("exchange_passages", "exchange_roles", "exchange_prf", "exchange_roles_prf")
 ARMS = ("recent_only", "lexical", "hybrid", ORDINARY_SEND_ARM, "exchange_lexical", "exchange_adjacent",
-        "exchange_packed", "exchange_wide", "exchange_leads", "exchange_wide_leads") + GLOBAL_ARMS + PARITY_ARMS
+        "exchange_packed", "exchange_wide", "exchange_leads", "exchange_wide_leads") + VARIANT_ARMS + GLOBAL_ARMS + PARITY_ARMS
 PRIMARY_ARM = ORDINARY_SEND_ARM
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
@@ -342,8 +346,10 @@ def load_cohort(name, source):
         sizes = {event["id"]: len(event["text"].encode()) for event in events}
         positives = [label["event_id"] for label in history["source_labels"] if label.get("has_answer") is True]
         require(all(identifier in sizes for identifier in positives), "positive_label_unresolved")
+        # The reference answer is read by the scorer only (passage-aware delivery below).
         cases.append({"question_id": probe["question_id"], "question_type": probe["question_type"],
             "abstention": probe["abstention"], "events": events, "sizes": sizes, "positives": positives,
+            "answer": probe.get("answer"), "texts": {event["id"]: event["text"] for event in events},
             "question": {key: probe[key] for key in ("project_id", "conversation_key", "prompt", "question_time")},
             "projection_sha256": digest(canonical({"events": events, "question": {key: probe[key] for key in (
                 "project_id", "conversation_key", "prompt", "question_time")}}))})
@@ -414,7 +420,7 @@ def run_process(binary, mode, document, scratch: Path, label):
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def run_case(case, binary, configuration, store_root, scratch, ingestion_sha, rebuild):
+def run_case(case, binary, configuration, store_root, scratch, ingestion_sha, rebuild, arms=ARMS):
     key = digest(canonical([ingestion_sha, case["projection_sha256"]]))
     cache = store_root / key
     if rebuild:
@@ -422,7 +428,7 @@ def run_case(case, binary, configuration, store_root, scratch, ingestion_sha, re
     base = {"version": 1, "cache_directory": str(cache), "events": case["events"], "question": case["question"],
             "configuration": configuration}
     # The selection process never receives annotations.
-    selection = run_process(binary, "select", {**base, "arms": list(ARMS), "declared_source_ids": None},
+    selection = run_process(binary, "select", {**base, "arms": list(arms), "declared_source_ids": None},
                             scratch, "select")
     control = None
     if not case["abstention"] and case["positives"]:
@@ -458,12 +464,54 @@ def coverage(attempt, sizes):
     return whole, partial
 
 
+def normalized_answer_text(value):
+    """Lower-cased text with whitespace runs collapsed, for the answer-string test."""
+    return " ".join(str(value).lower().split())
+
+
+def delivered_ranges(attempt, identifier, size):
+    """Byte ranges of one source that the attempt delivered (recent sources are whole)."""
+    ranges = [(0, size)] if identifier in attempt.get("recent_source_ids", []) else []
+    ranges += [(item["offset"], item["offset"] + item["bytes"]) for item in attempt.get("evidence", [])
+               if item["event_id"] == identifier]
+    return sorted(ranges)
+
+
+def answer_in_turn(case, identifier):
+    """Whether the reference answer string occurs literally in the turn (scorer only)."""
+    text = (case.get("texts") or {}).get(identifier)
+    answer = case.get("answer")
+    if text is None or answer is None:
+        return None
+    needle = normalized_answer_text(answer)
+    return bool(needle) and needle in normalized_answer_text(text)
+
+
+def answer_covered(attempt, case, identifier, whole):
+    """Passage-aware delivery of one positive turn (R2p): delivered whole, or, when the reference answer
+    string occurs literally in the turn, some delivered range of the turn contains an occurrence. A turn
+    whose text does not contain the answer string keeps the whole-turn test. The answer text is read only
+    here, by the scorer; None when the case has no reference answer or the turn is unknown."""
+    if whole:
+        return True
+    present = answer_in_turn(case, identifier)
+    if not present:
+        return present
+    text = case["texts"][identifier]
+    needle = normalized_answer_text(case["answer"])
+    raw = text.encode()
+    for start, end in delivered_ranges(attempt, identifier, len(raw)):
+        if needle in normalized_answer_text(raw[start:end].decode("utf-8", "ignore")):
+            return True
+    return False
+
+
 def score_attempt(attempt, case):
     positives = case["positives"]
     if attempt is None or not attempt.get("preparation_completed"):
         failure = None if attempt is None else attempt.get("failure") or attempt.get("failure_stage")
         return {"failure": failure or "missing_attempt", "candidate": 0, "whole": 0, "partial": 0,
-                "positives": len(positives), "turns": []}
+                "answer_covered": 0, "positives": len(positives), "turns": []}
     whole, partial = coverage(attempt, case["sizes"])
     recent = set(attempt.get("recent_source_ids", []))
     ranks = {}
@@ -494,17 +542,22 @@ def score_attempt(attempt, case):
             turns.append({"recent": identifier in recent, "candidate_rank": None,
                           "candidate": identifier in recent or unit is not None,
                           "whole": identifier in whole, "partial": identifier in partial,
+                          "answer_covered": answer_covered(attempt, case, identifier, identifier in whole),
+                          "answer_in_turn": answer_in_turn(case, identifier),
                           "block_rank": unit[0] if unit else None, "unit_kind": unit[1] if unit else None,
                           "block_disposition": unit[2] if unit else None})
             continue
         turns.append({"recent": identifier in recent, "candidate_rank": ranks.get(identifier),
                       "candidate": identifier in recent or identifier in ranks or identifier in whole,
-                      "whole": identifier in whole, "partial": identifier in partial})
+                      "whole": identifier in whole, "partial": identifier in partial,
+                      "answer_covered": answer_covered(attempt, case, identifier, identifier in whole),
+                      "answer_in_turn": answer_in_turn(case, identifier)})
         if attempt.get("exchange") is not None:
             turns[-1]["block_rank"], turns[-1]["block_disposition"] = blocks.get(identifier, (None, None))
     return {"failure": None, "positives": len(positives), "turns": turns,
             "candidate": sum(t["candidate"] for t in turns), "whole": sum(t["whole"] for t in turns),
             "partial": sum(t["partial"] for t in turns),
+            "answer_covered": sum(bool(t["answer_covered"]) for t in turns),
             "trace_omitted": bool(attempt.get("trace_omitted")),
             "candidate_list": packed is not None,
             "delivered_outside_candidates": sum(t["whole"] and not t["candidate"] for t in turns) if packed is not None else None,
@@ -545,7 +598,7 @@ def rate(numerator, denominator):
             "fraction": round(numerator / denominator, 4) if denominator else None}
 
 
-def summarize(rows):
+def summarize(rows, arms=ARMS):
     answerable = [row for row in rows if row["feasibility"] not in ("not_answerable",)]
     # Infeasible cases leave the R denominators. Control failures stay in them.
     eligible = [row for row in answerable if not row["feasibility"].startswith("infeasible")]
@@ -554,23 +607,29 @@ def summarize(rows):
     for row in rows:
         summary["feasibility"][row["feasibility"]] = summary["feasibility"].get(row["feasibility"], 0) + 1
     categories = sorted({row["question_type"] for row in rows})
-    for arm in ARMS:
+    for arm in arms:
         scored = [(row, row["arms"][arm]) for row in eligible]
         r1 = sum(s["failure"] is None and s["candidate"] == s["positives"] for _, s in scored)
         r2 = sum(s["failure"] is None and s["whole"] == s["positives"] for _, s in scored)
+        r2p = sum(s["failure"] is None and s.get("answer_covered", 0) == s["positives"] for _, s in scored)
         turns = sum(s["positives"] for _, s in scored)
+        answer_turns = sum(sum(bool(t.get("answer_in_turn")) for t in s["turns"]) for _, s in scored)
         by_category = {}
         for category in categories:
             subset = [s for row, s in scored if row["question_type"] == category]
             by_category[category] = {"cases": len(subset),
                 "r1": sum(s["failure"] is None and s["candidate"] == s["positives"] for s in subset),
-                "r2": sum(s["failure"] is None and s["whole"] == s["positives"] for s in subset)}
+                "r2": sum(s["failure"] is None and s["whole"] == s["positives"] for s in subset),
+                "r2p": sum(s["failure"] is None and s.get("answer_covered", 0) == s["positives"] for s in subset)}
         all_attempts = [row["arms"][arm] for row in rows]
         summary["arms"][arm] = {
             "r1_candidate_recall": rate(r1, len(scored)),
             "r2_delivered_recall": rate(r2, len(scored)),
+            "r2p_answer_delivered_recall": rate(r2p, len(scored)),
             "turn_candidate": rate(sum(s["candidate"] for _, s in scored), turns),
             "turn_delivered_whole": rate(sum(s["whole"] for _, s in scored), turns),
+            "turn_answer_covered": rate(sum(s.get("answer_covered", 0) for _, s in scored), turns),
+            "turn_answer_string_in_turn": rate(answer_turns, turns),
             "turn_delivered_any_bytes": rate(sum(s["partial"] for _, s in scored), turns),
             "by_category": by_category,
             "failures": sum(s["failure"] is not None for s in all_attempts),
@@ -677,7 +736,7 @@ def global_semantic_summary(rows):
     return result
 
 
-def known_miss_rows(rows):
+def known_miss_rows(rows, arms=ARMS):
     result = {}
     for row in rows:
         if row["question_id"] in KNOWN_MISSES:
@@ -685,7 +744,7 @@ def known_miss_rows(rows):
                 "positives": row["positives"],
                 "arms": {arm: {"candidate": row["arms"][arm]["candidate"], "whole": row["arms"][arm]["whole"],
                                "turns": row["arms"][arm]["turns"], "failure": row["arms"][arm]["failure"]}
-                         for arm in ARMS}}
+                         for arm in arms}}
     return result
 
 
@@ -699,6 +758,8 @@ def run(args):
     cases, cohort, configuration = load_cohort(args.cohort, args.source)
     if args.limit:
         cases = cases[:args.limit]
+    arms = tuple(args.arms) if getattr(args, "arms", None) else ARMS
+    require(all(arm in ARMS for arm in arms) and len(set(arms)) == len(arms), "unknown_arm")
     cache_root = (ROOT / ".build/retrieval-harness").absolute()
     cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     print("Compiling captured Boros sources with the delivery harness.", flush=True)
@@ -710,13 +771,13 @@ def run(args):
         with tempfile.TemporaryDirectory(prefix="boros-retrieval-harness-") as temporary:
             scratch = Path(temporary)
             os.chmod(scratch, 0o700)
-            print(f"Running {len(cases)} histories x {len(ARMS)} arms offline; no answering requests.", flush=True)
+            print(f"Running {len(cases)} histories x {len(arms)} arms offline; no answering requests.", flush=True)
             done = [0]
             lock = threading.Lock()
 
             def work(case):
                 selection, control = run_case(case, binary, configuration, cache_root / "stores", scratch,
-                                              implementation["ingestion_sha256"], args.rebuild_stores)
+                                              implementation["ingestion_sha256"], args.rebuild_stores, arms)
                 with lock:
                     done[0] += 1
                     if done[0] % 10 == 0 or done[0] == len(cases):
@@ -737,15 +798,15 @@ def run(args):
                 "semantic": cache.get("semantic"), "exchange_index": cache.get("exchange_index"),
                 "runner_started": any(item.get("runner_started") for item in attempts.values())
                     or any(item.get("runner_started") for item in ((control or {}).get("attempts") or [])),
-                "arms": {arm: score_attempt(attempts.get(arm), case) for arm in ARMS},
-                "diagnostics": {arm: diagnostic(attempts.get(arm)) for arm in ARMS if arm != "recent_only"},
+                "arms": {arm: score_attempt(attempts.get(arm), case) for arm in arms},
+                "diagnostics": {arm: diagnostic(attempts.get(arm)) for arm in arms if arm != "recent_only"},
                 "ordinary_send_equivalence": ordinary_send_equivalence(attempts),
                 "exchange_index_parity": exchange_index_parity(attempts)})
         parity = endpoint.parity(args.live_tokenizer)
     finally:
         endpoint.stop()
     require(not any(row["runner_started"] for row in rows), "answer_runner_started")
-    summary = summarize(rows)
+    summary = summarize(rows, arms)
     semantic = [row["semantic"] or {} for row in rows]
     report = {"retrieval_harness_version": 1, "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
         "purpose": "P1 offline candidate and delivered recall for the ordinary selected-Qwen path",
@@ -765,6 +826,10 @@ def run(args):
                  "exchange_wide": "evidence-allowance variant selected-model-context-components-v3-exchange-wide, pinned: the exchange_packed query, ranking and packer with a 16,000-token evidence cap, 64 spans, a 48-block window and a 40 KiB delivery audit; no semantic index (docs/EVIDENCE-ALLOWANCE.md)",
                  "exchange_leads": "lead-priority variant selected-model-context-components-v3-exchange-leads, pinned: exchange_packed's caps and window, every candidate lead packed before any reply or neighbor (docs/EVIDENCE-ALLOWANCE.md)",
                  "exchange_wide_leads": "lead-priority variant selected-model-context-components-v3-exchange-wide-leads, pinned: exchange_wide's caps and window, every candidate lead packed before any reply or neighbor (docs/EVIDENCE-ALLOWANCE.md)",
+                 "exchange_passages": "retrieval variant selected-model-context-components-v3-exchange-passages, pinned: exchange_packed's query, ranking, caps and window; a source over 1,280 bytes is delivered as a 256-byte head plus up to two query-centred 800-byte windows instead of whole pages (docs/RETRIEVAL-VARIANTS.md)",
+                 "exchange_roles": "retrieval variant selected-model-context-components-v3-exchange-roles, pinned: exchange_packed with term hits in assistant turns weighted 0.5 of user-turn hits, ranked over the in-memory rebuild (docs/RETRIEVAL-VARIANTS.md)",
+                 "exchange_prf": "retrieval variant selected-model-context-components-v3-exchange-prf, pinned: exchange_packed with up to five pseudo-relevance-feedback terms from the top three blocks at weight 0.3, ranked over the in-memory rebuild (docs/RETRIEVAL-VARIANTS.md)",
+                 "exchange_roles_prf": "retrieval variant selected-model-context-components-v3-exchange-roles-prf, pinned: the roles scoring with feedback terms from its top three blocks, re-ranked under the same role weights, over the in-memory rebuild (docs/RETRIEVAL-VARIANTS.md)",
                  "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
                  "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)",
                  "exchange_adjacent_rebuild": "exchange_adjacent over the per-turn in-memory rebuild (parity arm; the policy reads the persistent index)",
@@ -774,12 +839,13 @@ def run(args):
             "r1_exchange_packed": f"every annotated positive turn is in recent context or among the candidate units (sources of the top {PACKED_CANDIDATE_BLOCK_DEPTH} ranked exchange blocks and their adjacent opposite-role neighbors) recorded before packing",
             "r1_exchange_wide": f"as r1_exchange_packed over the top {WIDE_CANDIDATE_BLOCK_DEPTH} ranked blocks; a deeper window raises R1 by construction, so R2 decides",
             "r2": "every annotated positive turn is delivered whole (union of delivered byte ranges covers the source) after component token fitting and admission",
+            "r2p": "passage-aware delivery: every annotated positive turn is delivered whole or, when the reference answer string occurs literally in the turn (lower-cased, whitespace collapsed), some delivered byte range of that turn contains an occurrence; a turn without the answer string keeps the whole-turn test, so r2p >= r2 by construction; turn_answer_string_in_turn reports how many positive turns the string test can apply to",
             "feasible": "a separate declared-source control delivers every positive turn whole with no evidence exclusions under the same caps",
             "denominator": "answerable cases minus infeasible ones; preparation and control failures stay in it"},
         "tokenizer": {"sha256": TOKENIZER_SHA256, "parity": parity},
         "endpoint_counters": endpoint.counters,
         "implementation": implementation,
-        "summary": summary, "known_misses": known_miss_rows(rows),
+        "summary": summary, "known_misses": known_miss_rows(rows, arms), "run_arms": list(arms),
         "global_semantic": global_semantic_summary(rows),
         "exchange_index_parity": exchange_index_parity_summary(rows),
         "exchange_index_build": {"milliseconds_p50": percentile([(row.get("exchange_index") or {}).get("milliseconds") for row in rows], 0.5),
@@ -802,10 +868,11 @@ def run(args):
                         "store caches are reused across runs; ingestion and indexing timings come from the build that created them",
                         "the parity sample covers a deterministic subset of counted strings, not every request"]}
     private_write(output, canonical(report) + b"\n")
-    for arm in ARMS:
+    for arm in arms:
         values = summary["arms"][arm]
         print(json.dumps({"arm": arm, "r1": values["r1_candidate_recall"], "r2": values["r2_delivered_recall"],
-                          "turns_whole": values["turn_delivered_whole"], "failures": values["failures"]}, sort_keys=True))
+                          "r2p": values["r2p_answer_delivered_recall"], "turns_whole": values["turn_delivered_whole"],
+                          "turns_answer_covered": values["turn_answer_covered"], "failures": values["failures"]}, sort_keys=True))
     print(json.dumps({"ordinary_send_equivalence": report["ordinary_send_equivalence"]}, sort_keys=True))
     print(json.dumps({"exchange_index_parity": report["exchange_index_parity"]}, sort_keys=True))
     print(json.dumps({"feasibility": summary["feasibility"], "parity": parity, "endpoint": endpoint.counters}, sort_keys=True))
@@ -825,6 +892,7 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0, help="Run only the first N declared cases (diagnostic)")
     parser.add_argument("--rebuild-stores", action="store_true")
+    parser.add_argument("--arms", nargs="+", default=None, help="Run only these arms (default: every arm)")
     args = parser.parse_args()
     args.source = args.source or default_source()
     if not (1 <= args.workers <= 16 and 0 <= args.parity_sample <= 1024 and args.limit >= 0):

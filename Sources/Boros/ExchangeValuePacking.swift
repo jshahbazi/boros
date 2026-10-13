@@ -114,13 +114,15 @@ extension ExchangeBlockQuery {
         /// lead delivered; one that outranks its lead waits for that lead.
         static func plan(index: ExchangeCorpus, ranked: [RankedBlock], maximumSpans: Int, tokenBudget: Int,
                          auditBudget: Int, selectionVersion: String, depth: Int = candidateBlockDepth,
-                         leadsFirst: Bool = false) throws -> Plan {
+                         leadsFirst: Bool = false, passageTerms: Set<String>? = nil) throws -> Plan {
             let blocks = try candidates(index: index, ranked: ranked, depth: depth)
             var codes = blocks.map { Array(repeating: "?", count: $0.units.count) }
             var costs: [Int: (spans: [MemoryHit], tokens: Int, audit: Int)] = [:]
             func cost(_ source: Int) throws -> (spans: [MemoryHit], tokens: Int, audit: Int) {
                 if let known = costs[source] { return known }
-                let spans = try pages(index, source)
+                // The passages variant delivers a long source as a head plus
+                // query-centred windows; every other policy delivers whole pages.
+                let spans = try passageTerms.map { try passages(index, source, terms: $0) } ?? pages(index, source)
                 var tokens = 0, audit = 0
                 for span in spans {
                     tokens += try estimatedTokens(span, selectionVersion: selectionVersion)
@@ -254,7 +256,7 @@ extension ExchangeBlockQuery {
         static func select(recent: ContextSnapshot, binding: ContextSelectionBinding, store: MemoryStore,
             conversationID: String, projectID: String, excludingEventID: String, episodeLease: EpisodeLease?,
             componentPolicy: ContextComponentPolicy, index: ExchangeCorpus, ranked: [RankedBlock], tokenBudget: Int,
-            baseAudit: [String: Any]) throws -> ContextSnapshot {
+            baseAudit: [String: Any], passageTerms: Set<String>? = nil) throws -> ContextSnapshot {
             func retrieval(_ exchange: [String: Any], from snapshot: ContextSnapshot) throws -> Data {
                 var value = try snapshot.retrievalAuditJSON.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
                 value.removeValue(forKey: "selection_trace")
@@ -281,7 +283,7 @@ extension ExchangeBlockQuery {
             let auditBudget = max(0, auditLimit - admissionHeadroomBytes - probeSlackBytes - base)
             var plan = try plan(index: index, ranked: ranked, maximumSpans: componentPolicy.evidenceSpans,
                 tokenBudget: tokenBudget, auditBudget: auditBudget, selectionVersion: binding.version, depth: depth,
-                leadsFirst: leadsFirst)
+                leadsFirst: leadsFirst, passageTerms: passageTerms)
             var trimmed = 0
             while true {
                 var result = try ContextAssembler.addEvidence(to: recent, store: store, conversationID: conversationID,

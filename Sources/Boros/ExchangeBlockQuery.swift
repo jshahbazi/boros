@@ -115,7 +115,43 @@ enum ExchangeBlockQuery {
         let sources: [Int]
         let bytes: Int
         let frequency: [String: Int]
+        /// Term counts over the block's human-role sources only (the lead and
+        /// any further user turns); read by the role-weighted scoring variant.
+        let userFrequency: [String: Int]
     }
+
+    // MARK: Declared parameters of the October 13 retrieval variants
+    // (docs/RETRIEVAL-VARIANTS.md). All were committed before measurement.
+
+    /// `roles`: a term hit in an assistant turn counts this fraction of a hit
+    /// in a user turn. 0 would drop assistant-only matches, which the
+    /// assistant-recall cases need; 1 is the plain scoring.
+    static let assistantTermWeight = 0.5
+    static let rolesScoringVersion = "idf-term-coverage-sqrt-byte-cost-roles-v1"
+    /// `prf`: expansion terms come from the top `feedbackBlocks` blocks of the
+    /// plain ranking, at most `feedbackTermLimit` of them, each weighted
+    /// `feedbackTermWeight` in the relevance sum. A term qualifies when it is
+    /// not a query term, has at least `feedbackMinimumTermLength` characters,
+    /// is not all digits, and occurs in at least `feedbackMinimumBlocks` of
+    /// those blocks; terms are ordered by block count times IDF, then by term.
+    static let feedbackBlocks = 3
+    static let feedbackTermLimit = 5
+    static let feedbackTermWeight = 0.3
+    static let feedbackMinimumBlocks = 2
+    static let feedbackMinimumTermLength = 3
+    static let feedbackScoringVersion = "idf-term-coverage-sqrt-byte-cost-prf-v1"
+    static let rolesFeedbackScoringVersion = "idf-term-coverage-sqrt-byte-cost-roles-prf-v1"
+    /// `passages`: a source above this many bytes (about 400 tokens at the
+    /// declared 3.2 bytes per token) is delivered as a head of about
+    /// `passageHeadBytes` plus up to `passageWindowsPerSource` query-centred
+    /// windows of about `passageWindowBytes` (about 250 tokens), each snapped
+    /// to whitespace within `passageSnapBytes`. A shorter source is whole.
+    static let passageSourceThresholdBytes = 1_280
+    static let passageWindowBytes = 800
+    static let passageHeadBytes = 256
+    static let passageWindowsPerSource = 2
+    static let passageSnapBytes = 64
+    static let passagePackingVersion = "exchange-passage-windows-v1"
 
     struct RankedBlock {
         let block: Int
@@ -151,11 +187,17 @@ enum ExchangeBlockQuery {
                 var pending: [Int] = []
                 func complete() {
                     guard !pending.isEmpty else { return }
-                    var frequency: [String: Int] = [:]
-                    for index in pending { for term in ExchangeBlockQuery.terms(sources[index].text) { frequency[term, default: 0] += 1 } }
+                    var frequency: [String: Int] = [:], userFrequency: [String: Int] = [:]
+                    for index in pending {
+                        let human = sources[index].reference.role == .human
+                        for term in ExchangeBlockQuery.terms(sources[index].text) {
+                            frequency[term, default: 0] += 1
+                            if human { userFrequency[term, default: 0] += 1 }
+                        }
+                    }
                     for term in frequency.keys { frequencyOfDocuments[term, default: 0] += 1 }
                     blocks.append(Block(sources: pending, bytes: pending.reduce(0) { $0 + sources[$1].reference.byteCount },
-                        frequency: frequency))
+                        frequency: frequency, userFrequency: userFrequency))
                     pending.removeAll()
                 }
                 for index in indices {
@@ -178,6 +220,57 @@ enum ExchangeBlockQuery {
         func rank(_ query: Query) -> [RankedBlock] {
             ExchangeBlockQuery.rank(query, blockCount: blocks.count, bytes: { blocks[$0].bytes },
                 frequency: { blocks[$0].frequency[$1, default: 0] }, idf: idf)
+        }
+
+        /// The policy's ranking: the shared scoring, or one of the in-memory
+        /// scoring variants. `feedback` receives the expansion terms the
+        /// feedback variant chose (empty otherwise), for the audit.
+        func rank(_ query: Query, policy: ContextComponentPolicy, feedback: inout [String]) -> [RankedBlock] {
+            feedback = []
+            guard policy.weighsUserTurns || policy.expandsQueryFromFeedback else { return rank(query) }
+            // Roles: a term's contribution is scaled by its user-turn share, so
+            // hits in assistant turns count `assistantTermWeight` of user hits.
+            let share: ((Int, String) -> Double)? = policy.weighsUserTurns ? { block, term in
+                let user = Double(blocks[block].userFrequency[term, default: 0])
+                let total = Double(blocks[block].frequency[term, default: 0])
+                return total > 0 ? (user + ExchangeBlockQuery.assistantTermWeight * (total - user)) / total : 0
+            } : nil
+            var weights = Dictionary(uniqueKeysWithValues: query.terms.map { ($0, 1.0) })
+            func ranked() -> [RankedBlock] {
+                ExchangeBlockQuery.rankWeighted(terms: weights, anchors: query.anchors, blockCount: blocks.count,
+                    bytes: { blocks[$0].bytes }, frequency: { blocks[$0].frequency[$1, default: 0] }, idf: idf, share: share)
+            }
+            let first = share == nil ? rank(query) : ranked()
+            guard policy.expandsQueryFromFeedback else { return first }
+            // Feedback: expansion terms from the top blocks of the first
+            // ranking, re-ranked under the same weights and share.
+            feedback = feedbackTerms(query, ranked: first)
+            guard !feedback.isEmpty else { return first }
+            for term in feedback { weights[term] = ExchangeBlockQuery.feedbackTermWeight }
+            return ranked()
+        }
+
+        /// Pseudo-relevance feedback: the qualifying terms of the top ranked
+        /// blocks, by block count then IDF then term, at most the declared limit.
+        func feedbackTerms(_ query: Query, ranked: [RankedBlock]) -> [String] {
+            let top = ranked.prefix(ExchangeBlockQuery.feedbackBlocks)
+            guard !query.terms.isEmpty, !top.isEmpty else { return [] }
+            var counts: [String: Int] = [:]
+            for entry in top {
+                for term in blocks[entry.block].frequency.keys where !query.terms.contains(term)
+                    && term.count >= ExchangeBlockQuery.feedbackMinimumTermLength
+                    && !term.unicodeScalars.allSatisfy({ CharacterSet.decimalDigits.contains($0) }) {
+                    counts[term, default: 0] += 1
+                }
+            }
+            let qualifying = counts.filter { $0.value >= ExchangeBlockQuery.feedbackMinimumBlocks }
+            // Block count times IDF: a rare term shared by the top blocks
+            // outranks a ubiquitous one; ties go to the lexically first term.
+            return qualifying.sorted {
+                let left = Double($0.value) * idf($0.key), right = Double($1.value) * idf($1.key)
+                if left != right { return left > right }
+                return $0.key < $1.key
+            }.prefix(ExchangeBlockQuery.feedbackTermLimit).map(\.key)
         }
 
         func members(_ block: Int) throws -> [Int] { blocks[block].sources }
@@ -222,6 +315,34 @@ enum ExchangeBlockQuery {
             let relevance = matches.reduce(0.0) { $0 + idf($1) * (1 + min(2, log(Double(frequency(index, $1))))) }
             let anchors = query.anchors.filter { anchor in anchor.allSatisfy { frequency(index, $0) > 0 } }.count
             ranked.append(RankedBlock(block: index, anchorMatches: anchors,
+                score: relevance / sqrt(1 + Double(bytes(index)) / 512)))
+        }
+        return ranked.sorted {
+            if $0.anchorMatches != $1.anchorMatches { return $0.anchorMatches > $1.anchorMatches }
+            if $0.score != $1.score { return $0.score > $1.score }
+            return $0.block > $1.block
+        }
+    }
+
+    /// The scoring variants' ranking: the shared formula with a weight per
+    /// term and, optionally, a per-(block, term) share that scales the term's
+    /// contribution (the roles variant passes the user-turn share). With unit
+    /// weights and no share it computes the same quantity as `rank`; the
+    /// shared function is kept unchanged so the persistent index and the
+    /// rebuild stay bit-identical. Anchor matching is unchanged.
+    static func rankWeighted(terms: [String: Double], anchors: [Set<String>], blockCount: Int, bytes: (Int) -> Int,
+                             frequency: (Int, String) -> Int, idf: (String) -> Double,
+                             share: ((Int, String) -> Double)? = nil) -> [RankedBlock] {
+        var ranked: [RankedBlock] = []
+        let ordered = terms.keys.sorted()
+        for index in 0..<blockCount {
+            let matches = ordered.filter { frequency(index, $0) > 0 }
+            guard !matches.isEmpty else { continue }
+            let relevance = matches.reduce(0.0) {
+                $0 + terms[$1]! * (share?(index, $1) ?? 1.0) * idf($1) * (1 + min(2, log(Double(frequency(index, $1)))))
+            }
+            let anchorMatches = anchors.filter { anchor in anchor.allSatisfy { frequency(index, $0) > 0 } }.count
+            ranked.append(RankedBlock(block: index, anchorMatches: anchorMatches,
                 score: relevance / sqrt(1 + Double(bytes(index)) / 512)))
         }
         return ranked.sorted {
@@ -336,6 +457,100 @@ enum ExchangeBlockQuery {
 
     static func pages(_ corpus: ExchangeCorpus, _ source: Int) throws -> [MemoryHit] {
         pages(reference: try corpus.reference(source), text: try corpus.text(source))
+    }
+
+    /// Passage windows (`passages` variant): a source at or below
+    /// `passageSourceThresholdBytes` is its whole pages. A longer one becomes
+    /// a head window from offset 0 plus up to `passageWindowsPerSource`
+    /// windows, each the `passageWindowBytes` span holding the most
+    /// query-term word hits (ties to the earlier span), chosen greedily with
+    /// covered hits removed. Boundaries snap outward to whitespace within
+    /// `passageSnapBytes`, never split a UTF-8 scalar, and overlapping windows
+    /// merge. A window that would exceed a store page is split into pages.
+    /// With no hit, the head alone is delivered. Every excerpt is the exact
+    /// bytes of the source at its offset, which the assembler re-reads.
+    static func passages(reference: MemorySourceReference, text: String, terms: Set<String>) -> [MemoryHit] {
+        let bytes = Array(text.utf8)
+        guard bytes.count > passageSourceThresholdBytes, !terms.isEmpty else { return pages(reference: reference, text: text) }
+        // Word hits: alphanumeric runs (the term function's separator) whose
+        // folded form is a query term, by byte offset of the run.
+        var hits: [Int] = [], runStart: Int? = nil, offset = 0
+        func closeRun(at end: Int) {
+            guard let start = runStart else { return }
+            runStart = nil
+            let word = String(decoding: bytes[start..<end], as: UTF8.self)
+            if ExchangeTerms.terms(word).contains(where: { terms.contains($0) }) { hits.append(start) }
+        }
+        for scalar in text.unicodeScalars {
+            let width = String(scalar).utf8.count
+            if CharacterSet.alphanumerics.contains(scalar) { if runStart == nil { runStart = offset } }
+            else { closeRun(at: offset) }
+            offset += width
+        }
+        closeRun(at: bytes.count)
+        func isSpace(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x0A || byte == 0x09 || byte == 0x0D }
+        func scalarStart(_ position: Int) -> Int {
+            var value = min(max(position, 0), bytes.count)
+            while value > 0 && value < bytes.count && bytes[value] & 0xC0 == 0x80 { value -= 1 }
+            return value
+        }
+        /// Start moves back to just after the nearest earlier whitespace;
+        /// end moves forward to the nearest later whitespace; both within the
+        /// snap distance, else to a scalar boundary.
+        func snapped(_ start: Int, _ end: Int) -> (Int, Int) {
+            var left = scalarStart(start), right = scalarStart(end)
+            if left > 0 {
+                var probe = left
+                while probe > 0 && left - probe < passageSnapBytes && !isSpace(bytes[probe - 1]) { probe -= 1 }
+                if probe == 0 || isSpace(bytes[probe - 1]) { left = probe }
+            }
+            if right < bytes.count {
+                var probe = right
+                while probe < bytes.count && probe - right < passageSnapBytes && !isSpace(bytes[probe]) { probe += 1 }
+                if probe == bytes.count || isSpace(bytes[probe]) { right = probe }
+            }
+            return (left, right)
+        }
+        var windows: [(Int, Int)] = []
+        var remaining = hits
+        let half = passageWindowBytes / 2
+        while windows.count < passageWindowsPerSource, !remaining.isEmpty {
+            var best: (start: Int, covered: Int) = (0, -1)
+            for hit in remaining {
+                let start = max(0, min(hit - half, bytes.count - passageWindowBytes))
+                let covered = remaining.filter { $0 >= start && $0 < start + passageWindowBytes }.count
+                if covered > best.covered || (covered == best.covered && start < best.start) { best = (start, covered) }
+            }
+            let end = min(bytes.count, best.start + passageWindowBytes)
+            windows.append(snapped(best.start, end))
+            remaining.removeAll { $0 >= best.start && $0 < end }
+        }
+        windows.append(snapped(0, min(bytes.count, passageHeadBytes)))
+        windows.sort { $0.0 != $1.0 ? $0.0 < $1.0 : $0.1 < $1.1 }
+        var merged: [(Int, Int)] = []
+        for window in windows {
+            if let last = merged.last, window.0 <= last.1 { merged[merged.count - 1] = (last.0, max(last.1, window.1)) }
+            else { merged.append(window) }
+        }
+        var result: [MemoryHit] = []
+        for (start, end) in merged where end > start {
+            var cursor = start
+            while cursor < end {
+                var limit = min(end, cursor + MemoryStore.maximumPageBytes)
+                while limit < end && limit > cursor && bytes[limit] & 0xC0 == 0x80 { limit -= 1 }
+                result.append(MemoryHit(eventID: reference.eventID, conversationID: reference.conversationID,
+                    projectID: reference.projectID, role: reference.role, status: reference.status,
+                    createdAt: reference.createdAt, digest: reference.digest, totalBytes: reference.byteCount,
+                    excerptOffset: cursor, excerpt: String(decoding: bytes[cursor..<limit], as: UTF8.self),
+                    sourceTime: reference.sourceTime))
+                cursor = limit
+            }
+        }
+        return result
+    }
+
+    static func passages(_ corpus: ExchangeCorpus, _ source: Int, terms: Set<String>) throws -> [MemoryHit] {
+        passages(reference: try corpus.reference(source), text: try corpus.text(source), terms: terms)
     }
 
     /// A lower bound on `pages` and on the sum of `estimatedTokens` over
@@ -502,17 +717,23 @@ enum ExchangeBlockQuery {
         let sourceCount: Int
         let blockCount: Int
         var indexLabel: String
+        /// Expansion terms chosen by the feedback scoring variant; empty otherwise.
+        var feedbackTerms: [String] = []
     }
 
     static func rankedCorpus(source: IndexSource, store: MemoryStore, projectID: String, query: Query,
                              excluded: ExactSourceIDs, lease: EpisodeLease?,
-                             diagnostics: ExchangeIndexDiagnostics? = nil) throws -> RankedCorpus {
+                             diagnostics: ExchangeIndexDiagnostics? = nil,
+                             policy: ContextComponentPolicy? = nil) throws -> RankedCorpus {
         switch source {
         case .inMemoryRebuild:
             let loaded = try load(store: store, projectID: projectID, excluding: excluded, lease: lease)
             let index = Index(sources: loaded.sources)
-            return RankedCorpus(corpus: index, ranked: index.rank(query), frontier: loaded.frontier,
-                sourceCount: loaded.sources.count, blockCount: index.blocks.count, indexLabel: rebuildIndexLabel)
+            var chosen: [String] = []
+            let ranked = policy.map { index.rank(query, policy: $0, feedback: &chosen) } ?? index.rank(query)
+            return RankedCorpus(corpus: index, ranked: ranked, frontier: loaded.frontier,
+                sourceCount: loaded.sources.count, blockCount: index.blocks.count, indexLabel: rebuildIndexLabel,
+                feedbackTerms: chosen)
         case .persistent:
             do {
                 let view = try ExchangeIndexView.open(store: store, projectID: projectID, query: query, excluding: excluded,
@@ -542,18 +763,24 @@ enum ExchangeBlockQuery {
         let input = try HistoricalQueryFormulation.input(prompt, utf8Range: lexicalQueryUTF8Range)
         let query = Self.query(input)
         let excluded = ExactSourceIDs(recent.recentSourceIDs + [excludingEventID])
-        let source = diagnosticIndexSource
-        var audit: [String: Any] = ["version": version, "scoring_version": scoringVersion,
+        // The scoring variants rank over the in-memory rebuild, whatever the
+        // diagnostic source; the audit's `index` label records that.
+        let source: IndexSource = componentPolicy.requiresInMemoryRanking ? .inMemoryRebuild : diagnosticIndexSource
+        let scoring = componentPolicy.weighsUserTurns && componentPolicy.expandsQueryFromFeedback ? rolesFeedbackScoringVersion
+            : componentPolicy.weighsUserTurns ? rolesScoringVersion
+            : componentPolicy.expandsQueryFromFeedback ? feedbackScoringVersion : scoringVersion
+        var audit: [String: Any] = ["version": version, "scoring_version": scoring,
             "query_term_count": query.terms.count, "quoted_anchor_count": query.anchors.count,
             "query_terms_sha256": MeteredRetrieval.digest(Data(query.terms.sorted().joined(separator: "\n").utf8)),
             "index": source == .persistent ? persistentIndexLabel : rebuildIndexLabel]
+        if componentPolicy.weighsUserTurns { audit["assistant_term_weight"] = assistantTermWeight }
         var hits: [MemoryHit] = []
         if !query.terms.isEmpty {
             let tracker = diagnostics ?? ExchangeIndexDiagnostics()
             let loaded: RankedCorpus
             do {
                 loaded = try rankedCorpus(source: source, store: store, projectID: projectID, query: query,
-                    excluded: excluded, lease: episodeLease, diagnostics: tracker)
+                    excluded: excluded, lease: episodeLease, diagnostics: tracker, policy: componentPolicy)
             } catch Failure.snapshotLimit where source == .persistent {
                 // Product path only; the diagnostic rebuild source still refuses.
                 return try lexicalFallback(recent: recent, store: store, conversationID: conversationID,
@@ -562,6 +789,12 @@ enum ExchangeBlockQuery {
                     reason: tracker.fallback ? unindexedLimitFallbackReason : indexLimitFallbackReason)
             }
             audit["index"] = loaded.indexLabel
+            if componentPolicy.expandsQueryFromFeedback {
+                // Content-free: the count and a digest of the chosen terms.
+                audit["feedback_term_count"] = loaded.feedbackTerms.count
+                audit["feedback_term_weight"] = feedbackTermWeight
+                audit["feedback_terms_sha256"] = MeteredRetrieval.digest(Data(loaded.feedbackTerms.sorted().joined(separator: "\n").utf8))
+            }
             let ranked = loaded.ranked
             let budget = Int(Double(componentPolicy.evidenceTokens) * evidenceTokenFraction)
             if componentPolicy.packsExchangeValueDensity {
@@ -571,9 +804,11 @@ enum ExchangeBlockQuery {
                 audit["block_count"] = loaded.blockCount
                 audit["matched_block_count"] = ranked.count
                 audit["anchor_matched_block_count"] = ranked.filter { $0.anchorMatches > 0 }.count
+                if componentPolicy.packsPassageWindows { audit["passage_packing_version"] = passagePackingVersion }
                 return try ValuePacking.select(recent: recent, binding: binding, store: store, conversationID: conversationID,
                     projectID: projectID, excludingEventID: excludingEventID, episodeLease: episodeLease,
-                    componentPolicy: componentPolicy, index: loaded.corpus, ranked: ranked, tokenBudget: budget, baseAudit: audit)
+                    componentPolicy: componentPolicy, index: loaded.corpus, ranked: ranked, tokenBudget: budget, baseAudit: audit,
+                    passageTerms: componentPolicy.packsPassageWindows ? query.terms : nil)
             }
             let packing = try pack(index: loaded.corpus, ranked: ranked, maximumSpans: componentPolicy.evidenceSpans,
                 tokenBudget: budget, adjacent: componentPolicy.packsAdjacentExchanges, selectionVersion: binding.version)
@@ -603,6 +838,10 @@ enum ExchangeBlockQuery {
 
     /// Retrieval audit `mode` of a turn that the policy's exchange selection served.
     static func retrievalMode(_ policy: ContextComponentPolicy) -> String {
+        if policy.packsPassageWindows { return "exchange_passages" }
+        if policy.weighsUserTurns && policy.expandsQueryFromFeedback { return "exchange_roles_prf" }
+        if policy.weighsUserTurns { return "exchange_roles" }
+        if policy.expandsQueryFromFeedback { return "exchange_prf" }
         if policy.packsExchangeValueDensity {
             switch (policy.widensEvidenceWindow, policy.packsLeadsFirst) {
             case (false, false): return "exchange_packed"

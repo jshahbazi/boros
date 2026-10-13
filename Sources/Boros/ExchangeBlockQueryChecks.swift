@@ -378,6 +378,113 @@ enum ExchangeBlockQueryChecks {
             && Set([packed, wide, leadsPolicy, wideLeads].map(\.version)).count == 4
             && ExchangeBlockQuery.retrievalMode(leadsPolicy) == "exchange_leads"
             && ExchangeBlockQuery.retrievalMode(wideLeads) == "exchange_wide_leads" && decodedWideLeads == wideLeads
+        // October 13 retrieval variants (docs/RETRIEVAL-VARIANTS.md): explicit,
+        // versioned, distinct policies that keep exchange_packed's caps and
+        // window; the scoring variants rank over the in-memory rebuild.
+        let passagesPolicy = try ContextComponentPolicy.selectedQwenExchangePassages.validated()
+        let rolesPolicy = try ContextComponentPolicy.selectedQwenExchangeRoles.validated()
+        let feedbackPolicy = try ContextComponentPolicy.selectedQwenExchangeFeedback.validated()
+        let decodedPassages = try JSONDecoder().decode(ContextComponentPolicy.self, from: passagesPolicy.canonicalData())
+        result["exchange_variant_policies_are_explicit_distinct_and_keep_packed_caps"] = passagesPolicy.packsPassageWindows
+            && rolesPolicy.weighsUserTurns && feedbackPolicy.expandsQueryFromFeedback
+            && !packed.packsPassageWindows && !packed.weighsUserTurns && !packed.expandsQueryFromFeedback
+            && [passagesPolicy, rolesPolicy, feedbackPolicy].allSatisfy { $0.packsExchangeValueDensity && $0.usesExchangeQuery
+                && $0.evidenceTokens == packed.evidenceTokens && $0.evidenceSpans == packed.evidenceSpans
+                && $0.candidateBlockDepth == 32 && $0.deliveryAuditBytes == 32_768 && !$0.widensEvidenceWindow && !$0.packsLeadsFirst }
+            && Set([packed, wide, leadsPolicy, wideLeads, passagesPolicy, rolesPolicy, feedbackPolicy].map(\.version)).count == 7
+            && ExchangeBlockQuery.retrievalMode(passagesPolicy) == "exchange_passages"
+            && ExchangeBlockQuery.retrievalMode(rolesPolicy) == "exchange_roles"
+            && ExchangeBlockQuery.retrievalMode(feedbackPolicy) == "exchange_prf"
+            && rolesPolicy.requiresInMemoryRanking && feedbackPolicy.requiresInMemoryRanking
+            && !passagesPolicy.requiresInMemoryRanking && !packed.requiresInMemoryRanking && decodedPassages == passagesPolicy
+            && ContextComponentPolicy.currentSelectedQwen == packed
+        // Roles: two blocks of equal bytes; the term sits in the user turn of
+        // one and in the assistant turn of the other. Plain scoring ties (the
+        // later block wins); role weighting ranks the user-turn block first
+        // and still ranks the assistant-only match.
+        let roleIndex = ExchangeBlockQuery.Index(sources: [
+            source("ua", "r1", .human, "Synthetic zebra question", 1),
+            source("ub", "r1", .assistant, "Synthetic reply", 2),
+            source("va", "r2", .human, "Synthetic question", 3),
+            source("vb", "r2", .assistant, "Synthetic zebra reply", 4),
+        ])
+        let zebra = ExchangeBlockQuery.query("zebra")
+        var chosen: [String] = []
+        let plainRoles = roleIndex.rank(zebra)
+        let weighted = roleIndex.rank(zebra, policy: rolesPolicy, feedback: &chosen)
+        func lead(_ index: ExchangeBlockQuery.Index, _ entry: ExchangeBlockQuery.RankedBlock) -> String {
+            index.sources[index.blocks[entry.block].sources[0]].reference.eventID
+        }
+        result["exchange_roles_weights_user_turn_hits_above_assistant_turn_hits"] = plainRoles.count == 2 && weighted.count == 2
+            && plainRoles[0].score == plainRoles[1].score && lead(roleIndex, plainRoles[0]) == "va"
+            && lead(roleIndex, weighted[0]) == "ua" && weighted[0].score == plainRoles[0].score
+            && abs(weighted[1].score - 0.5 * weighted[0].score) < 1e-12
+            && chosen.isEmpty && ExchangeBlockQuery.assistantTermWeight == 0.5
+            && roleIndex.rank(zebra, policy: packed, feedback: &chosen).map(\.block) == plainRoles.map(\.block)
+        // Feedback: the expansion terms are those shared by the top blocks
+        // (not the query's, not short, not numeric), at most five, weighted
+        // 0.3; a block holding only an expansion term becomes a candidate.
+        let feedbackIndex = ExchangeBlockQuery.Index(sources: [
+            source("f1", "p1", .human, "Synthetic zebra habitat savanna grass 2024", 1),
+            source("f2", "p2", .human, "Synthetic zebra savanna water 2024", 2),
+            source("f3", "p3", .human, "Synthetic giraffe savanna acacia", 3),
+            source("f4", "p4", .human, "Unrelated note", 4),
+        ])
+        var terms: [String] = []
+        let expanded = feedbackIndex.rank(zebra, policy: feedbackPolicy, feedback: &terms)
+        let plainFeedback = feedbackIndex.rank(zebra)
+        result["exchange_prf_expands_with_shared_high_idf_terms_at_low_weight"] = plainFeedback.count == 2 && expanded.count == 3
+            && terms == ["savanna", "synthetic"] && lead(feedbackIndex, expanded[2]) == "f3"
+            && expanded[2].score < expanded[1].score && expanded[2].score > 0
+            && Set(expanded.prefix(2).map(\.block)) == Set(plainFeedback.map(\.block))
+            && ExchangeBlockQuery.feedbackTermWeight == 0.3 && ExchangeBlockQuery.feedbackTermLimit == 5
+            && ExchangeBlockQuery.feedbackBlocks == 3 && ExchangeBlockQuery.feedbackMinimumBlocks == 2
+        // Passages: a long source becomes a head plus a query-centred window
+        // whose bytes are exactly the source's at their offsets; a short one
+        // stays whole; the windows never split a scalar or overlap.
+        let longText = "Synthetic head of a long turn. " + String(repeating: "filler words here ", count: 90)
+            + "The zebra habitat is the savanna. " + String(repeating: "more filler ", count: 60) + "caf\u{E9} end"
+        let longReference = source("long", "c9", .human, longText, 9).reference
+        let windows = ExchangeBlockQuery.passages(reference: longReference, text: longText, terms: ["zebra", "habitat"])
+        let longBytes = Array(longText.utf8)
+        let exact = windows.allSatisfy { hit in
+            let end = hit.excerptOffset + hit.excerpt.utf8.count
+            return end <= longBytes.count && Array(hit.excerpt.utf8) == Array(longBytes[hit.excerptOffset..<end])
+                && hit.excerpt.utf8.count <= MemoryStore.maximumPageBytes && hit.totalBytes == longBytes.count
+        }
+        let ordered = zip(windows, windows.dropFirst()).allSatisfy { $0.excerptOffset + $0.excerpt.utf8.count <= $1.excerptOffset }
+        let windowBytes = windows.reduce(0) { $0 + $1.excerpt.utf8.count }
+        let shortText = "Synthetic short zebra note"
+        let shortReference = source("short", "c9", .human, shortText, 10).reference
+        let whole = ExchangeBlockQuery.passages(reference: shortReference, text: shortText, terms: ["zebra"])
+        let headOnly = ExchangeBlockQuery.passages(reference: longReference, text: longText, terms: ["absent"])
+        result["exchange_passages_deliver_a_head_and_query_centred_windows_of_exact_bytes"] = longBytes.count > ExchangeBlockQuery.passageSourceThresholdBytes
+            && windows.count == 2 && windows[0].excerptOffset == 0 && exact && ordered
+            && windows[1].excerpt.contains("zebra habitat") && windowBytes < longBytes.count * 2 / 3
+            && windows[0].excerpt.utf8.count <= ExchangeBlockQuery.passageHeadBytes + ExchangeBlockQuery.passageSnapBytes
+            && windows[1].excerpt.utf8.count <= ExchangeBlockQuery.passageWindowBytes + 2 * ExchangeBlockQuery.passageSnapBytes
+            && whole.count == 1 && whole[0].excerptOffset == 0 && whole[0].excerpt == shortText
+            && headOnly.count == 1 && headOnly[0].excerptOffset == 0
+            && ExchangeBlockQuery.passageSourceThresholdBytes == 1_280 && ExchangeBlockQuery.passageWindowBytes == 800
+            && ExchangeBlockQuery.passageHeadBytes == 256 && ExchangeBlockQuery.passageWindowsPerSource == 2
+        // The packer plans the variant's windows as its spans: the long
+        // reply of the fixture above costs less than half its whole pages
+        // under passage terms, so a budget that holds the windows but not
+        // the whole reply admits it windowed and refuses it whole.
+        let a1Source = index.blocks.flatMap(\.sources).first { index.sources[$0].reference.eventID == "a1" }!
+        let a1Whole = try ExchangeBlockQuery.pages(index, a1Source).reduce(0) { $0 + (try ExchangeBlockQuery.estimatedTokens($1, selectionVersion: version)) }
+        let a1Windows = try ExchangeBlockQuery.passages(index, a1Source, terms: ["zebra", "habitat"])
+            .reduce(0) { $0 + (try ExchangeBlockQuery.estimatedTokens($1, selectionVersion: version)) }
+        let windowBudget = tight.estimatedTokens + a1Windows + 8
+        let passagePlan = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: windowBudget,
+            auditBudget: 100_000, selectionVersion: version, passageTerms: ["zebra", "habitat"])
+        let wholePlan = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: windowBudget,
+            auditBudget: 100_000, selectionVersion: version)
+        let passageA1 = passagePlan.hits.filter { $0.eventID == "a1" }
+        result["exchange_passages_packer_admits_windows_of_a_long_reply_the_whole_page_could_not_fit"] = a1Windows * 2 < a1Whole
+            && !wholePlan.hits.contains { $0.eventID == "a1" } && passageA1.count == 2
+            && passageA1.allSatisfy { $0.excerpt.utf8.count < longReply.utf8.count / 2 }
+            && passagePlan.estimatedTokens <= windowBudget && passagePlan.hits.contains { $0.eventID == "h1" }
         let audit = try Packing.audit(plan: tight, index: index, matchedBlocks: ranked.count, tokenBudget: 900,
             auditBudget: 100_000, maximumSpans: 48)
         let auditBytes = try JSONSerialization.data(withJSONObject: audit)

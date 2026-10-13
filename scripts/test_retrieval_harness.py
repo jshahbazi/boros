@@ -63,6 +63,36 @@ class Contracts(unittest.TestCase):
         whole, _ = harness.coverage(attempt(recent=["b"]), case()["sizes"])
         self.assertEqual(whole, {"b"})
 
+    def test_passage_aware_delivery_measure_uses_the_answer_string_only_inside_delivered_ranges(self):
+        text = "The zebra habitat is the savanna; later the answer is forty-two apples.\n" + "filler " * 300
+        case = {"positives": ["e1", "e2"], "sizes": {"e1": len(text.encode()), "e2": 10}, "abstention": False,
+                "answer": "Forty-two  apples", "texts": {"e1": text, "e2": "short turn"}}
+        self.assertTrue(harness.answer_in_turn(case, "e1"))
+        self.assertFalse(harness.answer_in_turn(case, "e2"))
+        self.assertIsNone(harness.answer_in_turn({"texts": {}, "answer": "x"}, "e9"))
+        covering = {"recent_source_ids": [], "evidence": [{"event_id": "e1", "offset": 0, "bytes": 80}]}
+        missing = {"recent_source_ids": [], "evidence": [{"event_id": "e1", "offset": 200, "bytes": 80}]}
+        self.assertTrue(harness.answer_covered(covering, case, "e1", False))
+        self.assertFalse(harness.answer_covered(missing, case, "e1", False))
+        self.assertTrue(harness.answer_covered(missing, case, "e1", True))
+        # A turn without the answer string keeps the whole-turn test.
+        self.assertFalse(harness.answer_covered({"recent_source_ids": [], "evidence": [{"event_id": "e2", "offset": 0, "bytes": 5}]}, case, "e2", False))
+        self.assertTrue(harness.answer_covered({"recent_source_ids": ["e2"], "evidence": []}, case, "e2", True))
+        attempt = {"preparation_completed": True, "recent_source_ids": ["e2"], "candidates": [],
+                   "evidence": [{"event_id": "e1", "offset": 0, "bytes": 80}]}
+        scored = harness.score_attempt(attempt, case)
+        self.assertEqual((scored["whole"], scored["partial"], scored["answer_covered"]), (1, 2, 2))
+        self.assertEqual([t["answer_in_turn"] for t in scored["turns"]], [True, False])
+        rows = [{"question_id": "q", "question_type": "t", "feasibility": "feasible", "arms": {"exchange_packed": scored}}]
+        summary = harness.summarize(rows, ("exchange_packed",))
+        arm = summary["arms"]["exchange_packed"]
+        self.assertEqual((arm["r2_delivered_recall"]["passed"], arm["r2p_answer_delivered_recall"]["passed"]), (0, 1))
+        self.assertEqual(arm["turn_answer_string_in_turn"], {"passed": 1, "cases": 2, "fraction": 0.5})
+        self.assertEqual(arm["by_category"]["t"]["r2p"], 1)
+        for name in harness.VARIANT_ARMS:
+            self.assertIn(name, harness.ARMS)
+        self.assertEqual(harness.VARIANT_ARMS, ("exchange_passages", "exchange_roles", "exchange_prf", "exchange_roles_prf"))
+
     def test_candidates_beyond_declared_depth_do_not_count(self):
         scored = harness.score_attempt(attempt(candidates=[("a", 3), ("b", harness.DECLARED_CANDIDATE_DEPTH)]), case())
         self.assertEqual(scored["candidate"], 1)
