@@ -1,0 +1,714 @@
+{
+  "abstention_questions": 5,
+  "abstention_rule": "question_id ends with _abs",
+  "answerable_questions": 60,
+  "cohort": "heldout-65-v1",
+  "declared_questions": 65,
+  "excluded": {
+    "count": 169,
+    "question_ids": [
+      "001be529",
+      "00ca467f",
+      "01493427",
+      "031748ae_abs",
+      "06878be2",
+      "06f04340",
+      "07b6f563",
+      "0862e8bf_abs",
+      "08f4fc43",
+      "0977f2af",
+      "09d032c9",
+      "0a34ad58",
+      "0bc8ad93",
+      "0ddfec37",
+      "0ddfec37_abs",
+      "0e5e2d1a",
+      "0edc2aef",
+      "0f05491a",
+      "1192316e",
+      "129d1232",
+      "15745da0",
+      "15745da0_abs",
+      "157a136e",
+      "16c90bf4",
+      "184da446",
+      "195a1a1b",
+      "1a1907b4",
+      "1b9b7252",
+      "1c0ddc50",
+      "1c549ce4",
+      "1d4e3b97",
+      "1da05512",
+      "1faac195",
+      "2133c1b5_abs",
+      "2311e44b_abs",
+      "2698e78f",
+      "2788b940",
+      "29f2956b",
+      "29f2956b_abs",
+      "2ce6a0f2",
+      "2ebe6c90",
+      "32260d93",
+      "35a27287",
+      "36580ce8",
+      "38146c39",
+      "3a704032",
+      "3f1e9474",
+      "3fe836c9",
+      "41275add",
+      "42ec0761",
+      "4388e9dd",
+      "4baee567",
+      "4bc144e2",
+      "4d6b87c8",
+      "4dfccbf8",
+      "505af2f5",
+      "50635ada",
+      "51c32626",
+      "54026fce",
+      "577d4d32",
+      "57f827a0",
+      "5a7937c8",
+      "5d3d2817",
+      "60036106",
+      "60bf93ed_abs",
+      "6222b6eb",
+      "6456829e",
+      "65240037",
+      "6a1eabeb",
+      "6ae235be",
+      "6aeb4375_abs",
+      "6b7dfb22",
+      "6cb6f249",
+      "6e984302",
+      "7024f17c",
+      "71a3fd6b",
+      "726462e0",
+      "72e3ee87",
+      "73d42213",
+      "7527f7e2",
+      "75499fd8",
+      "75832dbd",
+      "75f70248",
+      "76d63226",
+      "778164c6",
+      "7a87bd0c",
+      "7a8d0b71",
+      "7e974930",
+      "80ec1f4f_abs",
+      "8550ddae",
+      "8979f9ec",
+      "89941a94",
+      "8a2466db",
+      "8c18457d",
+      "8cf4d046",
+      "8e9d538c",
+      "8ebdbe50",
+      "8fb83627",
+      "92a0aa75",
+      "95228167",
+      "982b5123_abs",
+      "9a707b82",
+      "9ea5eabc",
+      "a11281a2",
+      "a1eacc2a",
+      "a40e080f",
+      "a89d7624",
+      "a96c20ee",
+      "a96c20ee_abs",
+      "afdc33df",
+      "b0479f84",
+      "b320f3f8",
+      "b6025781",
+      "ba358f49",
+      "ba358f49_abs",
+      "bc149d6b",
+      "c8090214",
+      "c8090214_abs",
+      "c8f1aeed",
+      "caf03d32",
+      "cc06de0d",
+      "cc539528",
+      "ccb36322",
+      "ceb54acb",
+      "d24813b1",
+      "d3ab962e",
+      "d6233ab6",
+      "dfde3500",
+      "e493bb7c",
+      "e5ba910e_abs",
+      "eac54adc",
+      "eace081b",
+      "ed4ddc30",
+      "f4f1d8a4_abs",
+      "f523d9fe",
+      "f685340e_abs",
+      "f8c5f88b",
+      "faba32e5",
+      "fca70973",
+      "fea54f57",
+      "gpt4_0a05b494",
+      "gpt4_15e38248",
+      "gpt4_1e4a8aeb",
+      "gpt4_213fd887",
+      "gpt4_2655b836",
+      "gpt4_2d58bcd6",
+      "gpt4_468eb064",
+      "gpt4_4929293b",
+      "gpt4_5438fa52",
+      "gpt4_59c863d7",
+      "gpt4_5dcc0aab",
+      "gpt4_70e84552",
+      "gpt4_7a0daae1",
+      "gpt4_7ddcf75f",
+      "gpt4_7f6b06db",
+      "gpt4_93159ced_abs",
+      "gpt4_ab202e7f",
+      "gpt4_cd90e484",
+      "gpt4_d12ceb0e",
+      "gpt4_d6585ce8",
+      "gpt4_d9af6064",
+      "gpt4_e05b82a6",
+      "gpt4_e072b769",
+      "gpt4_e414231f",
+      "gpt4_ec93e27f",
+      "gpt4_f420262c",
+      "gpt4_f420262d",
+      "gpt4_fa19884d",
+      "gpt4_fe651585"
+    ],
+    "sources": {
+      "framing_v4_temporal_cases.PROJECTION_PINS": 25,
+      "framing_v5_preference_cases.PROJECTION_PINS": 27,
+      "local_longmemeval_qa.CASE_IDS": 7,
+      "longmemeval_independent_cases.CASE_IDS": 14,
+      "native_investigation_hundred_cases.EARLY_CASE_IDS": 30,
+      "native_investigation_hundred_cases.select_rows": 100
+    }
+  },
+  "questions": [
+    {
+      "abstention": false,
+      "question_id": "5a4f22c0",
+      "question_type": "knowledge-update",
+      "rank_sha256": "0447f51fe453a5eda8e7a7a03191eccd0780fb32f814676b7bbffe517189765d",
+      "row_sha256": "51e8dd377c9ed554db790163b2a8f50bb3f084c20779089e6d53730198cfd678"
+    },
+    {
+      "abstention": false,
+      "question_id": "0e4e4c46",
+      "question_type": "knowledge-update",
+      "rank_sha256": "05d7169728a857c46a96593352b75a15040d53da24d3b7ef7254cacf9135ffe2",
+      "row_sha256": "1129c54b4bc977c8f58641f6e32415860cf327add114cd15217868814f192342"
+    },
+    {
+      "abstention": false,
+      "question_id": "affe2881",
+      "question_type": "knowledge-update",
+      "rank_sha256": "077b5f8880bd390fb5fda2543fe7ed776aa8c07d24f25911e0526190f0145d80",
+      "row_sha256": "a0206a5bbe94ca586e27bf2f5bf75bf9fe2ad3aaf51af4f73412dd1b1771942b"
+    },
+    {
+      "abstention": false,
+      "question_id": "7401057b",
+      "question_type": "knowledge-update",
+      "rank_sha256": "07ce9c0b77174989b2c0cffda7406449658edc098c9bb58599e888c3d6962a45",
+      "row_sha256": "696d6edd04bccf0b9b250055c0c45c65bb2fe4feccc0eee449a31d31b07e38e7"
+    },
+    {
+      "abstention": false,
+      "question_id": "06db6396",
+      "question_type": "knowledge-update",
+      "rank_sha256": "092ea32ca9f33ab9184e52628d3c4aec564092ce74a436d3890e171cf47df383",
+      "row_sha256": "c85ecf1d6b35fdc990b0f181dceacf67fef5607a0adeaff55021e065bf6f6ff5"
+    },
+    {
+      "abstention": false,
+      "question_id": "5831f84d",
+      "question_type": "knowledge-update",
+      "rank_sha256": "09657d674612abab072904120e4743fd3c3becd3b0ef5e8dc2acb6dc498c14e6",
+      "row_sha256": "968cd400059fb54a1472b2aa0bd5b2aa650de07f46a4cd462551b43bced0a6d4"
+    },
+    {
+      "abstention": false,
+      "question_id": "9bbe84a2",
+      "question_type": "knowledge-update",
+      "rank_sha256": "0a6d2407dc43fa4484533a70eeaacd925dd9d818a7b59fdd84ef979c213f0cb1",
+      "row_sha256": "6ae8668c140454b2f6d195a254ce2e66164931339bc16fce9f877a5b3b1bb1e9"
+    },
+    {
+      "abstention": false,
+      "question_id": "1cea1afa",
+      "question_type": "knowledge-update",
+      "rank_sha256": "0f104451c3b984a357d59b2e9c46419c415ae8df2280625290a32b5dbe7e1eb5",
+      "row_sha256": "7f36ad587149238acdb1e74d33ef96f1fb0c09d4f5c497d5ebf0f85c34d8648a"
+    },
+    {
+      "abstention": false,
+      "question_id": "031748ae",
+      "question_type": "knowledge-update",
+      "rank_sha256": "17051f8e2356100dd45c2bcbccae3c0df4cffc29316a41c01406258c31d2c32f",
+      "row_sha256": "3af4f4dc3db4d790802f672a6c26810edd1c97d5fe485142cdd98ed5fd5f65df"
+    },
+    {
+      "abstention": false,
+      "question_id": "a2f3aa27",
+      "question_type": "knowledge-update",
+      "rank_sha256": "1d7f9bfaf3f26ba7c4c4766f2997339e0475ddf751fa5b0ebe2d7be798e21e26",
+      "row_sha256": "94255e29962f8a09c670861dea8413374b4a41913411ea2dc97fb04217ad0b04"
+    },
+    {
+      "abstention": false,
+      "question_id": "71315a70",
+      "question_type": "knowledge-update",
+      "rank_sha256": "31ee3ac2cda349c1e2f9d3ba94683851763683296d8c8a9b8d7394d1efe15fe0",
+      "row_sha256": "19506c838fb9fa21205f0b6981fe6d52df130718184884aa03a59e421a518528"
+    },
+    {
+      "abstention": false,
+      "question_id": "26bdc477",
+      "question_type": "knowledge-update",
+      "rank_sha256": "33981c0633fd45a1bc09c1493e2ffc1d6b203891272a743f0c0c856114699b84",
+      "row_sha256": "39daf2f0b1b351d661ac3dc82f47d3fd5f412347eb573fb07f77f73e1ab8bb99"
+    },
+    {
+      "abstention": false,
+      "question_id": "55241a1f",
+      "question_type": "multi-session",
+      "rank_sha256": "08d6a45df52110b10139f3a0bdc4a6f6c65ad337c87143861fc6c03b9a5225a0",
+      "row_sha256": "862b7b82206160a0cc8f13d143a467f06a5d47e2f8de0007fdddafdbcfcc1e82"
+    },
+    {
+      "abstention": false,
+      "question_id": "1f2b8d4f",
+      "question_type": "multi-session",
+      "rank_sha256": "0f14e0c607ef00b65e55aec1e2687db0669622437fd45150a4a727622d1a3630",
+      "row_sha256": "e90bb9203862484e08e7c75556f96b3775fdae7f417850b907617d3385c789b4"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_a56e767c",
+      "question_type": "multi-session",
+      "rank_sha256": "10307a63b306f9f02c2acf951c80325bb6ae42e43b94c1e8a9f8e6f3e2606e1e",
+      "row_sha256": "206ab316e8054d790d2c286f03f94de3149b067e5bc4f165da484cc6ba40bd2b"
+    },
+    {
+      "abstention": false,
+      "question_id": "efc3f7c2",
+      "question_type": "multi-session",
+      "rank_sha256": "1653cd6df8e246d5a8aab7833b80b1a5822aa53ef4bc22592f92c69f16e9e81c",
+      "row_sha256": "1f9be39861c454f62dfd4925d8003d884041d135eb62f05dc22a22a261bf6107"
+    },
+    {
+      "abstention": false,
+      "question_id": "10d9b85a",
+      "question_type": "multi-session",
+      "rank_sha256": "171b1ae5e43431d46ae443bcb71aaf0c8a123bb03ddbeebf244f0d14f05f7ee7",
+      "row_sha256": "7565ed5604a42d46fc9df907d04a904b916d0e7facde19dcc360667ea42412e3"
+    },
+    {
+      "abstention": false,
+      "question_id": "91b15a6e",
+      "question_type": "multi-session",
+      "rank_sha256": "19384598b19526a7ac0a8f4c5d4769cf30108daa48c9b3da8449e9b46323fc48",
+      "row_sha256": "510c21c0cda32bb648811e313283a186dc378e2c0b9a198ab37c3b94b0c6e020"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_2f91af09",
+      "question_type": "multi-session",
+      "rank_sha256": "1a099c10e56894a8285013537ce33973b64690cb069c1c132fd6add00e492e23",
+      "row_sha256": "4f6f36e605bdf6f79920f7bb40519490f398632f5097523deeb3dd7d5d3409e3"
+    },
+    {
+      "abstention": false,
+      "question_id": "87f22b4a",
+      "question_type": "multi-session",
+      "rank_sha256": "1f5a2dc1b1f65910580edeee640a73d7b68b831b2097d90e60f558a0538a01bf",
+      "row_sha256": "a9da2d7c205b09609c2d522e4115daa969f9ea1f9e185fcd990f2be7d3fae8e1"
+    },
+    {
+      "abstention": false,
+      "question_id": "e831120c",
+      "question_type": "multi-session",
+      "rank_sha256": "206c4e0624ee8c795f5e4e0e1d91c60f174940aec6cfb86144094289dc1b276e",
+      "row_sha256": "3bc2fa382f4c170baaaa2694952446c1c7d98f111a48658365aa78012bfacb9f"
+    },
+    {
+      "abstention": false,
+      "question_id": "9ee3ecd6",
+      "question_type": "multi-session",
+      "rank_sha256": "298fc5debd30f259c746caae3550daba1aa24bdc14523b9812241e96f927f08a",
+      "row_sha256": "bbba05e5537e2630f69d8529dbc293d49bb480d2ef38a0516c6c6545d2f71587"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_f2262a51",
+      "question_type": "multi-session",
+      "rank_sha256": "2a8cb4f069f476824b9eaae550e8e18b9fc9850c9b463ef2e991b1d82fcaf128",
+      "row_sha256": "9f5722c05c304839ff17e699b2b162b6d37eff38b42ca15fe27523c3de86189d"
+    },
+    {
+      "abstention": false,
+      "question_id": "46a3abf7",
+      "question_type": "multi-session",
+      "rank_sha256": "2db99960ca0eaf8dd6625457a5818de0ba5983812ecb94cf3039f9552057e34c",
+      "row_sha256": "8b188a6bed4fb991fc52af2d2aead2fbdf4122975dae1873bded91e2c8181106"
+    },
+    {
+      "abstention": false,
+      "question_id": "18dcd5a5",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "0269cfd54658b16709e91d14e6f5d164ca5a1a02b89653b215306cfc04de1436",
+      "row_sha256": "e15dd4c4ba71548b1832ad72879c3fd2638d621e476a18ae780b04a7a3f178b4"
+    },
+    {
+      "abstention": false,
+      "question_id": "58470ed2",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "212a212627c8b55b538fc962b1918e33713f78dbecf2814c9e2242b827ba1700",
+      "row_sha256": "0abfae779c7cf09347fdfa19ddadf13d5e343fedb6dacedcfcbcb672c58a6179"
+    },
+    {
+      "abstention": false,
+      "question_id": "5809eb10",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "305cbab37d566686bdfb01d487356f25d11ffed1c6bd34c6568220c7e0da2982",
+      "row_sha256": "14c7c80de19db342b3f2dbb63e63bf87ba03be749fb72c82fef5a4493690d0fa"
+    },
+    {
+      "abstention": false,
+      "question_id": "352ab8bd",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "32c84961c0ce217f6b3838c8b1a1ef8ef7bd776901fda74f1b8d61e9a0783a10",
+      "row_sha256": "13fba542f8a9a878be1aa249bf9b6e57ca07c7ec5b87cfbd602906332dbf1692"
+    },
+    {
+      "abstention": false,
+      "question_id": "d596882b",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "3355057de1d1d9d879b9571c70c08ce666c1eaff5121e97168f497a5ed686697",
+      "row_sha256": "750c4af4888396b6743a01901c2e7ed7c268ec70739cf7b28fa9a2081dd2d353"
+    },
+    {
+      "abstention": false,
+      "question_id": "1d4da289",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "43195092da32b0a65de9349770ca068141e1477e1cf6c3fb1c069a4475045b23",
+      "row_sha256": "4777d14f2f2da75c4a23df88ae8345fa4da60f7e333228c643ac65d1513cadd2"
+    },
+    {
+      "abstention": false,
+      "question_id": "e9327a54",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "45aa0f8a74e0385da27184211975b12db5e211b5e2fd50b9af3790620c6d7cd0",
+      "row_sha256": "13b5948121fe554189cfeeadb4b3a342e33300038672547fe40d4078a1f0f591"
+    },
+    {
+      "abstention": false,
+      "question_id": "e48988bc",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "51179cb59e5c465f39cd9a5abd852d30d82e7ce91df9519e84ff653e9cc1b914",
+      "row_sha256": "fdcb6e1479d8081dafcfad4dd078eb05adfa0998b8af99870aa8ce869b6631d6"
+    },
+    {
+      "abstention": false,
+      "question_id": "8b9d4367",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "5e58afef350aa1d2c955ba4b43c7c425f2a76afccb45d56b2b88b64b6a9cf91e",
+      "row_sha256": "69256757e2f29f60790f97e417068ff3a5e1bc29fb586cf84c3d70c47ae5679a"
+    },
+    {
+      "abstention": false,
+      "question_id": "b759caee",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "6dcbf8993eb2846fdb6b182626ec4a6bb91fad93958017717a854c9b6bd45895",
+      "row_sha256": "f4ef6af0b43be85d9048002d974ef67225d76061c408f026142872b48869774c"
+    },
+    {
+      "abstention": false,
+      "question_id": "dc439ea3",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "6ea7f04a71df9b419a76980de9df4db2d7332d70a9bd19495cb90963fb59afaa",
+      "row_sha256": "a5472046cf6c161f46a11ee4b316d8e4a1c9d1fa6ce6389cb265a4946ee1e6db"
+    },
+    {
+      "abstention": false,
+      "question_id": "28bcfaac",
+      "question_type": "single-session-assistant",
+      "rank_sha256": "749c68a5fce816896deab5f8f2e018a1c123e71317ae6e6c11b05ad98aab170f",
+      "row_sha256": "c8a92f9198339813abc76f7ed94ed6da5954f7b826651bb9252fa14858ff601e"
+    },
+    {
+      "abstention": false,
+      "question_id": "853b0a1d",
+      "question_type": "single-session-user",
+      "rank_sha256": "00a170a6df11b525612a54471d0dd6c12b3a4a102fbbba0e9f79bc04fa63d6ed",
+      "row_sha256": "5fc2d6bbc70522c309f23a63eeacf50b2af8fb2643fe4814cb68f38ff93b0455"
+    },
+    {
+      "abstention": false,
+      "question_id": "66f24dbb",
+      "question_type": "single-session-user",
+      "rank_sha256": "0656feb449882cbaf4595baab4b67fb635063ca03496b534264a6e40e7da066a",
+      "row_sha256": "c151a8382016d9ae4d47b3aaa9518233ca417a2fc0e678f116ff0c8bd4d682a8"
+    },
+    {
+      "abstention": false,
+      "question_id": "6f9b354f",
+      "question_type": "single-session-user",
+      "rank_sha256": "1762bd4c6daffa25f274c6ab6d0dbafee216fc5c604d7f2b1bf1f0ba8368a096",
+      "row_sha256": "383936bc52c42953ee06a11ea7301bc0c99b196b70cf0f6b9a846541847b4fa7"
+    },
+    {
+      "abstention": false,
+      "question_id": "bc8a6e93",
+      "question_type": "single-session-user",
+      "rank_sha256": "188a8d775eaad66c74053de877b81b69b64d00f2f6b5f54054a5e469c4c17695",
+      "row_sha256": "2e3e30f66f851bbf54840f209663702880045e940c816e1044cf9e0fb4275e38"
+    },
+    {
+      "abstention": false,
+      "question_id": "4fd1909e",
+      "question_type": "single-session-user",
+      "rank_sha256": "226282f3c702b489d1975e835dd3d1db5dd36dcacd0f633ebe6bc2334b2ed34a",
+      "row_sha256": "3dde2ae8518f8baa22da9a0217ebee4d926f0955b3bb2bd195a645c30716b350"
+    },
+    {
+      "abstention": false,
+      "question_id": "37d43f65",
+      "question_type": "single-session-user",
+      "rank_sha256": "28b519cb72adaaab629b5625d610e8c33a535286618cb956134372c19d1e22b4",
+      "row_sha256": "9df6af4c737d864756ed00f2a79d395ff4090daafba54477893b85114b6c04fb"
+    },
+    {
+      "abstention": false,
+      "question_id": "c960da58",
+      "question_type": "single-session-user",
+      "rank_sha256": "29ef7ba892436d9fe08221e2776332291bd94d1b6adecf143697c34fc060027c",
+      "row_sha256": "381efa22c7f9dd29af6f7a52687c8bd09d0577d88f35bbd15fe6469f34ac5362"
+    },
+    {
+      "abstention": false,
+      "question_id": "60d45044",
+      "question_type": "single-session-user",
+      "rank_sha256": "3cb722ee7f98c3381caf06465ff3cfb9456a5815abb4dec2d797d8d9a771009b",
+      "row_sha256": "7f28df66d765c5224578443b91db16f7caeab39c655d7c641ce3a93d81111115"
+    },
+    {
+      "abstention": false,
+      "question_id": "c8c3f81d",
+      "question_type": "single-session-user",
+      "rank_sha256": "4a1e06ca4069bfd5c35888d0f5f5318b49f668fa5217773a9cb770c6703614ef",
+      "row_sha256": "a25c43c2331d9bba94731f2f5723f5bfacc496926d64974bcda8801911479f54"
+    },
+    {
+      "abstention": false,
+      "question_id": "0862e8bf",
+      "question_type": "single-session-user",
+      "rank_sha256": "4a8fb4ddd841205e36d8f3798862aab8dac1facabe6bae90d6a43bddee1cf941",
+      "row_sha256": "eba0993e155e3c46da0d58f4495629cf5a5a9563ef32effffd993fa9dcb0747f"
+    },
+    {
+      "abstention": false,
+      "question_id": "86f00804",
+      "question_type": "single-session-user",
+      "rank_sha256": "4c34bfe47f45c0e948626521d111b0910f14756721f1e14febb591b41c98dc39",
+      "row_sha256": "cc15065c65a7bb582d44b0cc6261bc8cca5d45f90c0295f99408a0be9c502488"
+    },
+    {
+      "abstention": false,
+      "question_id": "dccbc061",
+      "question_type": "single-session-user",
+      "rank_sha256": "5264817e14a9256c945ddde4c080bbf3f07f11563906f0fd3d625250fc36da77",
+      "row_sha256": "3e29be14badaa4a38a9787c22271c24ebb3a13398700eb97ee253e62ffb008ff"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_e061b84f",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "0346733a178087170b4f9078a14b430fb3a03136b434784a8fbfde55bb3949d4",
+      "row_sha256": "3b43cbac18c75f770342e73be4c31ddf7f0af2f569faccc0a9e028773f77e0f0"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_68e94287",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "073ec9d493fd4aca9f386b7318a4e424284ef791dc76d1278dd4c4cc05053292",
+      "row_sha256": "9c851da76bb12dc531b2282f198ec85456b3a2c13279ef6795d1a53ce74ffcbe"
+    },
+    {
+      "abstention": false,
+      "question_id": "b29f3365",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "09d1ef7a351ce6abe0c6f0629e7fcdbefbf5f0bf7f847620bed43dacff5aa751",
+      "row_sha256": "db7c585fd4cabdcb2a6de81f85a5a63f4848ccc791d93d76013a3d45eac4c0f1"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_6dc9b45b",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "0a05e434193605e824981923a2db0457fe3f75dac7db81c1489dd1b363f7b87f",
+      "row_sha256": "77d11ba72373c8ca47f9b160546c99749e7cb0253cd7c08ba002769c0426c059"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_b0863698",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "130bdf7ac698924af751c388e86a171b93d83465c2371a0cf908e52a4b098da0",
+      "row_sha256": "a564a87e2428043c9ed30129bde186ffb9b38a55da06294770de845b53cd21d1"
+    },
+    {
+      "abstention": false,
+      "question_id": "bcbe585f",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "159fc51f378e74dffdbd9e6c2512d937430f692a5974b5518642290fb00e099b",
+      "row_sha256": "c76be6d21a48a33e99eadd329b6255326d0bca52135c564ecef05fc3b66e6dde"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_2312f94c",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "1c828d37d05bb3cccd3e9d0bfee1920768a7df94221eeec7fe679a716347e659",
+      "row_sha256": "24050d6080669700877edfbc4eccc13fe9f950a34950726a5b2d41851be9ae9a"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_45189cb4",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "21828a4657e465fd75a2e320d3de2471064114829307dbb1367e7e79b519ff9a",
+      "row_sha256": "ffc857b058bf2b6f59566d9af80a7fc36bb3f0472b27d8aa72694889f1b0f6c5"
+    },
+    {
+      "abstention": false,
+      "question_id": "9a707b81",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "22bee04dd876af7d5b452380731dcc2e89970a8c51fb7894c0c238808a481d59",
+      "row_sha256": "4fd68772c1b5fc0905e6ef6d8166d340170d3220ef8250948f973c704af446ef"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_88806d6e",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "2452ea46ad9ace59bb803889e86a3809e3a089d08f4d9bac13fe7cdded150a72",
+      "row_sha256": "b2be2814332db232304e1743f2594cbe648b29d37e443bec665b9ebafc2aabdb"
+    },
+    {
+      "abstention": false,
+      "question_id": "gpt4_c27434e8",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "2639dd2642c5f10fb10df610790abfa84c5552752299f7648cf5dbfa855c0c11",
+      "row_sha256": "b4d1ac45b104825a220d6ebd756bc7d3ed8ebd171d30eee9f1a981fad9ec7e00"
+    },
+    {
+      "abstention": false,
+      "question_id": "b46e15ee",
+      "question_type": "temporal-reasoning",
+      "rank_sha256": "28910feb1501cc36ade2f59a32d97de19d216e4d2f7ab5b8ba4ac85b2d171536",
+      "row_sha256": "2c92e19763b2918d355dab336240a8e3146c5b43ca02b7e9b9cdecd69518c821"
+    },
+    {
+      "abstention": true,
+      "question_id": "19b5f2b3_abs",
+      "question_type": "single-session-user",
+      "rank_sha256": "184370033f3ce91c30756f7fb3690d5c92a5f8119f592cbc208593aecd4fd338",
+      "row_sha256": "d04c4d77580893efeb47eecea19a00eec77dfda4ccb1fee5b6fb3ac64adb3d4b"
+    },
+    {
+      "abstention": true,
+      "question_id": "6456829e_abs",
+      "question_type": "multi-session",
+      "rank_sha256": "2655fdacbad24d185cff6db0551085076e77249aee7001f0ce523858337c8b19",
+      "row_sha256": "7da0dd702c69d4be722d438a4666be9b44a2a7cee8bf256477705375fbda8f14"
+    },
+    {
+      "abstention": true,
+      "question_id": "bc8a6e93_abs",
+      "question_type": "single-session-user",
+      "rank_sha256": "4737f64bb6ddc24429244bbf30902a32f612681e8866edf2242d6a0f7ec40dea",
+      "row_sha256": "1e78ed5664cf072ed4858ac027ddbd2053035019c2bd5b75713556eea4e8bdc3"
+    },
+    {
+      "abstention": true,
+      "question_id": "88432d0a_abs",
+      "question_type": "multi-session",
+      "rank_sha256": "5480a9c4a6682946e576e748ef1c354684d1373e91ce66ac2a460ee34824b0ea",
+      "row_sha256": "d9110fb954b53bb6d337e5b5a8b65a0e57bf70e6633aa71a8807ba37ce80afa0"
+    },
+    {
+      "abstention": true,
+      "question_id": "09ba9854_abs",
+      "question_type": "multi-session",
+      "rank_sha256": "5ba82b8ef3cb072e0b80933bbc9d9afcf382fb0fd53576dc0ac0ea685ccefba6",
+      "row_sha256": "03fe584b5ca53f7ee4b82d82d785b5c201c934f9d5586946ce9e78181eec4f3e"
+    }
+  ],
+  "quotas": {
+    "abstention": 5,
+    "answerable_per_type": 12
+  },
+  "rank_domain": "boros-heldout-cohort-v1",
+  "rank_rule": "sha256(rank_domain + NUL + question_id, UTF-8) hex, then question_id",
+  "row_hash_rule": "sha256 of the canonical JSON (sorted keys, compact separators, UTF-8) of the full dataset row",
+  "selection_rule": "Exclude every question_id an earlier cohort used: local_longmemeval_qa.CASE_IDS, longmemeval_independent_cases.CASE_IDS, native_investigation_hundred_cases.EARLY_CASE_IDS, the frozen 100-question development selection recomputed by native_investigation_hundred_cases.select_rows on the pinned dataset, framing_v5_preference_cases.PROJECTION_PINS and framing_v4_temporal_cases.PROJECTION_PINS. Stratify the unused questions by question_type; questions whose question_id ends in _abs form the abstention stratum regardless of type. Within each stratum order by sha256(rank_domain + NUL + question_id, UTF-8) hex, then question_id, and take the first 12 per answerable type and the first 5 abstentions. A stratum with fewer unused questions than its quota contributes what it has and is recorded as short. Selection reads question_id and question_type only; questions, answers, dates and sessions are never read before the identities are frozen.",
+  "selection_uses_answers": false,
+  "selection_uses_history_or_question_content": false,
+  "selection_uses_positive_labels": false,
+  "short_strata": [
+    "single-session-preference"
+  ],
+  "source": {
+    "bytes": 277383467,
+    "name": "longmemeval_s_cleaned.json",
+    "records": 500,
+    "revision": "98d7416c24c778c2fee6e6f3006e7a073259d48f",
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+  },
+  "strata": {
+    "abstention": {
+      "available": 12,
+      "quota": 5,
+      "short": false,
+      "taken": 5
+    },
+    "knowledge-update": {
+      "available": 51,
+      "quota": 12,
+      "short": false,
+      "taken": 12
+    },
+    "multi-session": {
+      "available": 90,
+      "quota": 12,
+      "short": false,
+      "taken": 12
+    },
+    "single-session-assistant": {
+      "available": 38,
+      "quota": 12,
+      "short": false,
+      "taken": 12
+    },
+    "single-session-preference": {
+      "available": 0,
+      "quota": 12,
+      "short": true,
+      "taken": 0
+    },
+    "single-session-user": {
+      "available": 45,
+      "quota": 12,
+      "short": false,
+      "taken": 12
+    },
+    "temporal-reasoning": {
+      "available": 95,
+      "quota": 12,
+      "short": false,
+      "taken": 12
+    }
+  },
+  "unused_count": 331,
+  "usage_rule": "Held-out. Not for tuning, prompt iteration, retrieval parameter choice, or any decision before a registered comparison (docs/DESIGN-REPAIR-PLAN.md P6). Any run on it must be declared before generation and reported in full.",
+  "version": "boros-heldout-cohort-v1"
+}
