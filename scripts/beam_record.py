@@ -141,7 +141,7 @@ RECORD_HEADING = ("Host record entries (quoted by the host; not the current requ
                   "earlier message, its turn number and who wrote it, then the host's statement and an exact quote from the "
                   "original message. Turn numbers increase with time: an entry with a lower turn number was said earlier.\n"
                   "entries:\n")
-CITATION = re.compile(r"\[([ER]\d+)\]")
+CITATION = re.compile(r"\[([ERX]\d+)\]")
 
 
 class RecordError(Exception):
@@ -318,8 +318,9 @@ def load_record(output: Path, name: str, blocks: int) -> list:
         if not path.exists():
             continue
         for position, entry in enumerate(json.loads(path.read_text())["entries"]):
-            entries.append({**entry, "id": f"{name}:{entry['seq']}:{position}"})
-    entries.sort(key=lambda entry: (entry["seq"], entry["id"]))
+            entries.append({**entry, "id": f"{name}:{entry['seq']}:{position}", "position": position})
+    # Message order, then the extractor's order within the exchange (the reply's entries follow the user's).
+    entries.sort(key=lambda entry: (entry["seq"], entry["position"]))
     return entries
 
 
@@ -598,11 +599,12 @@ def candidate_messages(captured: list, body: str, framing: str) -> list:
     return messages
 
 
-def citation_resolution(answer: str, evidence_labels: int, record_labels: int) -> dict:
+def citation_resolution(answer: str, evidence_labels: int, record_labels) -> dict:
+    """`record_labels` is the count of R labels (R1..Rn) or the set of exchange labels (X<n>) the record message carried."""
     cited = CITATION.findall(answer)
-    resolved = sum(1 for label in cited if (label.startswith("E") and 1 <= int(label[1:]) <= evidence_labels)
-                   or (label.startswith("R") and 1 <= int(label[1:]) <= record_labels))
-    return {"citations": len(cited), "resolved": resolved, "record_citations": sum(1 for label in cited if label.startswith("R"))}
+    allowed = record_labels if isinstance(record_labels, (set, frozenset)) else {f"R{n}" for n in range(1, (record_labels or 0) + 1)}
+    resolved = sum(1 for label in cited if (label.startswith("E") and 1 <= int(label[1:]) <= evidence_labels) or label in allowed)
+    return {"citations": len(cited), "resolved": resolved, "record_citations": sum(1 for label in cited if not label.startswith("E"))}
 
 
 def listing_line(entry: dict, label: int) -> str:
@@ -1358,7 +1360,8 @@ def score(args):
                 unknown[arm] += verdict is None
                 used.append(stage)
                 if text is not None:
-                    record_labels = len(json.loads((output / "selections" / (label + ".body.json")).read_text())["entry_ids"]) if stage == "candidate" else 0
+                    body = json.loads((output / "selections" / (label + ".body.json")).read_text()) if stage == "candidate" else {}
+                    record_labels = set(body["labels"]) if body.get("labels") else len(body.get("entry_ids") or [])
                     citations[arm].append(citation_resolution(text, rows[label]["delivered_recent"] + rows[label]["delivered_excerpts"], record_labels))
             per_question[label][arm] = accepted / n_replicates
             provenance.setdefault(label, {})[arm] = used
