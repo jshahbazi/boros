@@ -475,7 +475,15 @@ enum ExchangeBlockQueryChecks {
         let a1Whole = try ExchangeBlockQuery.pages(index, a1Source).reduce(0) { $0 + (try ExchangeBlockQuery.estimatedTokens($1, selectionVersion: version)) }
         let a1Windows = try ExchangeBlockQuery.passages(index, a1Source, terms: ["zebra", "habitat"])
             .reduce(0) { $0 + (try ExchangeBlockQuery.estimatedTokens($1, selectionVersion: version)) }
-        let windowBudget = tight.estimatedTokens + a1Windows + 8
+        // A budget that holds every short source whole plus the windows of
+        // the long reply, but not the long reply whole.
+        var shortCost = 0
+        for source in index.sources.indices where source != a1Source {
+            for page in try ExchangeBlockQuery.pages(index, source) {
+                shortCost += try ExchangeBlockQuery.estimatedTokens(page, selectionVersion: version)
+            }
+        }
+        let windowBudget = shortCost + a1Windows + 8
         let passagePlan = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: windowBudget,
             auditBudget: 100_000, selectionVersion: version, passageTerms: ["zebra", "habitat"])
         let wholePlan = try Packing.plan(index: index, ranked: ranked, maximumSpans: 48, tokenBudget: windowBudget,

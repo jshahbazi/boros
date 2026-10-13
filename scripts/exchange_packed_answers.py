@@ -382,9 +382,11 @@ def load_captures(output: Path):
     manifest = json.loads((output / "captures.json").read_text())
     require(manifest.get("version") == VERSION, "captures_version")
     summary = manifest["summary"]
-    require(len(manifest["rows"]) == QUESTIONS * len(ARMS), "captures_not_146")
+    # A capture may hold more arms than this run configures (an arm captured for a comparison that was
+    # not answered); every configured arm must be complete.
+    require(len(manifest["rows"]) >= QUESTIONS * len(ARMS) and len(manifest["rows"]) % QUESTIONS == 0, "captures_not_146")
     for arm in ARMS:
-        require(summary[arm]["complete"] == summary[arm]["framing_v4"] == QUESTIONS, "captures_incomplete")
+        require(arm in summary and summary[arm]["complete"] == summary[arm]["framing_v4"] == QUESTIONS, "captures_incomplete")
     require(summary[BASELINE]["delivery_matches_reference"] == QUESTIONS, "baseline_does_not_match_reference")
     return manifest
 
