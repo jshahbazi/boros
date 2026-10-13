@@ -124,6 +124,33 @@ class Contracts(unittest.TestCase):
         with self.assertRaises(ms.MultiSourceError):
             ms.candidate_messages([{"role": "system", "content": "other"}] + captured[1:], ["n"], FRAMING)
 
+    def test_quotes_design_selects_labels_and_quotes_original_user_text(self):
+        selected, dropped = ms.parse_selection("[S3]\n- [S1]\nS2.\n[S9]\nsomething else\n[S3]\nNONE", {"S1", "S2", "S3"})
+        self.assertEqual((selected, dropped), (["S3", "S1", "S2"], 2))
+        self.assertEqual(ms.parse_selection("NONE", {"S1"}), ([], 0))
+        self.assertEqual(ms.gathered_selection([["S1", "S2", "S3"], [], ["S7", "S8"]], limit=3), ["S1", "S2", "S7"])
+        self.assertEqual(ms.gathered_selection([[], []]), [])
+        self.assertEqual(ms.cut("a  b\nc", 10), "a b c")
+        self.assertTrue(ms.cut("word " * 100, 40).endswith(" …"))
+        self.assertLessEqual(len(ms.cut("word " * 100, 40)), 42)
+        items, _ = ms.snippets(case(), "marathon long run progress")
+        quotes = ms.quoted_exchanges(case(), items, ["S4", "S1"], {"marathon"})
+        self.assertTrue(quotes.startswith("[S1] 2024-01-05, turn 0\nuser: I started training for the marathon in Boston."))
+        self.assertIn("\n\n[S4] 2024-03-20, turn 6\nuser: Marathon update: ", quotes)
+        self.assertIn("\nassistant: Nice.", quotes)
+        self.assertNotIn("[S2]", quotes)
+        captured = [{"role": "system", "content": "Base.\n\n" + FRAMING}, {"role": "user", "content": "quoted E1"},
+                    {"role": "user", "content": "the question"}]
+        messages = ms.candidate_messages(captured, quotes, FRAMING, design="quotes")
+        self.assertEqual(messages[0]["content"], "Base.\n\n" + FRAMING + " " + ms.QUOTES_FRAMING_SENTENCE)
+        self.assertEqual(messages[2]["content"], ms.QUOTES_HEADING + quotes)
+        self.assertEqual(messages[3], captured[2])
+        with self.assertRaises(ms.MultiSourceError):
+            ms.candidate_messages(captured, quotes, FRAMING, design="other")
+        self.assertIn("NONE", ms.SELECT_SYSTEM)
+        self.assertEqual([m["role"] for m in ms.map_chunks("Q?", items, system=ms.SELECT_SYSTEM)[0]["messages"]], ["system", "user"])
+        self.assertEqual(ms.map_chunks("Q?", items, system=ms.SELECT_SYSTEM)[0]["messages"][0]["content"], ms.SELECT_SYSTEM)
+
     def test_citation_resolution_counts_delivered_and_snippet_labels(self):
         value = ms.citation_resolution("See [E1] and [E40], also [S2] and [S9].", 10, {"S1", "S2"})
         self.assertEqual(value, {"citations": 4, "resolved": 2, "snippet_citations": 2})
