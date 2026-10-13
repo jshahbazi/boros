@@ -72,15 +72,18 @@ PARITY_ARMS = tuple(rebuild for _, rebuild in PARITY_PAIRS)
 PERSISTENT_INDEX_LABEL = "persistent_sidecar"
 REBUILD_INDEX_LABEL = "in_memory_per_turn"
 ARMS = ("recent_only", "lexical", "hybrid", ORDINARY_SEND_ARM, "exchange_lexical", "exchange_adjacent",
-        "exchange_packed") + GLOBAL_ARMS + PARITY_ARMS
+        "exchange_packed", "exchange_wide", "exchange_leads", "exchange_wide_leads") + GLOBAL_ARMS + PARITY_ARMS
 PRIMARY_ARM = ORDINARY_SEND_ARM
 # Declared before measurement: the ranked candidate list traced by the v1/16
 # assembler, which is also the number of evidence spans it may deliver.
 DECLARED_CANDIDATE_DEPTH = 16
 # Declared before measurement (P2 step 3): the exchange_packed arm records its
 # candidate units (the top 32 ranked blocks and their adjacent neighbors) before
-# packing; its R1 is computed from that list, independently of delivery.
+# packing; its R1 is computed from that list, independently of delivery. The
+# exchange_wide arm records 48 blocks (docs/EVIDENCE-ALLOWANCE.md); each arm's
+# audit carries the depth it declared, which the scorer reads.
 PACKED_CANDIDATE_BLOCK_DEPTH = 32
+WIDE_CANDIDATE_BLOCK_DEPTH = 48
 PACKED_CANDIDATE_ID_DIGITS = 12
 KNOWN_MISSES = ("51c32626", "1b9b7252", "4baee567", "1a1907b4")
 PROCESS_TIMEOUT = 1800
@@ -477,7 +480,9 @@ def score_attempt(attempt, case):
     packed = (attempt.get("exchange") or {}).get("candidates")
     units = {}
     if packed is not None:
-        require(len(packed) <= PACKED_CANDIDATE_BLOCK_DEPTH, "packed_candidate_depth_exceeded")
+        declared_depth = (attempt.get("exchange") or {}).get("candidate_block_depth")
+        require(declared_depth in (PACKED_CANDIDATE_BLOCK_DEPTH, WIDE_CANDIDATE_BLOCK_DEPTH), "packed_candidate_depth_undeclared")
+        require(len(packed) <= declared_depth, "packed_candidate_depth_exceeded")
         for rank, (_anchors, members) in enumerate(packed):
             for short, kind, code in members:
                 # Members of a block take precedence over the same source as a neighbor.
@@ -757,6 +762,9 @@ def run(args):
                  "exchange_lexical": "explicit P2 step 1 policy selected-model-context-components-v3-exchange; no semantic index",
                  "exchange_adjacent": "explicit P2 step 1+2 policy selected-model-context-components-v3-exchange-adjacent; no semantic index",
                  "exchange_packed": "P2 step 3 policy selected-model-context-components-v3-exchange-packed, pinned; no semantic index; the ordinary Send default since October 12, 2026",
+                 "exchange_wide": "evidence-allowance variant selected-model-context-components-v3-exchange-wide, pinned: the exchange_packed query, ranking and packer with a 16,000-token evidence cap, 64 spans, a 48-block window and a 40 KiB delivery audit; no semantic index (docs/EVIDENCE-ALLOWANCE.md)",
+                 "exchange_leads": "lead-priority variant selected-model-context-components-v3-exchange-leads, pinned: exchange_packed's caps and window, every candidate lead packed before any reply or neighbor (docs/EVIDENCE-ALLOWANCE.md)",
+                 "exchange_wide_leads": "lead-priority variant selected-model-context-components-v3-exchange-wide-leads, pinned: exchange_wide's caps and window, every candidate lead packed before any reply or neighbor (docs/EVIDENCE-ALLOWANCE.md)",
                  "global_hybrid": "hybrid strategy, every eligible chunk searched, shipped reciprocal-rank fusion (evaluation option)",
                  "global_fill": "hybrid strategy, every eligible chunk searched, lexical primaries first, semantic fills empty slots (evaluation option)",
                  "exchange_adjacent_rebuild": "exchange_adjacent over the per-turn in-memory rebuild (parity arm; the policy reads the persistent index)",
@@ -764,6 +772,7 @@ def run(args):
         "definitions": {
             "r1": f"every annotated positive turn is delivered, in recent context, or among the first {DECLARED_CANDIDATE_DEPTH} ranked candidates traced before span and token limits",
             "r1_exchange_packed": f"every annotated positive turn is in recent context or among the candidate units (sources of the top {PACKED_CANDIDATE_BLOCK_DEPTH} ranked exchange blocks and their adjacent opposite-role neighbors) recorded before packing",
+            "r1_exchange_wide": f"as r1_exchange_packed over the top {WIDE_CANDIDATE_BLOCK_DEPTH} ranked blocks; a deeper window raises R1 by construction, so R2 decides",
             "r2": "every annotated positive turn is delivered whole (union of delivered byte ranges covers the source) after component token fitting and admission",
             "feasible": "a separate declared-source control delivers every positive turn whole with no evidence exclusions under the same caps",
             "denominator": "answerable cases minus infeasible ones; preparation and control failures stay in it"},

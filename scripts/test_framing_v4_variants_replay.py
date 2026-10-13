@@ -74,7 +74,8 @@ class Contracts(unittest.TestCase):
         framing = (SOURCES / "ContextSourceFraming.swift").read_text()
         self.assertIn('static let adviceSelectionVersion = "context-source-snapshot-v4-advice"', framing)
         self.assertIn('static let orderedConclusionSelectionVersion = "context-source-snapshot-v4-ordered"', framing)
-        self.assertIn("static let defaultSelectionVersion = quotedSelectionVersion", framing)
+        # V4-advice is the default since October 12, 2026 (docs/EVIDENCE-ALLOWANCE.md); V4 stays selectable.
+        self.assertIn("static let defaultSelectionVersion = adviceSelectionVersion", framing)
         self.assertIn("evaluationOnlySelectionVersions: Set<String> = [insufficientEvidenceAblationSelectionVersion]", framing)
         checks = {"RecentSourceFramingChecks.swift", "ComponentPreparationChecks.swift"}
         for constant, raw in (("adviceSelectionVersion", plan.ADVICE), ("orderedConclusionSelectionVersion", plan.ORDERED)):

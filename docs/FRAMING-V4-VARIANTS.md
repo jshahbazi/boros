@@ -1,5 +1,7 @@
 # Framing V4 variants: V4-advice and V4-ordered
 
+Update, October 12, 2026: **V4-advice is the default framing** (`ContextSourceFraming.defaultSelectionVersion`), by the coordinator's mandate on a judged, paired measurement that this record's lexical replay could not make. On the 72 step 3 retrieval questions, with the Vertex Gemini 3.8 Flash reader and the default Gemini judge, V4-advice against V4 on identical `exchange_packed` requests raised the mean per-question accept rate from 72.7 to 79.2 percent (+6.5 points, paired bootstrap interval +2.3 to +11.6; 8 questions better, 0 worse; preference-27 +17.3 points, the other cohorts tied). See [EVIDENCE-ALLOWANCE.md](EVIDENCE-ALLOWANCE.md). The status below describes October 9, 2026, when V4 was the default; V4 and V4-ordered stay selectable with `--context-framing`.
+
 Status, October 9, 2026:
 
 - **Implemented:** `context-source-snapshot-v4-advice` (V4-advice) and `context-source-snapshot-v4-ordered` (V4-ordered). Both are selectable only with `--answer-evaluation --context-framing`. **V4 stays the default.** Runner document version 10 (the development cohort's 25 answerable temporal-reasoning questions for the ordinary path), the replay driver `scripts/framing_v4_variants_replay.py` and the self-contradiction detector `boros-self-contradiction-detector-v1` are implemented with synthetic contracts.

@@ -158,6 +158,38 @@ struct ContextComponentPolicy: Codable, Equatable {
         value.version = "selected-model-context-components-v3-exchange-packed"
         return value
     }()
+    /// Evidence-allowance variant of `exchange_packed` (R5 of the context
+    /// diagnostic response): the same query, ranking, neighbors and packer,
+    /// with a 16,000-token evidence cap instead of 12,000, 64 spans instead
+    /// of 48, a 48-block candidate window instead of 32, and a 40 KiB
+    /// delivery-audit limit instead of 32 KiB so the audit does not bind
+    /// before the token cap. The admission receipt that carries the audit
+    /// (base64) stays under the store's 64 KiB metadata limit. An explicit
+    /// policy; whether it is the default is recorded at `currentSelectedQwen`
+    /// (docs/EVIDENCE-ALLOWANCE.md).
+    static let selectedQwenExchangeWide: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-wide"
+        value.evidenceTokens = 16_000
+        value.evidenceSpans = 64
+        return value
+    }()
+    /// Lead-priority variants of the value-density packer: every candidate
+    /// block's lead (the human turn that opens it) is packed before any reply
+    /// or neighbor, each group by value per cost. `exchange_leads` keeps the
+    /// `exchange_packed` caps and window; `exchange_wide_leads` keeps the wide
+    /// ones. Explicit policies for the evidence-allowance measurement
+    /// (docs/EVIDENCE-ALLOWANCE.md).
+    static let selectedQwenExchangeLeads: ContextComponentPolicy = {
+        var value = selectedQwenExchange
+        value.version = "selected-model-context-components-v3-exchange-leads"
+        return value
+    }()
+    static let selectedQwenExchangeWideLeads: ContextComponentPolicy = {
+        var value = selectedQwenExchangeWide
+        value.version = "selected-model-context-components-v3-exchange-wide-leads"
+        return value
+    }()
     static let exchangeSelectionAuditVersion = "context-exchange-v1"
     /// The policy ordinary selected-Qwen Send freezes, and the default of
     /// unpinned public evaluation (`AnswerEvaluationCommand`). User decision,
@@ -172,10 +204,23 @@ struct ContextComponentPolicy: Codable, Equatable {
 
     var usesBoundedNeighborhood: Bool { self == Self.selectedQwenNeighborhood }
     var usesExchangeQuery: Bool {
-        self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent || self == Self.selectedQwenExchangePacked
+        self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent || packsExchangeValueDensity
     }
-    var packsAdjacentExchanges: Bool { self == Self.selectedQwenExchangeAdjacent || self == Self.selectedQwenExchangePacked }
-    var packsExchangeValueDensity: Bool { self == Self.selectedQwenExchangePacked }
+    var packsAdjacentExchanges: Bool { self == Self.selectedQwenExchangeAdjacent || packsExchangeValueDensity }
+    var packsExchangeValueDensity: Bool {
+        self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide
+            || self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads
+    }
+    /// The evidence-allowance variants of the value-density packer.
+    var widensEvidenceWindow: Bool { self == Self.selectedQwenExchangeWide || self == Self.selectedQwenExchangeWideLeads }
+    /// The lead-priority variants: candidate leads before replies and neighbors.
+    var packsLeadsFirst: Bool { self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads }
+    /// Value-density packing parameters that follow the policy. `exchange_packed`
+    /// keeps the values declared for it on October 8, 2026 (docs/P2-PACKING.md).
+    var candidateBlockDepth: Int { widensEvidenceWindow ? 48 : 32 }
+    /// Hard limit of `ContextSnapshot.deliveryAudit()` for an episode under
+    /// this policy. Every policy but the wide variant keeps the 32 KiB limit.
+    var deliveryAuditBytes: Int { widensEvidenceWindow ? 40_960 : ContextSnapshot.defaultDeliveryAuditLimit }
     var selectionAuditVersion: String {
         usesBoundedNeighborhood ? "context-neighborhood-v2"
             : usesExchangeQuery ? Self.exchangeSelectionAuditVersion : "context-geometric-v1"
@@ -207,7 +252,8 @@ struct ContextComponentPolicy: Codable, Equatable {
     func validated() throws -> ContextComponentPolicy {
         guard self == Self.selectedQwen || self == Self.selectedQwenNeighborhood
             || self == Self.selectedQwenExchange || self == Self.selectedQwenExchangeAdjacent
-            || self == Self.selectedQwenExchangePacked else { throw EpisodeBudgetError.invalid }
+            || self == Self.selectedQwenExchangePacked || self == Self.selectedQwenExchangeWide
+            || self == Self.selectedQwenExchangeLeads || self == Self.selectedQwenExchangeWideLeads else { throw EpisodeBudgetError.invalid }
         return self
     }
 

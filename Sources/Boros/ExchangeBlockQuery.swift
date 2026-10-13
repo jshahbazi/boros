@@ -603,8 +603,15 @@ enum ExchangeBlockQuery {
 
     /// Retrieval audit `mode` of a turn that the policy's exchange selection served.
     static func retrievalMode(_ policy: ContextComponentPolicy) -> String {
-        policy.packsExchangeValueDensity ? "exchange_packed"
-            : policy.packsAdjacentExchanges ? "exchange_adjacent" : "exchange_lexical"
+        if policy.packsExchangeValueDensity {
+            switch (policy.widensEvidenceWindow, policy.packsLeadsFirst) {
+            case (false, false): return "exchange_packed"
+            case (true, false): return "exchange_wide"
+            case (false, true): return "exchange_leads"
+            case (true, true): return "exchange_wide_leads"
+            }
+        }
+        return policy.packsAdjacentExchanges ? "exchange_adjacent" : "exchange_lexical"
     }
 
     /// A turn that neither exchange index can serve because the project is

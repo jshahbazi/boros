@@ -23,14 +23,23 @@ enum ContextSourceFraming {
     static let insufficientEvidenceAblationSelectionVersion = "context-source-snapshot-v4-no-g"
     /// V4 plus only V5's advice clause (docs/FRAMING-V4-VARIANTS.md): advice
     /// and suggestions are tailored to user details from any quoted source.
-    /// V4's fix G sentences are unchanged. Selectable for evaluation; not the default.
+    /// V4's fix G sentences are unchanged. The default since October 12,
+    /// 2026: on the 72 step 3 retrieval questions with the Vertex Gemini 3.8
+    /// Flash reader and the default judge it raised the mean per-question
+    /// accept rate from 72.7 to 79.2 percent against V4 on identical
+    /// requests (paired interval +2.3 to +11.6 points; 8 questions better,
+    /// none worse), all of it on preference questions
+    /// (docs/EVIDENCE-ALLOWANCE.md). V4 stays selectable.
     static let adviceSelectionVersion = "context-source-snapshot-v4-advice"
     /// V4 plus one instruction to state the supporting facts and any date or
     /// count arithmetic before the conclusion, and never revise a stated
     /// conclusion (docs/FRAMING-V4-VARIANTS.md). Selectable for evaluation; not the default.
     static let orderedConclusionSelectionVersion = "context-source-snapshot-v4-ordered"
     /// New episodes, ordinary Send and unpinned evaluation runs use this.
-    static let defaultSelectionVersion = quotedSelectionVersion
+    /// V4-advice since October 12, 2026 (user mandate on measured answer
+    /// quality; docs/EVIDENCE-ALLOWANCE.md). V4 was the default from
+    /// October 7 to October 12, 2026.
+    static let defaultSelectionVersion = adviceSelectionVersion
     /// Versions with the V4 quoted presentation: host-quoted recent sources,
     /// citation labels, the label map and V4's recent and historical bytes.
     /// They differ only in the fixed System framing.

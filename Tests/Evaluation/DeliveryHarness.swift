@@ -102,6 +102,9 @@ enum DeliveryHarness {
         case "exchange_lexical": limits.componentPolicy = .selectedQwenExchange
         case "exchange_adjacent": limits.componentPolicy = .selectedQwenExchangeAdjacent
         case "exchange_packed": limits.componentPolicy = .selectedQwenExchangePacked
+        case "exchange_wide": limits.componentPolicy = .selectedQwenExchangeWide
+        case "exchange_leads": limits.componentPolicy = .selectedQwenExchangeLeads
+        case "exchange_wide_leads": limits.componentPolicy = .selectedQwenExchangeWideLeads
         case "exchange_adjacent_rebuild": limits.componentPolicy = .selectedQwenExchangeAdjacent
         case "exchange_packed_rebuild": limits.componentPolicy = .selectedQwenExchangePacked
         default: return nil
