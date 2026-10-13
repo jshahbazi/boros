@@ -100,7 +100,8 @@ def main():
                              ("beam-exchange-packed", "test_beam_exchange_packed.py"),
                              ("reader-choice", "test_reader_choice.py"),
                              ("beam-cohort", "test_beam_cohort.py"),
-                             ("beam-multi-source", "test_beam_multi_source.py")):
+                             ("beam-multi-source", "test_beam_multi_source.py"),
+                             ("beam-record", "test_beam_record.py")):
             checked = subprocess.run([sys.executable, str(ROOT / "scripts" / script)],
                                      capture_output=True, text=True, env=env, timeout=60)
             report = json.loads(checked.stdout)
