@@ -715,7 +715,8 @@ def grade_declare(args):
              if cohort.label_of(control["question_id"]) in set(declaration["labels"])]
     answered = []
     for stage in ("baseline", "candidate"):
-        for (label, replicate), record in sorted(records[stage].items()):
+        for (label, replicate), stage_records_ in sorted(records[stage].items()):
+            record = stage_records_[0]
             text = answer_text(output, stage, label, replicate)
             if record.get("skipped") or text is None:
                 continue
