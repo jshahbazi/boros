@@ -69,8 +69,10 @@ GRADERS = {"gemini-3.8-flash": {"route": "gemini", "pricing": va.Pricing("1.50",
            "claude-sonnet-5-5": {"route": "anthropic", "pricing": va.Pricing("2.00", "10.00")}}
 PRICING = GRADERS[READER]["pricing"]
 PRICE_SOURCE = beam.PRICE_SOURCE
+# Caps are worst-case bounds: every request reserves its full output allowance (the thinking allowance
+# included) until its usage is known. Measured spend is far below them (docs/MULTI-SOURCE-ANSWERS.md).
 ANSWER_CAP_USD = Decimal("30")
-GRADE_CAP_USD = Decimal("14")
+GRADE_CAPS_USD = {"gemini-3.8-flash": Decimal("40"), "claude-sonnet-5-5": Decimal("50")}
 BOOTSTRAP_RESAMPLES = 10000
 # Map step limits (declared before measurement).
 SNIPPET_BLOCKS = 120
@@ -701,7 +703,7 @@ def grade_declare(args):
         rendered.append(replay.digest(replay.canonical(messages)))
         worst += pricing.microusd(math.ceil(sum(len(m["content"]) for m in messages) / 2) + 16, beam.GRADE_OUTPUT_TOKENS)
     worst *= REPLICATES
-    require(Decimal(worst) / 10**6 <= GRADE_CAP_USD, "grade_worst_case_exceeds_cap")
+    require(Decimal(worst) / 10**6 <= GRADE_CAPS_USD[args.grader], "grade_worst_case_exceeds_cap")
     jobs = [{"item": item["item"], "replicate": replicate} for replicate in range(REPLICATES) for item in items]
     replay.private_directory(directory)
     document = {"version": VERSION, "kind": "beam-multi-source-grade-declaration", "declared_at_utc": beam.now(),
@@ -715,7 +717,8 @@ def grade_declare(args):
                                     "no invalid control, or the answer grades are reported as not accepted",
                 "vote": "majority of three on `correct`; fewer than two valid agreeing replicates is unknown (not correct)",
                 "items": items, "rendered_messages_sha256": rendered, "jobs": jobs,
-                "spending_cap_usd": str(GRADE_CAP_USD), "worst_case_usd": str(Decimal(worst) / 10**6), "drivers": drivers()}
+                "spending_cap_usd": str(GRADE_CAPS_USD[args.grader]), "worst_case_usd": str(Decimal(worst) / 10**6),
+                "drivers": drivers()}
     replay.private_write(directory / "grade-declaration.json", replay.canonical(document) + b"\n")
     replay.private_write(directory / "grade-ledger.jsonl", b"")
     print(json.dumps({"grader": args.grader, "items": len(items), "controls": sum(1 for item in items if item["kind"] != "answer"),
