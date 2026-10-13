@@ -1053,8 +1053,9 @@ def score(args):
     members = {category: [label for label in labels if rows[label]["category"] == category] for category in cohort.CATEGORIES}
     by_category = {category: paired(per_question, members[category], seed) for category in cohort.CATEGORIES if members[category]}
     routed_labels = [label for label in labels if label in routed]
+    unrouted_labels = [label for label in labels if label not in routed]
     subsets = {"routed": paired(per_question, routed_labels, seed) if routed_labels else None,
-               "unrouted": paired(per_question, [label for label in labels if label not in routed], seed)}
+               "unrouted": paired(per_question, unrouted_labels, seed) if unrouted_labels else None}
     for scale in sorted({rows[label]["scale"] for label in labels}):
         subsets["scale_" + scale] = paired(per_question, [label for label in labels if rows[label]["scale"] == scale], seed)
     decision = {"promote": overall["difference_points"] >= 5 and overall["interval_points"][0] >= -2
